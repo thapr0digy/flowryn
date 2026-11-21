@@ -44,6 +44,13 @@ function xml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+const BACKGROUND_SESSION = `
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>Aqua</string>
+    <string>Background</string>
+  </array>`;
+
 export interface PlistSpec {
   label: string;
   program: string[];
@@ -56,9 +63,12 @@ export interface PlistSpec {
  * The launchd agent (design section 15): absolute paths, an explicit PATH,
  * KeepAlive and log paths. KeepAlive restarts the daemon after a crash or a
  * kill, but not after a clean exit, so `flowryn daemon stop` stays stopped.
- * Flowryn rotates its own log; these files catch only crash output.
+ * Flowryn rotates its own log; these files catch only crash output. For the
+ * user/<uid> domain (no desktop session) it also names the Background session
+ * type: a plist without one defaults to Aqua, which user/<uid> refuses ("134:
+ * Service cannot load in requested session").
  */
-export function renderPlist(spec: PlistSpec): string {
+export function renderPlist(spec: PlistSpec, domain?: string): string {
   const args = spec.program.map((a) => `    <string>${xml(a)}</string>`).join("\n");
   const env = Object.entries(spec.env)
     .map(([k, v]) => `    <key>${xml(k)}</key>\n    <string>${xml(v)}</string>`)
@@ -87,7 +97,7 @@ ${env}
     <false/>
   </dict>
   <key>ThrottleInterval</key>
-  <integer>10</integer>
+  <integer>10</integer>${domain?.startsWith("user/") ? BACKGROUND_SESSION : ""}
   <key>StandardOutPath</key>
   <string>${xml(join(spec.logDir, "launchd.out.log"))}</string>
   <key>StandardErrorPath</key>
@@ -156,58 +166,114 @@ export const LAUNCHD_DEPS: LaunchdDeps = {
   bootstrapBackoffMs: [250, 500, 1_000, 2_000],
 };
 
-/** The per-user launchd domain the agent lives in. */
-export function launchdDomain(): string {
-  return `gui/${userInfo().uid}`;
+/**
+ * The per-user launchd domains, in the order they are tried: the desktop
+ * session's, then user/<uid>, which is the only one while the Mac has no
+ * desktop login (only SSH): there gui/<uid> answers "125: Domain does not
+ * support specified action".
+ */
+function userDomains(): [gui: string, user: string] {
+  const uid = userInfo().uid;
+  return [`gui/${uid}`, `user/${uid}`];
 }
 
-async function loaded(label: string, deps: LaunchdDeps): Promise<boolean> {
-  return (await deps.launchctl(["print", `${launchdDomain()}/${label}`])).exitCode === 0;
+interface LoadedAgent {
+  domain: string;
+  output: string;
+}
+
+/** Every copy of the agent launchd has loaded: the Aqua+Background plist can be loaded in gui/<uid> and user/<uid> at once. */
+async function loadedAgents(label: string, deps: LaunchdDeps): Promise<LoadedAgent[]> {
+  const loaded: LoadedAgent[] = [];
+  for (const domain of userDomains()) {
+    const printed = await deps.launchctl(["print", `${domain}/${label}`]);
+    if (printed.exitCode === 0) loaded.push({ domain, output: printed.output });
+  }
+  return loaded;
+}
+
+function runningPid(output: string): number | null {
+  const match = /^\s*pid = (\d+)\s*$/m.exec(output);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The agent as launchd prints it, with the domain it is loaded in: the copy
+ * that runs a pid, else the first loaded copy; null when it is loaded in neither.
+ */
+export async function printAgent(label: string, deps: LaunchdDeps): Promise<LoadedAgent | null> {
+  const loaded = await loadedAgents(label, deps);
+  return loaded.find((agent) => runningPid(agent.output) !== null) ?? loaded[0] ?? null;
+}
+
+/** The domain a bootstrap loads the agent into: gui/<uid> while a desktop session exists, else user/<uid>. */
+export async function bootstrapDomain(deps: LaunchdDeps = LAUNCHD_DEPS): Promise<string> {
+  const [gui, user] = userDomains();
+  return (await deps.launchctl(["print", gui])).exitCode === 0 ? gui : user;
+}
+
+/** The domain every launchctl call on the agent addresses: the one it is loaded in, else the one a bootstrap would load it into. */
+export async function launchdDomain(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<string> {
+  return (await printAgent(label, deps))?.domain ?? (await bootstrapDomain(deps));
 }
 
 export async function isLoaded(label: string): Promise<boolean> {
   if (process.platform !== "darwin") return false;
-  return loaded(label, LAUNCHD_DEPS);
+  return (await printAgent(label, LAUNCHD_DEPS)) !== null;
 }
 
 /**
- * Boot the agent out and wait until launchd has actually unloaded it: bootout
- * returns before the service is gone, and a bootstrap in that window fails
- * with "5: Input/output error". Returns false when it was still loaded at the timeout.
+ * Boot the agent out of every domain it is loaded in and wait until launchd
+ * has actually unloaded it from all of them: bootout returns before the
+ * service is gone, and a bootstrap in that window fails with "5: Input/output
+ * error". Returns false when it was still loaded at the timeout.
  */
 export async function unloadAgent(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<boolean> {
-  await deps.launchctl(["bootout", `${launchdDomain()}/${label}`]);
+  const targets = (await loadedAgents(label, deps)).map((agent) => `${agent.domain}/${label}`);
+  if (targets.length === 0) return true;
+  const loaded = async () => {
+    for (const target of targets) if ((await deps.launchctl(["print", target])).exitCode === 0) return true;
+    return false;
+  };
+  for (const target of targets) await deps.launchctl(["bootout", target]);
   for (let waited = 0; waited < deps.unloadTimeoutMs; waited += deps.unloadPollMs) {
-    if (!(await loaded(label, deps))) return true;
+    if (!(await loaded())) return true;
     await deps.sleep(deps.unloadPollMs);
   }
-  return !(await loaded(label, deps));
+  return !(await loaded());
 }
 
 /** Bootstrap the plist, unloading any earlier copy first and retrying with a bounded backoff while launchd catches up. */
 export async function loadAgent(label: string, path: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<void> {
-  if (await loaded(label, deps)) await unloadAgent(label, deps);
+  await unloadAgent(label, deps);
+  const domain = await bootstrapDomain(deps);
   const attempts = deps.bootstrapBackoffMs.length + 1;
   let last: LaunchctlResult = { exitCode: 0, output: "" };
   for (let attempt = 0; attempt < attempts; attempt++) {
-    last = await deps.launchctl(["bootstrap", launchdDomain(), path]);
+    last = await deps.launchctl(["bootstrap", domain, path]);
     if (last.exitCode === 0) return;
     const wait = deps.bootstrapBackoffMs[attempt];
     if (wait !== undefined) await deps.sleep(wait);
   }
-  const stillLoaded = await loaded(label, deps);
+  const stillLoaded = (await printAgent(label, deps)) !== null;
+  const background = domain.startsWith("user/") ? " (with no desktop session the plist needs LimitLoadToSessionType Background, which flowryn daemon install writes)" : "";
   const hint = stillLoaded
     ? `; the previous agent ${label} is still loaded, so run flowryn daemon uninstall, then flowryn daemon install again`
-    : `; check the plist with plutil -lint ${path} and launchctl print ${launchdDomain()}/${label}`;
-  throw new Error(`launchctl bootstrap ${launchdDomain()} ${path} failed after ${attempts} attempts (exit ${last.exitCode}: ${last.output || "no output"})${hint}`);
+    : `; check the plist with plutil -lint ${path} and launchctl print ${domain}/${label}${background}`;
+  throw new Error(`launchctl bootstrap ${domain} ${path} failed after ${attempts} attempts (exit ${last.exitCode}: ${last.output || "no output"})${hint}`);
 }
 
-/** Write the plist and (re)load it; launchd then starts the daemon (RunAtLoad). */
+/** The plist `daemon install` writes (and `--print` shows): rendered for the domain a bootstrap loads it into. */
+export async function servicePlist(spec: PlistSpec, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<string> {
+  return renderPlist(spec, await bootstrapDomain(deps));
+}
+
+/** Write the plist for the domain it loads into and (re)load it; launchd then starts the daemon (RunAtLoad). */
 export async function installService(spec: PlistSpec, path: string): Promise<void> {
   if (process.platform !== "darwin") throw new Error("launchd service install is macOS only; on Linux use a systemd user unit (after v1)");
   ensureDir(spec.logDir, 0o700);
   ensureDir(dirname(path), 0o755);
-  writeFileAtomic(path, renderPlist(spec), 0o644);
+  writeFileAtomic(path, await servicePlist(spec), 0o644);
   const lint = Bun.spawnSync(["/usr/bin/plutil", "-lint", path]);
   if (lint.exitCode !== 0) throw new Error(`plutil rejected ${path}: ${lint.stdout.toString()}${lint.stderr.toString()}`);
   await loadAgent(spec.label, path);
@@ -223,16 +289,14 @@ export async function uninstallService(label: string, path: string): Promise<boo
 }
 
 /** Start (or restart) an installed agent. */
-export async function kickstart(label: string): Promise<boolean> {
-  return (await launchctl(["kickstart", `${launchdDomain()}/${label}`])).exitCode === 0;
+export async function kickstart(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<boolean> {
+  return (await deps.launchctl(["kickstart", `${await launchdDomain(label, deps)}/${label}`])).exitCode === 0;
 }
 
 /** The running pid launchd reports for the agent, or null when it is not loaded or not running. */
 export async function agentPid(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<number | null> {
-  const printed = await deps.launchctl(["print", `${launchdDomain()}/${label}`]);
-  if (printed.exitCode !== 0) return null;
-  const match = /^\s*pid = (\d+)\s*$/m.exec(printed.output);
-  return match ? Number(match[1]) : null;
+  const printed = await printAgent(label, deps);
+  return printed === null ? null : runningPid(printed.output);
 }
 
 /** The parts of an installed plist a restart depends on. */

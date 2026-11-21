@@ -16,6 +16,7 @@ const PLIST = "/tmp/dev.flowryn.flowrynd.test.plist";
 const OLD_PID = 4100;
 const NEW_PID = 4200;
 const IO_ERROR: LaunchctlResult = { exitCode: 5, output: "Bootstrap failed: 5: Input/output error" };
+const NO_DOMAIN: LaunchctlResult = { exitCode: 125, output: "Could not print domain: 125: Domain does not support specified action" };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -31,19 +32,24 @@ type AgentState = "running-old" | "unloaded" | "running-new" | "spawn-scheduled"
  * The probe answers the pid of whichever daemon runs. Time is the sum of the
  * sleeps, so the waits are exact.
  */
-function scripted(opts: { bootoutStops?: boolean; bootstrapReplies?: LaunchctlResult[]; afterBootstrap?: AgentState; afterKickstart?: AgentState }) {
+function scripted(opts: { bootoutStops?: boolean; bootstrapReplies?: LaunchctlResult[]; afterBootstrap?: AgentState; afterKickstart?: AgentState; desktop?: boolean }) {
   let state: AgentState = "running-old";
   let clock = 0;
   const calls: string[] = [];
   const replies = [...(opts.bootstrapReplies ?? [])];
   const failures: RestartFailure[] = [];
   const notes: string[] = [];
+  // With no desktop session gui/<uid> does not exist and the agent lives in user/<uid>.
+  const gui = `gui/${process.getuid!()}`;
+  const domain = opts.desktop === false ? `user/${process.getuid!()}` : gui;
   const launchd: LaunchdDeps = {
     async launchctl(args) {
       const verb = args[0]!;
       calls.push(args.join(" "));
+      if (verb === "bootstrap" && args[1] !== domain) return NO_DOMAIN;
       if (verb === "print") {
-        if (state === "unloaded") return { exitCode: 113, output: "Could not find service" };
+        if (args[1] === gui) return domain === gui ? { exitCode: 0, output: `${gui} = {}` } : NO_DOMAIN;
+        if (args[1] !== `${domain}/${LABEL}` || state === "unloaded") return { exitCode: 113, output: "Could not find service" };
         const pid = state === "running-old" ? `\tpid = ${OLD_PID}\n` : state === "running-new" ? `\tpid = ${NEW_PID}\n` : "";
         const shown = state === "spawn-scheduled" ? "spawn scheduled" : "running";
         return { exitCode: 0, output: `${LABEL} = {\n\tstate = ${shown}\n${pid}\truns = 1470\n\tlast exit code = 78: EX_CONFIG\n\tproperties = managed LWCR | has LWCR | needs LWCR update\n\t\tstate = active\n}` };
@@ -99,6 +105,21 @@ describe("the restart's relaunch helper", () => {
     expect(fake.calls.some((c) => c.startsWith("kickstart"))).toBe(false);
     expect(fake.calls).toContain(`bootstrap gui/${process.getuid!()} ${PLIST}`);
     expect(fake.failures).toEqual([]);
+  });
+
+  test("with no desktop session the restart re-bootstraps the agent in user/<uid>, where it is loaded", async () => {
+    const fake = scripted({ desktop: false });
+    const outcome = await relaunch(plan, fake.deps);
+    expect(outcome).toMatchObject({ ok: true, pid: NEW_PID, via: "bootstrap" });
+    expect(fake.calls).toContain(`bootout user/${process.getuid!()}/${LABEL}`);
+    expect(fake.calls).toContain(`bootstrap user/${process.getuid!()} ${PLIST}`);
+    expect(fake.calls.some((c) => c.startsWith("bootout gui/") || c.startsWith("bootstrap gui/"))).toBe(false);
+  });
+
+  test("with no desktop session the fallback kickstart addresses user/<uid>", async () => {
+    const fake = scripted({ desktop: false, afterBootstrap: "spawn-scheduled", afterKickstart: "running-new" });
+    expect(await relaunch(plan, fake.deps)).toMatchObject({ ok: true, via: "fallback" });
+    expect(fake.calls).toContain(`kickstart user/${process.getuid!()}/${LABEL}`);
   });
 
   test("when the first bootstrap never loads the agent, the fallback bootstraps it again", async () => {
