@@ -18,7 +18,7 @@ import { createAutoMerge, getAutoMerge, HOLD_RELEASED, setReadyProgress, superse
 import { landingBatched, landingQueued, landingTrainDepth, LOCAL_TURN_WAIT_MS, MAX_INTEGRATIONS, MAX_SKIPPED_TURNS, verifyConfig } from "./config.ts";
 import { mergeInStore } from "./object-merge.ts";
 import { verifyPolicyId } from "./policy.ts";
-import { LIVE_BATCH_SQL, liveBatch as liveBatchOf } from "./batch-store.ts";
+import { LIVE_BATCH_SQL, liveBatch as liveBatchOf, markBatching, projectBatches } from "./batch-store.ts";
 import { batchCell, batchProgress, LandingBatches, type LineOps } from "./landing-batch.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
@@ -195,13 +195,10 @@ function skipTurn(db: Db, row: LandingRow, by: LandingRow, now: number): void {
 
 /**
  * Whether an entry is a batch project's (docs/notes/2026-11-21-landing-batches-one-27.md): in a
- * batch now or before, its light check queued, or its project has batched. Read from the rows, so
- * the views need no config.
+ * batch, or its project lands in batches now (as its last pass found it), so the views need no config.
  */
 function batchEntry(db: Db, row: LandingRow): boolean {
-  if (row.batch_id !== null) return true;
-  if (db.query("SELECT 1 FROM landing_batches WHERE project_id = ?1 LIMIT 1").get(row.project_id)) return true;
-  return db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'landing.light_queued' AND json_extract(payload, '$.landing') = ?2 LIMIT 1").get(row.run_id, row.id) !== null;
+  return row.batch_id !== null || projectBatches(db, row.project_id);
 }
 
 /** What `show`, `fleet` and the pr_ready line say of an entry. */
@@ -537,11 +534,12 @@ export class LandingQueue implements LandingHooks {
     const project = getProject(this.deps.db, projectId);
     if (project?.delivery_mode === "local-only") {
       const batched = landingBatched(this.deps.config(), project.id, project.delivery_mode);
+      tx(this.deps.db, () => markBatching(this.deps.db, project.id, batched, this.deps.now()));
       // Light checks run while a batch is in flight, so the next batch forms as soon as this one ends.
-      if (batched) await this.batches.lightChecks(project, this.batchable(project.id));
+      const eligible = batched ? await this.batches.lightChecks(project, this.batchable(project.id)) : [];
       // A live batch is driven (or, once the project stops batching, dissolved) before anything else lands.
       if (await this.batches.drive(project)) return;
-      if (batched) return this.advanceBatchProject(project);
+      if (batched) return this.advanceBatchProject(project, eligible);
       return this.advanceLocal(project);
     }
     const line = projectLine(this.deps.db, projectId);
@@ -797,7 +795,7 @@ export class LandingQueue implements LandingHooks {
    * sensitive entry first in line lands alone through the local line, with your record at the
    * head that lands; otherwise (or once it cannot start) the other entries form a batch.
    */
-  private async advanceBatchProject(project: ProjectRow): Promise<void> {
+  private async advanceBatchProject(project: ProjectRow, eligible: LandingRow[]): Promise<void> {
     const { db } = this.deps;
     const landingAlone = () => projectLine(db, project.id).some((r) => r.state === "landing");
     if (landingAlone()) return;
@@ -807,7 +805,7 @@ export class LandingQueue implements LandingHooks {
       await this.advanceLocal(project);
       if (landingAlone() || liveBatchOf(db, project.id)) return;
     }
-    await this.batches.build(project, this.batchable(project.id));
+    await this.batches.build(project, eligible);
   }
 
   /** A batch project's waiting entries a batch may take: every one that is not sensitive, in line order. */

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openItem } from "../../src/attention/items.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
+import { effectiveConfig } from "../../src/config/effective.ts";
+import { PROJECT_VERBS } from "../../src/lifecycle/projects.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
@@ -164,6 +166,15 @@ describe("config", () => {
     expect(lightPolicy()).not.toBe(fullPolicy(config("", true)));
     expect(fullPolicy(config("", true))).toBe(fullPolicy(config()));
   });
+
+  test("batch on a project that delivers PRs is refused where the project's mode is known: the effective config and project set", () => {
+    expect(effectiveConfig(config(), {}, { web: "local-only" })).toMatchObject({ problems: [], sections: { projects: { web: { landing: "batch" } } } });
+    expect(effectiveConfig(config(), {}, { web: "direct-PR" }).problems).toEqual([expect.stringContaining(`landing = "batch" is for local-only projects; this one delivers direct-PR`)]);
+    const projectSet = PROJECT_VERBS.find((v) => v.name === "project set")!;
+    const ctx = { db, config: () => config() } as never;
+    expect(() => tx(db, () => projectSet.apply!(ctx, { id: "web", mode: "direct-PR", "repo-url": "https://example.com/web.git" }, null))).toThrow(/landing = "batch" is for local-only projects/);
+    expect(db.query("SELECT delivery_mode FROM projects WHERE id = 'web'").get()).toEqual({ delivery_mode: "local-only" });
+  });
 });
 
 describe("a batch of routine branches", () => {
@@ -312,6 +323,19 @@ describe("conflicts and clashes", () => {
     expect(note(s2)).toContain("db/migrations/000042_users.up.sql");
     expect(events("landing.batch_clash")).toEqual([expect.objectContaining({ with: s1.task })]);
   });
+
+  test("a migration number is only compared with members taken into the batch: one that waits for a conflict sends nobody back", async () => {
+    const s1 = ship(1, { "same.txt": "one\n" });
+    const s2 = ship(2, { "same.txt": "two\n", "db/migrations/000042_users.up.sql": "a\n" });
+    const s3 = ship(3, { "db/migrations/000042_orders.up.sql": "b\n" });
+    const lq = queue();
+    await lq.pass();
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s1.task, s3.task]);
+    expect(row(s2)).toMatchObject({ state: "waiting", batch_id: null });
+    expect(row(s3).state).toBe("landing");
+    expect(runState(s3)).toBe("ready");
+    expect(events("landing.batch_clash")).toEqual([]);
+  });
 });
 
 describe("a red batch", () => {
@@ -331,6 +355,7 @@ describe("a red batch", () => {
     const items = db.query("SELECT kind, line, task_id FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { kind: string; line: string; task_id: string | null }[];
     expect(items).toHaveLength(1);
     expect(items[0]!.line).toContain(`flowryn batch drop ${b.id} ${s1.task} | flowryn batch retry ${b.id}`);
+    expect(items[0]!.task_id).toBe(s1.task);
     expect(batchView(db, held)).toMatchObject({ batch: b.id, state: "held", culprit: s1.task });
     expect(landingProgress(db, row(s2))).toContain(`landing batch ${b.id}: 2 of 3, held:`);
     // Held: nothing lands, a pass leaves it be.
@@ -404,7 +429,83 @@ describe("what keeps a batch honest", () => {
     sh(primary, ["add", "."]);
     sh(primary, ["commit", "-q", "-m", "by hand 4"]);
     await lq.pass();
-    expect(batchOf()).toMatchObject({ state: "held", reason: "base_moving" });
+    const held = batchOf();
+    expect(held).toMatchObject({ state: "held", reason: "base_moving" });
+    const item = db.query("SELECT line, task_id FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").get() as { line: string; task_id: string };
+    expect(item.task_id).toBe(s1.task);
+    expect(item.line).toEndWith(`Next: flowryn batch retry ${held.id}`);
+
+    // retry on a batch main moved under: a new batch of the same branches on main as it is, counted afresh.
+    tx(db, () => lq.batches.retry(held.id));
+    expect(getBatch(db, held.id)).toMatchObject({ state: "dissolved", reason: "retried" });
+    expect(row(s1)).toMatchObject({ state: "waiting", batch_id: null });
+    expect(runState(s1)).toBe("ready");
+    await lq.pass();
+    const rebuilt = batchOf();
+    expect(rebuilt).toMatchObject({ state: "verifying", base_sha: mainTip(), integrations: 0 });
+    expect(batchMembers(db, rebuilt.id).map((r) => r.task_id)).toEqual([s1.task]);
+    verifyBatch("passed");
+    await lq.pass();
+    expect(runState(s1)).toBe("landed");
+  });
+
+  test("dropping a branch from a batch held for main moving does not tell its worker a verify failed", async () => {
+    const s1 = ship(1, { "one.txt": "one\n" });
+    ship(2, { "two.txt": "two\n" });
+    const lq = queue();
+    await lq.pass();
+    for (let i = 1; i <= 4; i++) {
+      writeFileSync(join(primary, `hand${i}.txt`), "x\n");
+      sh(primary, ["add", "."]);
+      sh(primary, ["commit", "-q", "-m", `by hand ${i}`]);
+      await lq.pass();
+    }
+    const held = batchOf();
+    expect(held).toMatchObject({ state: "held", reason: "base_moving" });
+    tx(db, () => lq.batches.drop(held.id, s1.task));
+    expect(note(s1)).toContain(`Your leader dropped your branch from landing batch ${held.id}, held (base_moving)`);
+    expect(note(s1)).not.toContain("failed its verify");
+  });
+
+  test("a member that leaves a green batch before main takes it: the batch is rebuilt without it, and main never holds its code", async () => {
+    const s1 = ship(1, { "one.txt": "one\n" });
+    const s2 = ship(2, { "two.txt": "two\n" });
+    const lq = queue();
+    await lq.pass();
+    const b = batchOf();
+    verifyBatch("passed");
+    // Played: the batch went green and is landing, but could not land yet; then s2's worker was sent back.
+    tx(db, () => db.query("UPDATE landing_batches SET state = 'landing' WHERE id = ?1").run(b.id));
+    tx(db, () => db.query("UPDATE runs SET state = 'running' WHERE id = ?1").run(s2.run));
+    await lq.pass();
+    expect(row(s2)).toMatchObject({ state: "left", reason: "sent_back" });
+    expect(mainTip()).not.toBe(b.head_sha);
+    expect((await git(["merge-base", "--is-ancestor", s2.head, "refs/heads/main"], primary)).code).not.toBe(0);
+    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "rebuilt" });
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s1.task]);
+    expect(db.query("SELECT COUNT(*) AS n FROM merges").get()).toEqual({ n: 0 });
+  });
+
+  test("a member that leaves after main took the batch: the rest are recorded, and the leader gets an item naming it", async () => {
+    const s1 = ship(1, { "one.txt": "one\n" });
+    const s2 = ship(2, { "two.txt": "two\n" });
+    const lq = queue();
+    await lq.pass();
+    const b = batchOf();
+    verifyBatch("passed");
+    // Played: main fast-forwarded to the batch, the daemon stopped, then s2's worker was sent back.
+    tx(db, () => db.query("UPDATE landing_batches SET state = 'landing' WHERE id = ?1").run(b.id));
+    sh(primary, ["merge", "-q", "--ff-only", b.head_sha]);
+    tx(db, () => db.query("UPDATE runs SET state = 'running' WHERE id = ?1").run(s2.run));
+    await lq.pass();
+    expect(runState(s1)).toBe("landed");
+    expect(getBatch(db, b.id)!.state).toBe("landed");
+    expect(db.query("SELECT task_id FROM merges").all()).toEqual([{ task_id: s1.task }]);
+    const items = db.query("SELECT line, task_id FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { line: string; task_id: string }[];
+    expect(items).toEqual([expect.objectContaining({ task_id: s2.task })]);
+    expect(items[0]!.line).toContain("on main without a merge record");
+    await lq.pass();
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'landing_batch_held'").get()).toEqual({ n: 1 });
   });
 
   test("a stop after the fast-forward, before the merge records: the next pass records the rest, nothing twice", async () => {
@@ -483,5 +584,8 @@ describe("what keeps a batch honest", () => {
     expect(getRequest(db, b.request_id!)!.state).toBe("cancelled");
     expect(row(s1).batch_id).toBeNull();
     expect(["waiting", "landing"]).toContain(row(s1).state);
+    expect(landingProgress(db, row(s1))).not.toContain("batch");
+    expect(landingCell(db, row(s1))).not.toContain("batch");
+    expect(landingBoardLines(db)).toEqual([]);
   });
 });

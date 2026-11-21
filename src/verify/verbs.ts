@@ -312,7 +312,7 @@ const batchDrop: VerbSpec = {
 
 const batchRetry: VerbSpec = {
   name: "batch retry",
-  summary: "Verify a held landing batch once more at the same head (a load flake); once per head",
+  summary: "Retry a held landing batch: a failed verify runs once more at the same head (once per head); a batch held for main moving or a cancelled verify is rebuilt on main",
   positionals: [{ name: "batch", required: true, help: "the held landing batch (lb<n>)" }],
   flags: {},
   kind: "mutation",

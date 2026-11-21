@@ -13,7 +13,7 @@ import { DAEMON_CALLER } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergePrepared, type MergeServices } from "../policy/merge-path.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { batchLine, batchMembers, batchRef, batchRows, batchVerify, getBatch, liveBatch, type BatchRow, type BatchState } from "./batch-store.ts";
+import { batchLine, batchMembers, batchRef, batchRows, batchVerify, getBatch, liveBatch, projectBatches, type BatchRow, type BatchState } from "./batch-store.ts";
 import { landingBatched, lightVerifyConfig, MAX_BATCH, MAX_INTEGRATIONS, verifyConfig } from "./config.ts";
 import { likelyCulprit, numberClashes } from "./culprit.ts";
 import type { LandingRow, LandingState } from "./landing-queue.ts";
@@ -34,8 +34,8 @@ import { finishedAtHead, getVerification, interruptedByStop, runningVerification
  *   work back once per head, a timeout runs it once more, the rest holds the entry for the leader.
  * - Build: with no batch live, every eligible entry (delivery order, at most MAX_BATCH) is merged
  *   onto local main's tip in the object store, the batch so far as first parent and the branch as
- *   second, so main's first-parent history reads one merge commit per task. Two members adding the
- *   same numbered migration: the later goes back to renumber. A member that conflicts with main
+ *   second, so main's first-parent history reads one merge commit per task. A member adding the
+ *   same numbered migration as one already taken goes back to renumber. A member that conflicts with main
  *   goes back to its worker; one that conflicts only with an earlier member waits for the next batch.
  *   No worker branch or worktree is ever written.
  * - Verify: one request for the batch head (ref batch:<project>/<id>). A pass lands it; a timeout
@@ -44,8 +44,8 @@ import { finishedAtHead, getVerification, interruptedByStop, runningVerification
  * - Land: every member passes the merge gate first (its verify evidence is the batch's, src/policy/merge.ts);
  *   then main fast-forwards to the batch head once and each member's merge is recorded through
  *   the merge verb's path, so each run lands, is cleaned up and moves in the backlog as today.
- * - A batch's head never changes: a member leaving, main moving under it or the leader dropping a
- *   branch ends it `dissolved` and builds a new one from the members left.
+ * - A batch's head never changes: a member leaving before main takes it, main moving under it or the
+ *   leader dropping a branch ends it `dissolved` and builds a new one from the members left.
  *
  * Sensitive entries never join: they land one at a time through the local line (landing-queue.ts).
  */
@@ -171,13 +171,22 @@ export class LandingBatches {
       tx(db, () => this.dissolve(batch, "batching_off", `project ${project.id} no longer lands in batches`, "waiting"));
       return false;
     }
-    if (batch.state === "landing") {
-      await this.land(batch, project);
-      return liveBatch(db, project.id) !== null;
-    }
     const rows = batchRows(db, batch.id);
     const left = rows.filter((r) => r.state === "left");
     const live = rows.filter((r) => r.state === "landing");
+    if (batch.state === "landing") {
+      if (left.length > 0) {
+        const main = await this.mainTip(project);
+        if (!main) return true;
+        if (!(await this.isAncestor(project.path, batch.head_sha, main))) {
+          await this.rebuild(batch, project, `${left.map((r) => r.task_id).join(", ")} left it before it landed`, batch.integrations);
+          return true;
+        }
+        tx(db, () => this.flagLeftOnMain(getBatch(db, batch.id)!, left));
+      }
+      await this.land(getBatch(db, batch.id)!, project);
+      return liveBatch(db, project.id) !== null;
+    }
     if (live.length === 0) {
       tx(db, () => this.dissolve(batch, "emptied", "every branch left it", "waiting"));
       return false;
@@ -280,13 +289,14 @@ export class LandingBatches {
     const { db } = this.deps;
     const now = this.deps.now();
     const members = batchMembers(db, batch.id);
-    const drop = culprit ?? members[0]?.task_id ?? "<task>";
-    const next = `flowryn batch drop ${batch.id} ${drop}${reason === "verify_failed" && batch.retried_head !== batch.head_sha ? ` | flowryn batch retry ${batch.id}` : ""}`;
+    const owner = members.find((m) => m.task_id === culprit) ?? members[0] ?? null;
+    const retry = `flowryn batch retry ${batch.id}`;
+    const next = reason !== "verify_failed" ? retry : `flowryn batch drop ${batch.id} ${owner?.task_id ?? "<task>"}${batch.retried_head !== batch.head_sha ? ` | ${retry}` : ""}`;
     const seq = this.moveBatch(batch, "held", { reason, detail, culprit, verification_id: verification ?? batch.verification_id }, now);
     if (batch.item_id) resolveItem(db, batch.item_id, "landing.batch_held", now);
     // The digest keeps the next commands whole: the reason is cut first (the batch keeps it whole, show lb<N> prints it).
     const line = `Landing batch ${batch.id} (${batch.project_id}, ${members.length}) held: ${sanitizeLine(detail, HELD_DETAIL_CHARS)}. Next: ${next}`;
-    const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line, now });
+    const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line, taskId: owner?.task_id, runId: owner?.run_id, now });
     db.query("UPDATE landing_batches SET item_id = ?2 WHERE id = ?1").run(batch.id, item);
   }
 
@@ -383,16 +393,27 @@ export class LandingBatches {
     const now = this.deps.now();
     const seq = this.moveBatch(batch, "landing", { detail: why }, now);
     if (batch.item_id) resolveItem(db, batch.item_id, "landing.batch_stuck", now);
-    const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line: `Landing batch ${batch.id} (${batch.project_id}) passed but cannot land: ${sanitizeLine(why, HELD_DETAIL_CHARS)}; it tries again each pass. Next: flowryn show ${batch.id}`, now });
+    const owner = batchMembers(db, batch.id)[0];
+    const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line: `Landing batch ${batch.id} (${batch.project_id}) passed but cannot land: ${sanitizeLine(why, HELD_DETAIL_CHARS)}; it tries again each pass. Next: flowryn show ${batch.id}`, taskId: owner?.task_id, runId: owner?.run_id, now });
     db.query("UPDATE landing_batches SET item_id = ?2 WHERE id = ?1").run(batch.id, item);
   }
 
   /**
-   * Start a batch from the project's waiting entries: judge their light checks, then merge every
-   * eligible one onto main. `members` are the waiting, non-sensitive entries in line order.
+   * Members that left a landing batch after main already took its head: their code is on main
+   * without a merge record. One item per member for the leader, kept after the rest land. Call inside a transaction.
    */
-  async build(project: ProjectRow, waiting: LandingRow[]): Promise<void> {
-    const eligible = await this.lightChecks(project, waiting);
+  private flagLeftOnMain(batch: BatchRow, left: LandingRow[]): void {
+    const { db } = this.deps;
+    const now = this.deps.now();
+    for (const row of left) {
+      if (db.query("SELECT 1 FROM events WHERE kind = 'landing.batch_left_on_main' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.batch') = ?2").get(row.id, batch.id)) continue;
+      const seq = appendEvent(db, { source: "daemon", kind: "landing.batch_left_on_main", runId: row.run_id, taskId: row.task_id, payload: { batch: batch.id, landing: row.id, head: batch.head_sha }, ts: now }).seq;
+      openItem(db, { kind: "landing_batch_held", eventSeq: seq, line: `Landing batch ${batch.id} (${batch.project_id}): ${row.task_id} left it (${row.reason ?? "-"}) after ${batch.head_sha.slice(0, 8)} was on main, so its code is on main without a merge record. Next: flowryn show ${row.task_id}`, taskId: row.task_id, runId: row.run_id, now });
+    }
+  }
+
+  /** Start a batch of the entries this pass's light checks found eligible (lightChecks), in line order. */
+  async build(project: ProjectRow, eligible: LandingRow[]): Promise<void> {
     if (eligible.length === 0) return;
     await this.assemble(project, eligible.slice(0, MAX_BATCH), 0);
   }
@@ -479,12 +500,12 @@ export class LandingBatches {
     const main = await this.mainTip(project);
     if (!policies || !main) return;
     const files = await this.memberFiles(project, members, main);
-    const clashes = numberClashes(files.map((f) => ({ task: f.row.task_id, files: f.added })));
+    const added = (row: LandingRow) => ({ task: row.task_id, files: files.find((f) => f.row.id === row.id)?.added ?? [] });
     let tip = main;
     const taken: LandingRow[] = [];
     const skipped: { task: string; why: string }[] = [];
     for (const member of members) {
-      const clash = clashes.find((c) => c.task === member.task_id);
+      const clash = numberClashes([...taken.map(added), added(member)]).find((c) => c.task === member.task_id);
       if (clash) {
         tx(db, () => this.sendClash(member, clash.path, clash.with, clash.withPath));
         continue;
@@ -633,11 +654,15 @@ export class LandingBatches {
     const run = getRunWithPolicy(db, row.run_id);
     if (run && run.state === "ready") {
       const why = batch.culprit === taskId && batch.detail ? ` It was named the likely culprit: ${batch.detail}.` : "";
+      const text =
+        batch.reason === "verify_failed"
+          ? `${v && step ? sendBackText(v, step, "Landing batch") : `Landing batch ${batch.id} failed its verify.`}\nYour leader dropped your branch from landing batch ${batch.id}.${why} The batch's verify ran on main with every branch in it merged; merge main into your branch to reproduce it, fix it, commit, and deliver again.`
+          : `Your leader dropped your branch from landing batch ${batch.id}, held (${batch.reason ?? "-"}): ${batch.detail ?? "-"}. No verify failed on it. Merge main into your branch, commit, and deliver again.`;
       sendBack(
         db,
         run,
         {
-          text: `${v && step ? sendBackText(v, step, "Landing batch") : `Landing batch ${batch.id} failed its verify.`}\nYour leader dropped your branch from landing batch ${batch.id}.${why} The batch's verify ran on main with every branch in it merged; merge main into your branch to reproduce it, fix it, commit, and deliver again.`,
+          text,
           feedback: `dropped from landing batch ${batch.id}`,
           why: `dropped from landing batch ${batch.id}`,
           event: { source, kind: "landing.batch_dropped", payload: { batch: batch.id, landing: row.id, verification: v?.id ?? null, step: step?.name ?? null } },
@@ -651,12 +676,22 @@ export class LandingBatches {
     return { batch: getBatch(db, batch.id)!, dropped };
   }
 
-  /** `flowryn batch retry <batch>`: verify the held batch's head once more (a load flake); once per head. Call inside a transaction. */
+  /**
+   * `flowryn batch retry <batch>`: a batch held for a failed verify is verified once more at the
+   * same head (a load flake), once per head; one held for anything else (main moving, its verify
+   * cancelled) ends and its members form a new batch on main as it is, counted afresh. Call inside a transaction.
+   */
   retry(batchId: string, source: EventSource = "cli"): BatchRow {
     const { db } = this.deps;
     const batch = getBatch(db, batchId);
     if (!batch) throw new FlowrynError("not_found", `no landing batch ${batchId}`, "flowryn fleet");
     if (batch.state !== "held") throw new FlowrynError("not_ready", `landing batch ${batchId} is ${batch.state}; only a held batch is retried`, `flowryn show ${batchId}`);
+    if (batch.reason !== "verify_failed") {
+      appendEvent(db, { source, kind: "landing.batch_retried", payload: { batch: batch.id, project: batch.project_id, head: batch.head_sha, reason: batch.reason }, ts: this.deps.now() });
+      this.dissolve(batch, "retried", `retried by the leader after it was held (${batch.reason ?? "-"}); its branches form a new batch on main`, "waiting");
+      this.deps.kickScheduler();
+      return getBatch(db, batch.id)!;
+    }
     if (batch.retried_head === batch.head_sha) throw new FlowrynError("not_ready", `landing batch ${batchId} was already retried at ${batch.head_sha.slice(0, 8)}; drop a branch instead`, `flowryn batch drop ${batchId} ${batch.culprit ?? "<task>"}`);
     const policies = todaysPolicies(this.deps.config(), batch.project_id);
     if (!policies) throw new FlowrynError("not_ready", `project ${batch.project_id} has no verify steps now`);
@@ -734,6 +769,7 @@ export function landingBoardLines(db: Db): string[] {
   const lines: string[] = [];
   for (const { project_id: project } of projects) {
     const batch = liveBatch(db, project);
+    if (!batch && !projectBatches(db, project)) continue;
     const waiting = db.query("SELECT * FROM landing_queue WHERE project_id = ?1 AND state = 'waiting' ORDER BY enqueued_at, CAST(substr(id, 3) AS INTEGER)").all(project) as LandingRow[];
     if (!batch && waiting.length === 0) continue;
     if (batch) {

@@ -6,7 +6,7 @@ import { upkeepConfig } from "../config/upkeep.ts";
 import { MergeBuilder } from "../upkeep/build.ts";
 import { Upkeep } from "../upkeep/upkeep.ts";
 import { PolicyFollower } from "../upkeep/policy-follow.ts";
-import { getProject, listProjects } from "../lifecycle/projects.ts";
+import { deliveryModes, getProject, listProjects } from "../lifecycle/projects.ts";
 import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
 import { join } from "node:path";
@@ -260,6 +260,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     }
     const migrated = migrate(db);
     const database = db;
+    const projectProblems = configSectionProblems(config, env, deliveryModes(database));
+    if (projectProblems.length > 0) throw new StartupRefused(`config.toml: ${projectProblems.join("; ")}`);
     const build = pinOwnBuild(config.state_dir, selfCommand(), log);
     const commit = BUILD_STAMP?.commit ?? null;
     const startedAt = Date.now();
@@ -1060,7 +1062,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const onHup = () => {
       try {
         const next = loadConfig(home).config;
-        const configProblems = configSectionProblems(next, env);
+        const configProblems = configSectionProblems(next, env, deliveryModes(database));
         if (configProblems.length > 0) throw new Error(configProblems.join("; "));
         if (next.state_dir !== config.state_dir) log("SIGHUP: state_dir changed; restart the daemon to use it");
         config = { ...next, state_dir: config.state_dir };

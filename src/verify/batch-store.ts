@@ -1,4 +1,5 @@
-import type { Db } from "../db/db.ts";
+import { getMeta, setMeta, type Db } from "../db/db.ts";
+import { appendEvent } from "../db/events.ts";
 import type { LandingRow } from "./landing-queue.ts";
 import { getRequest, positionOf } from "./queue.ts";
 import { getVerification } from "./store.ts";
@@ -15,6 +16,20 @@ import { getVerification } from "./store.ts";
 export const BATCH_STATES = ["verifying", "landing", "held", "landed", "dissolved"] as const;
 export type BatchState = (typeof BATCH_STATES)[number];
 export const LIVE_BATCH_SQL = "state IN ('verifying','landing','held')";
+
+const batchingKey = (projectId: string) => `landing_batched:${projectId}`;
+
+/** Whether the project lands in batches, as its last landing pass found it: the pass reads the config, the views read this. */
+export function projectBatches(db: Db, projectId: string): boolean {
+  return getMeta(db, batchingKey(projectId)) === "1";
+}
+
+/** Record whether the project lands in batches, with an event when that changes. Call inside a transaction. */
+export function markBatching(db: Db, projectId: string, on: boolean, now: number): void {
+  if (projectBatches(db, projectId) === on) return;
+  setMeta(db, batchingKey(projectId), on ? "1" : "0");
+  appendEvent(db, { source: "daemon", kind: "landing.batching", payload: { project: projectId, on }, ts: now });
+}
 
 export interface BatchRow {
   id: string;

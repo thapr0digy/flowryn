@@ -28,7 +28,8 @@ import { capacityConfig, defaultAutonomy, DEFAULT_WORKFLOWS, projectMaxWorkers, 
 export type SnapshotKey = "core" | SectionName;
 export const SNAPSHOT_KEYS: readonly SnapshotKey[] = ["core", ...CONFIG_SECTIONS];
 
-type Resolver = (config: FlowrynConfig, env: NodeJS.ProcessEnv) => unknown;
+/** `modes`: each registered project's delivery mode, so a project's landing mode is judged as the daemon runs it. */
+type Resolver = (config: FlowrynConfig, env: NodeJS.ProcessEnv, modes: Readonly<Record<string, string>>) => unknown;
 
 function styleView(config: FlowrynConfig): Record<string, unknown> {
   const block = styleBlock(config);
@@ -48,14 +49,16 @@ function workflowsView(config: FlowrynConfig): Record<string, unknown> {
   return out;
 }
 
-function projectsView(config: FlowrynConfig): Record<string, unknown> {
+function projectsView(config: FlowrynConfig, _env: NodeJS.ProcessEnv, modes: Readonly<Record<string, string>>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const id of Object.keys(table(config.extra.projects, "[projects]"))) {
     const verify = verifyConfig(config, id);
     const maxWorkers = projectMaxWorkers(config, id);
     const reviewModel = projectReviewModel(config, id);
-    // The config alone: a local-only project (its mode is in the database) also queues when landing is unset.
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landingMode(config, id, null) === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, null) } : landingMode(config, id, null) === "batch" ? { landing: "batch" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
+    // Without the project's delivery mode (the file alone), a local-only project also queues when landing is unset.
+    const mode = modes[id] ?? null;
+    const landing = landingMode(config, id, mode);
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landing === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, mode) } : landing === "batch" ? { landing: "batch" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
   }
   return out;
 }
@@ -104,12 +107,12 @@ export interface EffectiveConfig {
   problems: string[];
 }
 
-export function effectiveConfig(config: FlowrynConfig, env: NodeJS.ProcessEnv = process.env): EffectiveConfig {
+export function effectiveConfig(config: FlowrynConfig, env: NodeJS.ProcessEnv = process.env, modes: Readonly<Record<string, string>> = {}): EffectiveConfig {
   const sections = {} as Record<SnapshotKey, unknown>;
   const problems: string[] = [];
   for (const key of SNAPSHOT_KEYS) {
     try {
-      sections[key] = RESOLVERS[key](config, env);
+      sections[key] = RESOLVERS[key](config, env, modes);
     } catch (error) {
       sections[key] = null;
       problems.push((error as Error).message);
@@ -130,9 +133,9 @@ export function resolveEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
-/** Every section parser's refusal: what the daemon checks at startup and on SIGHUP, and init and doctor report. */
-export function configSectionProblems(config: FlowrynConfig, env: NodeJS.ProcessEnv = process.env): string[] {
-  return effectiveConfig(config, env).problems;
+/** Every section parser's refusal: what the daemon checks at startup and on SIGHUP (with its projects' `modes`), and init and doctor report. */
+export function configSectionProblems(config: FlowrynConfig, env: NodeJS.ProcessEnv = process.env, modes: Readonly<Record<string, string>> = {}): string[] {
+  return effectiveConfig(config, env, modes).problems;
 }
 
 function isTable(value: unknown): value is Record<string, unknown> {
