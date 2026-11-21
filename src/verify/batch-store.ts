@@ -10,12 +10,25 @@ import { getVerification } from "./store.ts";
  * views. A batch's head never changes: a rebuild is a new batch, and the old one ends `dissolved`.
  *
  *   verifying → landing → landed
- *       ↘ held (a red verify: the leader drops a branch or retries)   ↘ dissolved (rebuilt, emptied, or batch mode off)
+ *       ↘ fixing (a red verify: one fix task on top of the batch) → verifying (at the fix's head)
+ *       ↘ held (a second red, a fix that failed or ran late, a timeout: the leader drops a branch or retries)
+ *   any live state ↘ dissolved (rebuilt, emptied, or batch mode off)
+ *
+ * The one place a batch's head moves: its fix's delivery, a fast-forward of the head it started on.
  */
 
-export const BATCH_STATES = ["verifying", "landing", "held", "landed", "dissolved"] as const;
+export const BATCH_STATES = ["verifying", "fixing", "landing", "held", "landed", "dissolved"] as const;
 export type BatchState = (typeof BATCH_STATES)[number];
-export const LIVE_BATCH_SQL = "state IN ('verifying','landing','held')";
+export const LIVE_BATCH_SQL = "state IN ('verifying','fixing','landing','held')";
+
+/** A batch's fix task: `open` until it is delivered onto the batch (`delivered`) or ended (`ended`). */
+export type FixState = "open" | "delivered" | "ended";
+
+/** The local branch a fix task starts from: the batch head, kept reachable until the fix's own branch holds it. */
+export const FIX_BRANCH_PREFIX = "flowryn/batch/";
+export function fixBranch(batchId: string): string {
+  return `${FIX_BRANCH_PREFIX}${batchId}`;
+}
 
 const batchingKey = (projectId: string) => `landing_batched:${projectId}`;
 
@@ -49,8 +62,13 @@ export interface BatchRow {
   retried_head: string | null;
   /** Its open landing_batch_held item. */
   item_id: string | null;
-  /** held: the likely culprit's task, or null. */
+  /** held or fixing: the likely culprit's task, or null. */
   culprit: string | null;
+  /** The fix task opened for its red verify (one per batch), the head it starts on, where it stands and since when. */
+  fix_task: string | null;
+  fix_base: string | null;
+  fix_state: FixState | null;
+  fix_since: number | null;
   reason: string | null;
   detail: string | null;
   created_at: number;
@@ -79,6 +97,20 @@ export function liveBatchAt(db: Db, ref: string, head: string): BatchRow | null 
   const id = ref.slice(ref.lastIndexOf("/") + 1);
   const batch = getBatch(db, id);
   return batch && batchRef(batch.project_id, batch.id) === ref && batch.head_sha === head && (batch.state === "verifying" || batch.state === "landing") ? batch : null;
+}
+
+/**
+ * The head a batch's fix task starts from, while the batch still wants that fix (its fix open, the
+ * batch fixing or held): what the scheduler starts the task on instead of main's tip.
+ */
+export function fixStartOf(db: Db, taskId: string): { batch: string; base: string } | null {
+  const row = db.query(`SELECT id, fix_base FROM landing_batches WHERE fix_task = ?1 AND fix_state = 'open' AND state IN ('fixing','held')`).get(taskId) as { id: string; fix_base: string } | null;
+  return row ? { batch: row.id, base: row.fix_base } : null;
+}
+
+/** Whether the task is a landing batch's fix: it lands with its batch, never in a batch of its own. */
+export function isBatchFix(db: Db, taskId: string): boolean {
+  return db.query("SELECT 1 FROM landing_batches WHERE fix_task = ?1").get(taskId) !== null;
 }
 
 /** Every entry that was ever in the batch, in batch order. */
@@ -118,6 +150,7 @@ export function batchLine(db: Db, batch: BatchRow): string {
   const members = batchMembers(db, batch.id);
   const what = `${members.length} branch${members.length === 1 ? "" : "es"} on main ${batch.base_sha.slice(0, 8)}`;
   if (batch.state === "held") return `${batch.id} held, ${what}: ${batch.detail ?? batch.reason ?? "-"}`;
+  if (batch.state === "fixing") return `${batch.id} fixing (${batch.fix_task ?? "-"}), ${what}: ${batch.detail ?? "-"}`;
   if (batch.state === "landing") return `${batch.id} landing, ${what}${batch.detail ? `: ${batch.detail}` : ""}`;
   if (batch.state === "verifying") return `${batch.id} ${batchVerify(db, batch) ?? "verifying"}, ${what}`;
   return `${batch.id} ${batch.state}${batch.reason ? ` (${batch.reason})` : ""}${batch.detail ? `: ${batch.detail}` : ""}`;
