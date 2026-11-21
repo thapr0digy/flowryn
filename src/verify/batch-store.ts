@@ -7,7 +7,7 @@ import { getVerification } from "./store.ts";
 /**
  * Landing batches' rows (migration 64, docs/notes/2026-11-21-landing-batches-one-27.md), read by
  * the batch controller (src/verify/landing-batch.ts), the merge gate (src/policy/merge.ts) and the
- * views. A batch's head never changes: a rebuild is a new batch, and the old one ends `dissolved`.
+ * views. A rebuild is a new batch, and the old one ends `dissolved`.
  *
  *   verifying → landing → landed
  *       ↘ fixing (a red verify: one fix task on top of the batch) → verifying (at the fix's head)
