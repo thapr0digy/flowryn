@@ -70,6 +70,8 @@ export interface BatchDeps {
   delivery?: DeliveryServices;
 }
 
+/** How much of a hold's reason its item line keeps, so the next commands after it stay on the line. */
+const HELD_DETAIL_CHARS = 90;
 /** Verifies of one batch head the queue may cancel before the batch is held: the loss keeps happening. */
 const MAX_VERIFY_LOSSES = 3;
 /** Gate refusals that are the project checkout's or the moment's, not a member's: the batch waits and tries again. */
@@ -282,7 +284,8 @@ export class LandingBatches {
     const next = `flowryn batch drop ${batch.id} ${drop}${reason === "verify_failed" && batch.retried_head !== batch.head_sha ? ` | flowryn batch retry ${batch.id}` : ""}`;
     const seq = this.moveBatch(batch, "held", { reason, detail, culprit, verification_id: verification ?? batch.verification_id }, now);
     if (batch.item_id) resolveItem(db, batch.item_id, "landing.batch_held", now);
-    const line = `Landing batch ${batch.id} (${batch.project_id}, ${members.length} branch${members.length === 1 ? "" : "es"}: ${members.map((m) => m.task_id).join(", ")}) held: ${sanitizeLine(detail, 200)}. Next: ${next}`;
+    // The digest keeps the next commands whole: the reason is cut first (the batch keeps it whole, show lb<N> prints it).
+    const line = `Landing batch ${batch.id} (${batch.project_id}, ${members.length}) held: ${sanitizeLine(detail, HELD_DETAIL_CHARS)}. Next: ${next}`;
     const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line, now });
     db.query("UPDATE landing_batches SET item_id = ?2 WHERE id = ?1").run(batch.id, item);
   }
@@ -380,7 +383,7 @@ export class LandingBatches {
     const now = this.deps.now();
     const seq = this.moveBatch(batch, "landing", { detail: why }, now);
     if (batch.item_id) resolveItem(db, batch.item_id, "landing.batch_stuck", now);
-    const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line: `Landing batch ${batch.id} (${batch.project_id}) passed but cannot land: ${sanitizeLine(why, 200)}; it tries again each pass. Next: flowryn show ${batch.id}`, now });
+    const item = openItem(db, { kind: "landing_batch_held", eventSeq: seq, line: `Landing batch ${batch.id} (${batch.project_id}) passed but cannot land: ${sanitizeLine(why, HELD_DETAIL_CHARS)}; it tries again each pass. Next: flowryn show ${batch.id}`, now });
     db.query("UPDATE landing_batches SET item_id = ?2 WHERE id = ?1").run(batch.id, item);
   }
 
@@ -396,10 +399,11 @@ export class LandingBatches {
 
   /**
    * Each waiting entry's light check: queue one where none waits, runs or finished at its head;
-   * judge one that did not pass. Returns the entries whose light check passed (all of them when
+   * judge one that did not pass. Runs while a batch is in flight too, so the next batch is ready
+   * when it lands. Returns the entries whose light check passed (all of them when
    * the project has none), in line order.
    */
-  private async lightChecks(project: ProjectRow, waiting: LandingRow[]): Promise<LandingRow[]> {
+  async lightChecks(project: ProjectRow, waiting: LandingRow[]): Promise<LandingRow[]> {
     const { db } = this.deps;
     const policies = todaysPolicies(this.deps.config(), project.id);
     if (!policies) return [];

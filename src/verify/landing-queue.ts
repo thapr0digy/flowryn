@@ -536,9 +536,12 @@ export class LandingQueue implements LandingHooks {
   private async advanceProject(projectId: string): Promise<void> {
     const project = getProject(this.deps.db, projectId);
     if (project?.delivery_mode === "local-only") {
+      const batched = landingBatched(this.deps.config(), project.id, project.delivery_mode);
+      // Light checks run while a batch is in flight, so the next batch forms as soon as this one ends.
+      if (batched) await this.batches.lightChecks(project, this.batchable(project.id));
       // A live batch is driven (or, once the project stops batching, dissolved) before anything else lands.
       if (await this.batches.drive(project)) return;
-      if (landingBatched(this.deps.config(), project.id, project.delivery_mode)) return this.advanceBatchProject(project);
+      if (batched) return this.advanceBatchProject(project);
       return this.advanceLocal(project);
     }
     const line = projectLine(this.deps.db, projectId);
@@ -804,7 +807,12 @@ export class LandingQueue implements LandingHooks {
       await this.advanceLocal(project);
       if (landingAlone() || liveBatchOf(db, project.id)) return;
     }
-    await this.batches.build(project, projectLine(db, project.id).filter((r) => r.state === "waiting" && !this.sensitive(r)));
+    await this.batches.build(project, this.batchable(project.id));
+  }
+
+  /** A batch project's waiting entries a batch may take: every one that is not sensitive, in line order. */
+  private batchable(projectId: string): LandingRow[] {
+    return projectLine(this.deps.db, projectId).filter((r) => r.state === "waiting" && !this.sensitive(r));
   }
 
   private sensitive(row: LandingRow): boolean {
