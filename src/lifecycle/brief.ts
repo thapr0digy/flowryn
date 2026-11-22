@@ -188,7 +188,7 @@ export function reportProblems(markdown: string): string[] {
 function firstScreenProblems(text: string, what: string): string[] {
   const bytes = Buffer.byteLength(text, "utf8");
   if (bytes <= REPORT_FIRST_SCREEN_BYTES_MAX) return [];
-  return [`${what} is ${(bytes / 1024).toFixed(1)} KB: keep it to ${REPORT_FIRST_SCREEN_BYTES_MAX / 1024} KB and move evidence into linked files`];
+  return [`${what} is ${bytes} bytes: keep it to ${REPORT_FIRST_SCREEN_BYTES_MAX} (6 KB) and move evidence into linked files`];
 }
 
 /** The kind of brief a dispatch of this task kind must carry, or null when none is checked. */

@@ -99,7 +99,7 @@ describe("reportProblems", () => {
   test(`a first screen of exactly ${REPORT_FIRST_SCREEN_BYTES_MAX} bytes passes; one byte more is refused naming the rule`, () => {
     expect(reportProblems(reportWithFirstScreen(REPORT_FIRST_SCREEN_BYTES_MAX))).toEqual([]);
     expect(reportProblems(reportWithFirstScreen(REPORT_FIRST_SCREEN_BYTES_MAX + 1))).toEqual([
-      'the first screen (the start through the section after "## Short answer") is 6.0 KB: keep it to 6 KB and move evidence into linked files',
+      'the first screen (the start through the section after "## Short answer") is 6145 bytes: keep it to 6144 (6 KB) and move evidence into linked files',
     ]);
   });
 
