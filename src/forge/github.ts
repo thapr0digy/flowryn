@@ -1,4 +1,5 @@
 import { runBounded } from "../runtime/bounded.ts";
+import { forgeCaller, SpendLog } from "./spend.ts";
 import {
   summarize,
   ForgeError,
@@ -39,6 +40,9 @@ export interface GitHubOptions {
   token: TokenSource;
   timeoutMs?: number;
   fetch?: typeof fetch;
+  /** The daemon log, for the hourly spend lines (src/forge/spend.ts); none when absent. */
+  log?: (line: string) => void;
+  now?: () => number;
 }
 
 interface Cached {
@@ -50,6 +54,8 @@ const MAX_CACHE = 500;
 const MAX_PAGES = 5;
 const PER_PAGE = 100;
 const GH_TOKEN_TIMEOUT_MS = 5_000;
+/** A failed `gh auth token` is asked again after this long, never sooner. */
+export const GH_TOKEN_RETRY_MS = 5 * 60_000;
 
 /** https://github.com/o/r(.git), git@github.com:o/r(.git) or ssh://git@github.com/o/r(.git) -> {owner, repo}. */
 export function repoOf(url: string, webUrl = "https://github.com"): RepoRef | null {
@@ -127,10 +133,12 @@ export class GitHubForge implements Forge {
   private readonly opts: GitHubOptions;
   private readonly cache = new Map<string, Cached>();
   private readonly fetcher: typeof fetch;
+  private readonly spend: SpendLog;
 
   constructor(opts: GitHubOptions) {
     this.opts = { ...opts, apiUrl: opts.apiUrl.replace(/\/+$/, ""), webUrl: opts.webUrl.replace(/\/+$/, "") };
     this.fetcher = opts.fetch ?? fetch;
+    this.spend = new SpendLog(opts.log ?? (() => {}), opts.now ?? Date.now);
   }
 
   /** Requests made and 304s answered, for the watcher's log and the tests. */
@@ -147,6 +155,7 @@ export class GitHubForge implements Forge {
     const cached = method === "GET" && !fresh ? this.cache.get(url) : undefined;
     const headers = await this.headers(cached ? { "If-None-Match": cached.etag } : body === undefined ? {} : { "Content-Type": "application/json" });
     this.stats.requests++;
+    const tally = this.spend.sent(forgeCaller());
     let response: Response;
     try {
       response = await this.fetcher(url, {
@@ -158,6 +167,8 @@ export class GitHubForge implements Forge {
     } catch (error) {
       throw new ForgeError("unreachable", `${method} ${path}: ${(error as Error).message}`);
     }
+    const remaining = Number(response.headers.get("x-ratelimit-remaining") ?? "");
+    if (response.headers.has("x-ratelimit-remaining") && Number.isFinite(remaining)) tally.remaining = remaining;
     // The deadline covers the body too: a stalled body is a failed request, never a raw AbortError.
     let text: string;
     try {
@@ -167,6 +178,7 @@ export class GitHubForge implements Forge {
     }
     if (response.status === 304 && cached) {
       this.stats.notModified++;
+      tally.notModified++;
       return { status: 200, body: cached.body, headers: response.headers };
     }
     let parsed: unknown = null;
@@ -375,30 +387,88 @@ function enc(part: string): string {
   return encodeURIComponent(part);
 }
 
+/** A token is only ever sent to GitHub's own API: api.github.com, or an Enterprise API on the web host. */
+export function sendsToken(apiUrl: string, webUrl: string): boolean {
+  const apiHost = hostOf(apiUrl);
+  return apiHost === "api.github.com" || apiHost === hostOf(webUrl);
+}
+
+export interface GhToken {
+  token: string | null;
+  /** Why there is none, without the output (it may hold a token). */
+  why: string;
+}
+
+/** `gh auth token` for the web host (the user's own gh login), bounded by runBounded. */
+export async function ghAuthToken(gh: string, webUrl: string, timeoutMs = GH_TOKEN_TIMEOUT_MS): Promise<GhToken> {
+  const result = await runBounded([gh, "auth", "token", "--hostname", hostOf(webUrl)], { label: "gh auth token", timeoutMs, stderr: "ignore" });
+  const token = result.code === 0 ? result.stdout.trim() : "";
+  if (token.length > 0) return { token, why: "" };
+  if (result.timedOut) return { token: null, why: `gh auth token took over ${timeoutMs / 1000} s` };
+  if (result.spawnError) return { token: null, why: `gh auth token did not start: ${result.spawnError}` };
+  return { token: null, why: result.code === 0 ? "gh auth token printed nothing" : `gh auth token exited ${result.code}` };
+}
+
+export interface TokenSourceOptions {
+  ghTimeoutMs?: number;
+  retryMs?: number;
+  now?: () => number;
+  /** The daemon log: one line when requests start going without a token, one when a token is back. */
+  log?: (line: string) => void;
+}
+
 /**
  * The daemon's token: the first set variable in [github] token_env, else
- * `gh auth token` for the web host (the user's own gh login), read once and
- * kept. A token is only ever sent to GitHub's own API (api.github.com, or an
- * Enterprise API on the web host); an api_url anywhere else (the fake forge in
- * tests and the lab) gets none, so a credential never reaches it. No token is
- * fine too: a public repository answers without one.
+ * `gh auth token` for the web host. A token gh gives is kept; a failed lookup
+ * (the keychain locked with no desktop session, gh logged out) is asked again
+ * after GH_TOKEN_RETRY_MS, never sooner, and lookups under way are shared. A
+ * token is only ever sent to GitHub's own API (sendsToken); an api_url
+ * anywhere else (the fake forge in tests and the lab) gets none, so a
+ * credential never reaches it. No token works for a public repository, at
+ * GitHub's unauthenticated limit of 60 requests an hour: the log says so once
+ * per spell, naming the host, never the token.
  */
-export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string | null, apiUrl: string, webUrl: string, ghTimeoutMs = GH_TOKEN_TIMEOUT_MS): TokenSource {
+export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string | null, apiUrl: string, webUrl: string, opts: TokenSourceOptions = {}): TokenSource {
+  const trusted = sendsToken(apiUrl, webUrl);
   const apiHost = hostOf(apiUrl);
-  const webHost = hostOf(webUrl);
-  const trusted = apiHost === "api.github.com" || apiHost === webHost;
-  let cached: string | null | undefined;
+  const now = opts.now ?? Date.now;
+  const retryMs = opts.retryMs ?? GH_TOKEN_RETRY_MS;
+  const log = opts.log ?? (() => {});
+  let found: string | null = null;
+  let failedAt = Number.NEGATIVE_INFINITY;
+  let why = gh ? "" : `${names.length > 0 ? `none of ${names.join(", ")} is set` : "no token variable is named"} and gh is not found`;
+  let lookup: Promise<void> | null = null;
+  let warned = false;
+  const fromGh = async (): Promise<string | null> => {
+    if (found || !gh || now() - failedAt < retryMs) return found;
+    lookup ??= ghAuthToken(gh, webUrl, opts.ghTimeoutMs)
+      .then((answer) => {
+        found = answer.token;
+        if (!found) {
+          failedAt = now();
+          why = `${answer.why}; asked again every ${retryMs / 60_000} min`;
+        }
+      })
+      .finally(() => {
+        lookup = null;
+      });
+    await lookup;
+    return found;
+  };
   return async () => {
     if (!trusted) return null;
     for (const name of names) {
       const value = env[name];
       if (value && value.length > 0) return value;
     }
-    if (cached !== undefined) return cached;
-    cached = null;
-    if (!gh) return null;
-    const result = await runBounded([gh, "auth", "token", "--hostname", webHost], { label: "gh auth token", timeoutMs: ghTimeoutMs, stderr: "ignore" });
-    if (result.code === 0 && result.stdout.trim().length > 0) cached = result.stdout.trim();
-    return cached;
+    const token = await fromGh();
+    if (!token && !warned) {
+      warned = true;
+      log(`github: requests to ${apiHost} go without a token, at GitHub's limit of 60 an hour (${why})`);
+    } else if (token && warned) {
+      warned = false;
+      log(`github: requests to ${apiHost} carry a token again (gh auth token)`);
+    }
+    return token;
   };
 }

@@ -27,6 +27,8 @@ import { INSTALL_HINTS } from "../init/install.ts";
 import { checkHost } from "../sched/host.ts";
 import { judgeQuota, probeQuota, quotaTarget, type QuotaReading } from "../sched/quota.ts";
 import { resumeCommand } from "../sched/usage.ts";
+import { githubConfig } from "../config/delivery.ts";
+import { ghAuthToken, sendsToken, type GhToken } from "../forge/github.ts";
 import { accountsConfig, type Account } from "../config/accounts.ts";
 import { nmAutoFixChecks } from "./nomistakes.ts";
 import { brokenGitLink, projectWorktrees, relinkHint } from "../lifecycle/relink.ts";
@@ -486,6 +488,8 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const binary = binaryCheck();
   if (binary) checks.push(binary);
   checks.push(...toolChecks(config));
+  const token = await githubTokenCheck(config, env.env);
+  if (token) checks.push(token);
   const chromeMcp = chromeMcpCheck(config, env.env);
   if (chromeMcp) checks.push(chromeMcp);
   checks.push(...(await tasksChecks(config)));
@@ -505,6 +509,31 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(await hostCheckNow(config));
   checks.push(...(await quotaChecks(config)));
   return checks;
+}
+
+/**
+ * Where the daemon's GitHub token comes from, looked up as the daemon looks
+ * it up (src/forge/github.ts tokenSource) from this shell: a [github]
+ * token_env variable, else `gh auth token`. None is a warning: requests then
+ * go unauthenticated, at 60 an hour. Never prints the token. Null when the
+ * [github] config is invalid (its config line says so).
+ */
+export async function githubTokenCheck(config: FlowrynConfig, env: NodeJS.ProcessEnv, lookup: (gh: string, webUrl: string) => Promise<GhToken> = ghAuthToken): Promise<Check | null> {
+  let github;
+  try {
+    github = githubConfig(config);
+  } catch {
+    return null;
+  }
+  const check = "github token";
+  if (!sendsToken(github.api_url, github.web_url)) return { check, status: "info", detail: `none sent: [github] api_url ${github.api_url} is not GitHub's API` };
+  const named = github.token_env.find((name) => (env[name] ?? "").length > 0);
+  if (named) return { check, status: "ok", detail: `from $${named}` };
+  const unauthenticated = "GitHub requests go unauthenticated, at 60 an hour (gh auth login, or set one of [github] token_env)";
+  const gh = resolveTool(config, "gh");
+  if (!gh) return { check, status: "warn", detail: `none: gh is not found and no [github] token_env variable is set; ${unauthenticated}` };
+  const answer = await lookup(gh, github.web_url);
+  return answer.token ? { check, status: "ok", detail: "from gh auth token" } : { check, status: "warn", detail: `none: ${answer.why}; ${unauthenticated}` };
 }
 
 /** The [policy] mode in force, in one line; a bad value is already a config failure above. */
