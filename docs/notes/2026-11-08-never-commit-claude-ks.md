@@ -1,7 +1,7 @@
 # Never commit Claude co-author trailers
 
 - Status: done
-- Open: `~/.no-mistakes/config.yaml` on this machine still needs the `agent_args_override` line (doctor warns until it is added); Claude honouring the worker settings' empty `attribution` over a user setting is proven by Claude Code 2.1.319's schema, not yet by a live lab run; Pi was not installed on the build machine, so "Pi adds no trailer" is unconfirmed (the merge gate refuses one either way)
+- Open: Claude honouring the worker settings' empty `attribution` over a user setting is proven by Claude Code 2.1.319's schema, not yet by a live lab run; Pi was not installed on the build machine, so "Pi adds no trailer" is unconfirmed (the merge gate refuses one either way)
 
 The user, 2026-11-08: "stop committing co authors with Claude. It's no longer allowed". Until now Flowryn relied on the user's own `~/.claude/settings.json` (`"attribution": {"commit": "", "pr": ""}`); four commits on main from before that setting carry a `Co-authored-by: Claude …` trailer: 95e5a671, 56f32a77, 1a8d1008 (2026-11-05) and 3a7f8a02 (2026-11-06). They stay: rewriting main is out of scope.
 
@@ -15,13 +15,13 @@ Every Claude settings file Flowryn writes, the per-run worker file (`src/harness
 
 The worker settings do not reach the PR body. In a no-mistakes ship the body is written by no-mistakes' own PR step, which runs `claude -p` with only the operator's settings (`internal/agent/claude.go`: no `--settings`), and since the user's `~/.claude/settings.json` lost its `attribution` key, PRs #193 and #194 (2026-11-22) came out with `🤖 Generated with [Claude Code](https://claude.com/claude-code)` and the gate refused them. Checked live with Claude Code 2.1.330: the same `claude -p` prompt for a PR body ends in that line under the user's settings and carries none with `--settings '{"attribution":{"commit":"","pr":""}}'`.
 
-The fix is no-mistakes' global config, the one place that reaches every project's PR step (`agent_args_override` is global-only; its args go ahead of no-mistakes' own, and a `--settings` flag outranks the user's and the project's settings):
+Either of two machine-wide settings reaches every project's PR step. On this machine the leader restored the user's `~/.claude/settings.json` `"attribution": {"commit": "", "pr": "", "sessionUrl": false}` (2026-11-22), which `claude -p` loads. The other is no-mistakes' global config (`agent_args_override` is global-only; its args go ahead of no-mistakes' own, and a `--settings` flag outranks the user's and the project's settings):
 
 ```yaml
 agent_args_override: { claude: ["--settings", '{"attribution":{"commit":"","pr":""}}'] }
 ```
 
-`flowryn doctor` checks it (`attributionCheck`, src/doctor/nomistakes.ts, check `no-mistakes PR attribution`) whenever a project delivers through no-mistakes: ok when `agent_args_override.claude` carries `--settings` with inline JSON whose `attribution.commit` and `attribution.pr` are both `""`; otherwise a warn naming the line to add. The line is built from `NO_ATTRIBUTION`, so it cannot drift from the worker settings. Doctor only reads the file, as its `auto_fix.ci` check does: rewriting the user's commented YAML would lose their comments. A per-repo `.claude/settings.json` was rejected: it covers one project, and a repo that opts out of project settings in no-mistakes drops it.
+`flowryn doctor` checks them (`attributionCheck`, src/doctor/nomistakes.ts, check `no-mistakes PR attribution`) whenever a project delivers through no-mistakes. An inline `--settings` JSON in `agent_args_override.claude` decides when it sets `attribution.pr`; otherwise the user's Claude settings (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`) do. Ok when that `attribution.pr` is `""`; otherwise a warn naming both fixes. The commit attribution is not checked: no-mistakes writes its own fix commits' messages. The override line is built from `NO_ATTRIBUTION`, so it cannot drift from the worker settings. Only inline JSON is read from the override (a settings-file path warns), to keep the check small. Doctor only reads both files, as its `auto_fix.ci` check does. A per-repo `.claude/settings.json` was rejected: it covers one project, and a repo that opts out of project settings in no-mistakes drops it.
 
 ## Guidance
 
@@ -49,6 +49,6 @@ Commit messages, emails and the PR body are worker-written input: they are match
 
 - `test/unit/ai-attribution.test.ts`: the matcher's case, spacing, tab and CRLF variants and its near misses; the gate step's refusals (commit, PR body, unlistable commits, more than three hits) and passes; `branchCommits` against a real git repo; the leader settings, built and as written by `writeLeaderFiles`.
 - `test/unit/harness.test.ts`: the written worker settings file (launch and resume) has empty attribution; every ship mode's delivery lines carry the guidance.
-- `test/unit/doctor-nomistakes.test.ts`: the no-mistakes attribution check: no config or no claude `--settings` warns with the line to add; the advised line pasted into a config passes, as does a block list with other args first; attribution left on, a settings file path, bad JSON or bad YAML warns; no check without a no-mistakes project, and the config is never written.
+- `test/unit/doctor-nomistakes.test.ts`: the no-mistakes attribution check: user settings with `attribution.pr` `""` pass with no override; neither file hiding it warns with both fixes; the advised override line pasted into a config passes whatever the user's settings say, as does a block list with other args first; an override turning PR attribution on outranks the user's settings and warns; a settings file path, bad JSON or bad YAML in the config warns; no check without a no-mistakes project, and neither file is written.
 - `test/unit/forge.test.ts`: `pullCommits` and the PR body against the fake GitHub, and the 250-commit refusal.
 - `test/integration/delivery.test.ts`: through the real CLI and the fake forge, a PR whose commit carries `Co-Authored-By:  Claude … <NoReply@Anthropic.com>` is refused naming its commit and the fix, and a clean PR merges.

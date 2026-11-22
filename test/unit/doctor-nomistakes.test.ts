@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { attributionCheck, attributionChecks, autoFixChecks, globalConfigPath, NM_CLAUDE_SETTINGS_ARGS, readAutoFixCi, type NmProject } from "../../src/doctor/nomistakes.ts";
+import { attributionCheck, attributionChecks, autoFixChecks, globalConfigPath, NM_CLAUDE_SETTINGS_ARGS, readAutoFixCi, userClaudeSettingsPath, type NmProject } from "../../src/doctor/nomistakes.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { GIT_ENV, scratchRepos, sh } from "../helpers/scratch-git.ts";
 
@@ -107,50 +107,77 @@ describe("no-mistakes' auto_fix.ci in doctor", () => {
 
 /**
  * no-mistakes' PR step runs `claude -p` with the operator's settings only, so
- * doctor warns until its global config passes claude a --settings that hides
- * commit and PR attribution (docs/notes/2026-11-08-never-commit-claude-ks.md).
+ * doctor warns until the user's Claude settings or an inline --settings in
+ * no-mistakes' global config hide PR attribution
+ * (docs/notes/2026-11-08-never-commit-claude-ks.md).
  */
+const OFF = JSON.stringify({ attribution: { commit: "", pr: "" } });
+const ON = JSON.stringify({ attribution: { pr: "made by a bot" } });
+const NM = "/nm/config.yaml";
+const USER = "/home/u/.claude/settings.json";
+const check = (nm: string | null, user: string | null) => attributionCheck({ where: NM, text: nm }, { where: USER, text: user });
+const override = (json: string) => `agent_args_override:\n  claude: ['--settings', '${json}']\n`;
+
 describe("no-mistakes' PR attribution in doctor", () => {
-  const OFF = JSON.stringify({ attribution: { commit: "", pr: "" } });
 
   test("the advised args are --settings with Flowryn's empty attribution", () => {
     expect([...NM_CLAUDE_SETTINGS_ARGS]).toEqual(["--settings", OFF]);
   });
 
-  test("no config, or one with no claude override, warns with the line to add", () => {
-    const absent = attributionCheck("/nm/config.yaml", null);
-    expect(absent.status).toBe("warn");
-    expect(absent.detail).toContain('writes "Generated with Claude Code" into PR bodies and merge refuses them');
-    expect(absent.detail).toContain(`agent_args_override: { claude: ["--settings", '${OFF}'] }`);
-    expect(attributionCheck("/nm/config.yaml", GLOBAL_SAMPLE).detail).toStartWith("no-mistakes' claude agent gets no --settings");
-  });
-
-  test("the advised line, pasted into the config, passes", () => {
-    const advised = attributionCheck("/nm/config.yaml", null).detail.match(/`(agent_args_override: .*?)`/)![1]!;
-    expect(attributionCheck("/nm/config.yaml", `${GLOBAL_SAMPLE}${advised}\n`)).toEqual({
+  test("the user's settings with attribution.pr \"\" pass with no override (this machine's setup)", () => {
+    expect(check(GLOBAL_SAMPLE, JSON.stringify({ model: "opus", attribution: { commit: "", pr: "", sessionUrl: false } }))).toEqual({
       check: "no-mistakes PR attribution",
       status: "ok",
-      detail: "/nm/config.yaml passes claude --settings hiding commit and PR attribution",
+      detail: `${USER} hides PR attribution for no-mistakes' claude agent`,
     });
+    expect(check(null, OFF).status).toBe("ok");
   });
 
-  test("a block list with other args before --settings passes", () => {
+  test("neither file hiding it warns with both fixes", () => {
+    const absent = check(null, null);
+    expect(absent.status).toBe("warn");
+    expect(absent.detail).toStartWith(`neither ${USER} nor a claude --settings in ${NM} sets attribution.pr`);
+    expect(absent.detail).toContain('writes "Generated with Claude Code" into PR bodies and merge refuses them');
+    expect(absent.detail).toContain(`set "attribution": {"commit": "", "pr": ""} in ${USER}`);
+    expect(absent.detail).toContain(`agent_args_override: { claude: ["--settings", '${OFF}'] }`);
+    expect(check(GLOBAL_SAMPLE, ON).detail).toStartWith(`${USER} sets attribution.pr to "made by a bot"`);
+    expect(check(GLOBAL_SAMPLE, "{not json").status).toBe("warn");
+  });
+
+  test("the advised override line, pasted into the config, passes whatever the user's settings say", () => {
+    const advised = check(null, null).detail.match(/`(agent_args_override: .*?)`/)![1]!;
+    expect(check(`${GLOBAL_SAMPLE}${advised}\n`, ON)).toEqual({
+      check: "no-mistakes PR attribution",
+      status: "ok",
+      detail: `${NM} passes claude --settings hiding PR attribution`,
+    });
     const block = `agent_args_override:\n  claude:\n    - --model\n    - sonnet\n    - --settings\n    - '${OFF}'\n`;
-    expect(attributionCheck("c", block).status).toBe("ok");
+    expect(check(block, null).status).toBe("ok");
   });
 
-  test("attribution left on, a settings file path, bad JSON or bad YAML warns", () => {
-    const pr = JSON.stringify({ attribution: { commit: "" } });
-    expect(attributionCheck("c", `agent_args_override:\n  claude: ['--settings', '${pr}']\n`).detail).toStartWith('the claude --settings value does not set attribution.commit and attribution.pr to ""');
-    expect(attributionCheck("c", "agent_args_override:\n  claude: [--settings, /nm/claude.json]\n").detail).toStartWith("the claude --settings value is not inline JSON");
-    expect(attributionCheck("c", "agent_args_override:\n  claude: ['--settings', '{nope']\n").detail).toStartWith("the claude --settings value is not inline JSON");
-    expect(attributionCheck("c", "agent_args_override: [unclosed\n").detail).toStartWith("c does not parse as YAML");
+  test("an override outranks the user's settings: one that turns PR attribution on warns", () => {
+    expect(check(override(ON), OFF).detail).toStartWith(`the claude --settings value in ${NM} sets attribution.pr to "made by a bot"`);
+    expect(check(override(JSON.stringify({ model: "sonnet" })), OFF).status).toBe("ok");
   });
 
-  test("one check only when a project delivers through no-mistakes; it never writes the config", () => {
+  test("a settings file path, bad JSON or bad YAML in the config warns", () => {
+    expect(check("agent_args_override:\n  claude: [--settings, /nm/claude.json]\n", OFF).detail).toStartWith(`the claude --settings value in ${NM} is not inline JSON`);
+    expect(check(override("{nope"), OFF).detail).toStartWith(`the claude --settings value in ${NM} is not inline JSON`);
+    expect(check("agent_args_override: [unclosed\n", OFF).detail).toStartWith(`${NM} does not parse as YAML`);
+  });
+
+  test("one check only when a project delivers through no-mistakes; it never writes either file", () => {
+    const userPath = join(dir, "settings.json");
     writeFileSync(globalPath, GLOBAL_SAMPLE);
-    expect(attributionChecks([], globalPath)).toEqual([]);
-    expect(attributionChecks([project], globalPath)).toHaveLength(1);
+    writeFileSync(userPath, OFF);
+    expect(attributionChecks([], globalPath, userPath)).toEqual([]);
+    expect(attributionChecks([project], globalPath, userPath)).toMatchObject([{ status: "ok" }]);
     expect(readFileSync(globalPath, "utf8")).toBe(GLOBAL_SAMPLE);
+    expect(readFileSync(userPath, "utf8")).toBe(OFF);
+  });
+
+  test("the user's Claude settings are $CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json", () => {
+    expect(userClaudeSettingsPath({ CLAUDE_CONFIG_DIR: "/x/cc", HOME: "/home/u" })).toBe("/x/cc/settings.json");
+    expect(userClaudeSettingsPath({ HOME: "/home/u" })).toBe("/home/u/.claude/settings.json");
   });
 });
