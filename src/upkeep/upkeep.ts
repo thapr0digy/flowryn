@@ -2,7 +2,7 @@ import type { UpkeepConfig } from "../config/upkeep.ts";
 import { pruneExplanations, type PruneReport } from "../attention/explanations.ts";
 import { closeSeenInfoItems, INFO_KEEP_MS } from "../attention/items.ts";
 import { tx, type Db } from "../db/db.ts";
-import { correctionsPass, type CorrectionsPass } from "../leader/corrections.ts";
+import { correctionsDueAt, correctionsPass, CORRECTIONS_WINDOW_MS, type CorrectionsPass } from "../leader/corrections.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import type { BuildPass, MergeBuilder } from "./build.ts";
@@ -64,6 +64,8 @@ export class Upkeep {
   private running: Promise<PassReport> | null = null;
   private stopped = false;
   private lastSkip: string | null = null;
+  /** When the weekly corrections pass is next due, as last read (0: read it on the next pass). */
+  private correctionsDue = 0;
 
   constructor(deps: UpkeepDeps) {
     this.deps = deps;
@@ -140,8 +142,11 @@ export class Upkeep {
   }
 
   private corrections(): CorrectionsPass | null {
+    const now = this.deps.now();
+    if (now < this.correctionsDue) return null;
     try {
-      const pass = correctionsPass(this.deps.db, this.deps.projects(), this.deps.now());
+      const pass = correctionsPass(this.deps.db, this.deps.projects(), now);
+      this.correctionsDue = pass ? now + CORRECTIONS_WINDOW_MS : correctionsDueAt(this.deps.db);
       if (pass && pass.filed.length > 0) this.deps.log(`upkeep: filed ${pass.filed.length} corrections scouts (${pass.filed.map((f) => `${f.project} ${f.task}`).join(", ")})`);
       return pass;
     } catch (error) {

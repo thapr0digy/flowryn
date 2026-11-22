@@ -153,6 +153,15 @@ function openScout(db: Db, project: string): string | null {
   return null;
 }
 
+/**
+ * When the next weekly pass is due: a week after the last pass's event (its only state), or 0 when
+ * none ran. No index serves events by kind, so the upkeep loop keeps the answer until it is due.
+ */
+export function correctionsDueAt(db: Db): number {
+  const last = db.query("SELECT ts FROM events WHERE kind = ?1 ORDER BY seq DESC LIMIT 1").get(CORRECTIONS_PASS_KIND) as { ts: number } | null;
+  return last ? last.ts + CORRECTIONS_WINDOW_MS : 0;
+}
+
 export interface CorrectionsPass {
   since: number;
   until: number;
@@ -166,9 +175,7 @@ export interface CorrectionsPass {
  * last week and none still open. One transaction and one event, whatever it filed. Null when not due.
  */
 export function correctionsPass(db: Db, projects: readonly ProjectRow[], now: number): CorrectionsPass | null {
-  // The last pass is its event: no other state to keep in step.
-  const last = (db.query("SELECT MAX(ts) AS ts FROM events WHERE kind = ?1").get(CORRECTIONS_PASS_KIND) as { ts: number | null }).ts;
-  if (last !== null && now - last < CORRECTIONS_WINDOW_MS) return null;
+  if (now < correctionsDueAt(db)) return null;
   const since = now - CORRECTIONS_WINDOW_MS;
   return tx(db, () => {
     const pass: CorrectionsPass = { since, until: now, filed: [], skipped: [] };

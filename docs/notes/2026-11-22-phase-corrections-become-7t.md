@@ -24,7 +24,7 @@ Flowryn's own table is in AGENTS.md.
 
 ## The weekly pass
 
-`correctionsPass` (`src/leader/corrections.ts`) runs in the upkeep loop beside the prune. It is due when no `corrections.pass` event is younger than 7 days, so the event is its only state. For each project that is not removed, it reads the last 7 days' corrections (`correctionsOf`):
+`correctionsPass` (`src/leader/corrections.ts`) runs in the upkeep loop beside the prune. It is due when no `corrections.pass` event is younger than 7 days, so the event is its only state. No index serves events by kind, so the loop keeps the due time in memory (`correctionsDueAt`) and reads events again only once it is due, or after a daemon start. For each project that is not removed, it reads the last 7 days' corrections (`correctionsOf`):
 
 | source | id | what counts |
 |---|---|---|
@@ -119,4 +119,5 @@ Both cite `ee082dca7^` as the past mistake. It left four classes unfiled, each w
   - filing: independent approved ships, each refusal reason, the cap, no section files nothing, only a corrections scout files;
   - parsing, `phaseKind`, the skill's budget, and the steer's `by`.
 - `test/integration/corrections.test.ts`: through a real daemon and the fake harness. `flowryn learn` twice, then the pass. `dispatch --task` starts the phase as a scout of workflow `corrections`, and its task file names the correct skill's `SKILL.md`. The report's valid check becomes a ship, the one-off is refused, and the item says so.
+- `test/unit/upkeep.test.ts`: the pass runs on the loop's first pass, then not again within the week.
 - `test/unit/workflows.test.ts`: the built-in `corrections` workflow. `test/integration/leader-cli.test.ts`: the Pi leader's second `--skill`.

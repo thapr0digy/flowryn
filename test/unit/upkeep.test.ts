@@ -121,6 +121,14 @@ function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "s
 }
 
 describe("the upkeep pass", () => {
+  test("the weekly corrections pass runs on the first pass, then waits a week without reading events again (src/leader/corrections.ts)", async () => {
+    const l = loop();
+    const first = await l.upkeep.pass();
+    expect(first.corrections).toEqual({ since: 100 * HOUR - 7 * 24 * HOUR, until: 100 * HOUR, filed: [], skipped: [] });
+    expect((await l.upkeep.pass()).corrections).toBeNull();
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'corrections.pass'").get()).toEqual({ n: 1 });
+  });
+
   test("in order: build after the syncs, then the sweep of each candidate", async () => {
     seedRun("a", "cancelled", 0);
     seedRun("b", "failed", HOUR);
