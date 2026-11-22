@@ -664,7 +664,8 @@ export class Scheduler {
       const project = getProject(db, phase.project_id);
       // A landing batch's fix starts by itself on any project: the batch it fixes holds the project's landings.
       const fix = fixStartOf(db, phase.task_id);
-      if (!project || (project.autonomy !== "plan" && !fix)) continue;
+      // A removed project (flowryn project rm) starts nothing; rm refuses while a phase is open, so this only closes a race.
+      if (!project || project.removed_at != null || (project.autonomy !== "plan" && !fix)) continue;
       const task = backlog?.find((t) => t.id === phase.task_id);
       // Not in the backlog yet (its add is still pending), held, parked or already started by hand: wait.
       if (!task || task.state !== "queued" || task.hold) continue;

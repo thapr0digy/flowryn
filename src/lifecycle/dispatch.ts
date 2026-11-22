@@ -25,7 +25,7 @@ import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import { autoChecksOn, autoWaitLine, gateHarness, harnessRefusal, unverifiedVersion, waitsOnAutoCheck } from "./harness-gate.ts";
 import { checkPhaseAccounts, getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
 import { inStackedPlan, phaseReadiness, type StackBase } from "./stacks.ts";
-import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
+import { DELIVERY_MODES, requireActiveProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { modelView, openRunForTask } from "./runs.ts";
 import { isDropped } from "./drop.ts";
@@ -432,9 +432,7 @@ function recordLoose(ctx: HandlerCtx, args: Record<string, unknown>, taskId: str
 }
 
 async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): Promise<DispatchPlan> {
-  const projectId = stringArg(args as never, "project")!;
-  const project = getProject(ctx.db, projectId);
-  if (!project) throw new FlowrynError("not_found", `no project ${projectId}`, "flowryn project list");
+  const project = requireActiveProject(ctx.db, stringArg(args as never, "project")!);
   if (stringArg(args as never, "kind") === "ask") return prepareAsk(ctx, args, project);
   if (args["max-usd"] !== undefined || boolArg(args as never, "no-promote")) throw new FlowrynError("bad_args", "--max-usd and --no-promote go with --kind ask");
   const override = modeOverride(args, project);
@@ -704,8 +702,7 @@ export const planVerb: VerbSpec = {
   scope: { kind: "project", arg: "project" },
   apply(ctx, args) {
     const projectId = stringArg(args, "project")!;
-    const project = getProject(ctx.db, projectId);
-    if (!project) throw new FlowrynError("not_found", `no project ${projectId}`, "flowryn project list");
+    const project = requireActiveProject(ctx.db, projectId);
     const parsed = parsePlan(stringArg(args, "body") ?? "");
     const brief = checkBrief(ctx, args, "ship", "brief");
     const config = ctx.config();

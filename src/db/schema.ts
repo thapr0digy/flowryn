@@ -1049,6 +1049,16 @@ CREATE TABLE flaky_tests (
 );
 `;
 
+/**
+ * Migration 67, project rm (docs/notes/2026-11-22-flowryn-project-rm-74.md): a removed project
+ * keeps its row (runs, plans and events still name it) with the time and reason it was removed;
+ * upkeep, the scheduler and project list skip it from then on.
+ */
+const PROJECT_REMOVED_SQL = /* sql */ `
+ALTER TABLE projects ADD COLUMN removed_at INTEGER;
+ALTER TABLE projects ADD COLUMN removed_reason TEXT;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1345,6 +1355,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 64, name: "landing-batches", sql: LANDING_BATCHES_SQL },
   { version: 65, name: "batch-fix", sql: BATCH_FIX_SQL },
   { version: 66, name: "flaky-tests", sql: FLAKY_TESTS_SQL },
+  { version: 67, name: "project-removed", sql: PROJECT_REMOVED_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

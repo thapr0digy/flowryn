@@ -212,7 +212,7 @@ function nmProjects(config: FlowrynConfig): NmProject[] {
   if (!existsSync(dbPath)) return [];
   const db = openDb(dbPath, { readonly: true });
   try {
-    return db.query("SELECT id, path, default_branch FROM projects WHERE delivery_mode = 'no-mistakes' ORDER BY id").all() as NmProject[];
+    return db.query("SELECT id, path, default_branch FROM projects WHERE delivery_mode = 'no-mistakes' AND removed_at IS NULL ORDER BY id").all() as NmProject[];
   } catch {
     return [];
   } finally {
