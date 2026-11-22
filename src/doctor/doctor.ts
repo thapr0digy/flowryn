@@ -30,7 +30,7 @@ import { resumeCommand } from "../sched/usage.ts";
 import { githubConfig } from "../config/delivery.ts";
 import { ghAuthToken, sendsToken, type GhToken } from "../forge/github.ts";
 import { accountsConfig, type Account } from "../config/accounts.ts";
-import { nmAutoFixChecks } from "./nomistakes.ts";
+import { nmChecks } from "./nomistakes.ts";
 import { brokenGitLink, projectWorktrees, relinkHint } from "../lifecycle/relink.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -503,7 +503,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(await herdrCheck(config));
   checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
-  checks.push(...(await nmAutoFixChecks(config, env.env)));
+  checks.push(...(await nmChecks(config, env.env)));
   const policy = policyCheck(config);
   if (policy) checks.push(policy);
   checks.push(await hostCheckNow(config));
