@@ -19,7 +19,7 @@ Finish, cancel or drop that work first. A project already removed is `not_found`
 
 ## What it does
 
-It sets `projects.removed_at` and `removed_reason` (migration 67) and appends a `project.removed` event with the id, path, reason and caller role. The row stays: runs, plans, decisions and events still name the project, and `getProject` still resolves it for history. The id stays taken (`project add` with it is refused); the path may be registered again under a new id.
+It sets `projects.removed_at` and `removed_reason` (migration 67) and appends a `project.removed` event with the id, path, reason and caller role. The row stays: runs, plans, decisions and events still name the project, and `getProject` still resolves it for history. The id stays taken (`project add` with it is refused); the path may be registered again under a new id. `flowryn home adopt` carries `removed_at` and `removed_reason` over, so a project removed in the old home stays removed, and its path does not clash with a project registered here.
 
 It never touches the checkout on disk, its worktrees or its branches; delete those yourself.
 
@@ -33,4 +33,4 @@ It never touches the checkout on disk, its worktrees or its branches; delete tho
 
 ## Tests
 
-`test/unit/project-rm.test.ts`: each refusal, the removal and its event, list and `--all`, `project set` refused, upkeep's sync and the scheduler's phase autostart skipping it. `test/integration/project-rm.test.ts`: through the real daemon, a project with an open decision is refused; one without is removed, its checkout stays, and upkeep's log names it no more while it still syncs the others.
+`test/unit/project-rm.test.ts`: each refusal, the removal and its event, list and `--all`, `project set` refused, upkeep's sync and the scheduler's phase autostart skipping it. `test/unit/home-adopt.test.ts`: a removed project adopted stays removed, with no path clash. `test/integration/project-rm.test.ts`: through the real daemon, a project with an open decision is refused; one without is removed, its checkout stays, and upkeep's log names it no more while it still syncs the others.
