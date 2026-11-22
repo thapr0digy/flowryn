@@ -32,7 +32,7 @@ Flowryn's own table is in AGENTS.md.
 | steer | `m<N>` | `flowryn steer` from the leader or your terminal. The `steer.created` event now carries `by` (leader or human). Flowryn's own steers have none |
 | review page | `g<N>.<seq>` | your messages on a review page (`review_messages`, author user) |
 | sent back | `g<N>` | a review gate closed with changes and your words. Merge-gate changes are failed checks, so they are already enforced. Replaced and promoted gates are left out |
-| lesson | `l<N>` | `learnings` of the project created in the window, or confirmed again there (marked "confirmed again") |
+| lesson | `l<N>` | `learnings` of the project created in the window, or confirmed again there (marked "confirmed again"). Lessons unlearned or replaced are left out; ones set aside by the cap or by expiry still count |
 
 Each entry's words are sanitised to one line of at most 600 characters, with secrets redacted. Only the newest 150 are kept, and the list says how many were left out. Lessons with no project and standalone decisions with no task policy belong to no project, so they are not read.
 
@@ -42,7 +42,7 @@ A project with at least 2 corrections, and no earlier corrections scout still op
 - its phase runs workflow `corrections`, a new built-in scout workflow whose `investigate` stage carries the correct skill;
 - its shared brief (`plans.preamble`, carried into the task file's context) is the list.
 
-A scout is open until its latest run is cleaned, failed or cancelled, or it is dropped. The pass appends one `corrections.pass` event with `since`, `until`, `filed` (project, plan, task, count) and `skipped` (project, why). A project with no corrections is not named in it.
+A scout is open until its latest run has landed (its report is delivered), is cleaned, failed or cancelled, or it is dropped. The pass appends one `corrections.pass` event with `since`, `until`, `filed` (project, plan, task, count) and `skipped` (project, why). A project with no corrections is not named in it.
 
 Under autonomy `plan` the scout starts by itself. Under `manual` it waits for `flowryn dispatch <project> --task <id>`, and later weeks skip that project until it reports.
 
@@ -113,11 +113,11 @@ Both cite `ee082dca7^` as the past mistake. It left four classes unfiled, each w
 ## Tests
 
 - `test/unit/corrections.test.ts`:
-  - what the list reads and leaves out (rule answers, Flowryn's steers, merge-gate changes, replaced and promoted gates, other projects, last week);
+  - what the list reads and leaves out (rule answers, Flowryn's steers, merge-gate changes, replaced and promoted gates, unlearned and replaced lessons, other projects, last week);
   - sanitising and redaction;
   - the pass: one approved scout per project with its list as the brief, kind scout in the task policy and the backlog add, one event, not again within a week, an open scout skipped with its reason, one correction too few, removed projects passed over;
   - filing: independent approved ships, each refusal reason, the cap, no section files nothing, only a corrections scout files;
-  - parsing, `phaseKind`, the skill's budget, and the steer's `by`.
+  - parsing, an entry in the skill's format filed by `fileChecks` (round trip), `phaseKind`, the skill's budget, and the steer's `by`.
 - `test/integration/corrections.test.ts`: through a real daemon and the fake harness. `flowryn learn` twice, then the pass. `dispatch --task` starts the phase as a scout of workflow `corrections`, and its task file names the correct skill's `SKILL.md`. The report's valid check becomes a ship, the one-off is refused, and the item says so.
 - `test/unit/upkeep.test.ts`: the pass runs on the loop's first pass, then not again within the week.
 - `test/unit/workflows.test.ts`: the built-in `corrections` workflow. `test/integration/leader-cli.test.ts`: the Pi leader's second `--skill`.
