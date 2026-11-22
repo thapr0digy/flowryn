@@ -3,4 +3,4 @@
 # needs more than bun's 5 s default sets its own timeout, or its file calls setDefaultTimeout. Every test/integration file
 # calls useIntegrationTimeout() (test/helpers/integration-timeout.ts, 60 s); unit tests keep the 5 s default.
 # No test posts a real notification: osascript is refused in-process, and harness daemons deliver none.
-preload = ["./test/helpers/no-notifications.ts"]
+preload = ["./test/helpers/no-notifications.ts", "./test/helpers/process-guard-preload.ts"]

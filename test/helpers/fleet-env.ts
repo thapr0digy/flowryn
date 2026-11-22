@@ -6,7 +6,7 @@ import { HARNESS_IDS } from "../../src/harness/types.ts";
 import type { Timing } from "../../src/config/workers.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { FakeHerdr, type FakeHerdrOptions } from "./fake-herdr.ts";
-import { cli, cliJson, killNextDaemon, makeHome, seedLeader, startDaemon, superviseWithScript, waitUntil, type CliOptions, type DaemonProc, type RunResult, type TestHome } from "./harness.ts";
+import { cli, cliJson, killNextDaemon, makeHome, reapOwned, seedLeader, startDaemon, superviseWithScript, waitUntil, type CliOptions, type DaemonProc, type RunResult, type TestHome } from "./harness.ts";
 
 /** Fast clocks for the reconciler, so recovery paths finish in seconds. */
 export const FAST_TIMING: Partial<Timing> = {
@@ -275,6 +275,8 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
     async cleanup() {
       await daemon.kill9().catch(() => {});
       killNextDaemon(h);
+      // The daemon's verify steps and tool calls lead their own process groups: a kill -9 leaves them running.
+      await reapOwned(h);
       if (herdrUp) await herdr.stop().catch(() => {});
       if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
       else h.cleanup();

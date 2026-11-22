@@ -7,6 +7,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { stateFiles } from "../../src/config/paths.ts";
 import { PING_VERB } from "../../src/daemon/system-verbs.ts";
+import { recoverOwnedProcesses } from "../../src/runtime/bounded.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { mergeDuplicateTables } from "../../src/config/toml-parse.ts";
@@ -14,6 +15,43 @@ import { PROTO } from "../../src/version.ts";
 
 export const REPO_ROOT = resolve(import.meta.dir, "../..");
 const MAIN = join(REPO_ROOT, "src/main.ts");
+
+/** How long a fixture's wait on a file lasts at most when its test never writes it. */
+export const WAIT_FILE_LIMIT_S = 60;
+
+export interface WaitFileOptions {
+  limitS?: number;
+  /** Give up as soon as the process that started the shell is gone (default true). A crash test's wrapper that must outlive its daemon passes false. */
+  exitWithParent?: boolean;
+}
+
+/**
+ * A shell loop that waits for `path` to exist, with a bounded life: it exits 1
+ * once `limitS` seconds of polls have passed, or as soon as the process that
+ * started it is gone (a daemon a teardown force-killed), so a test that ends
+ * without writing the file never leaves it spinning. Ends the shell on giving
+ * up, so what follows it in the same script runs only once the file is there.
+ */
+export function waitForFileShell(path: string, options: WaitFileOptions = {}): string {
+  const polls = Math.ceil((options.limitS ?? WAIT_FILE_LIMIT_S) * 20);
+  const parent = options.exitWithParent === false ? "" : "kill -0 $PPID 2>/dev/null || exit 1; ";
+  return `fw_polls=0; while [ ! -f ${JSON.stringify(path)} ]; do ${parent}fw_polls=$((fw_polls + 1)); [ $fw_polls -gt ${polls} ] && exit 1; sleep 0.05; done`;
+}
+
+/**
+ * After a daemon's kill -9 at teardown: end the process groups its ledger
+ * (`<state_dir>/owned`) still names, by the identity each was recorded with
+ * (the daemon's own startup recovery, src/runtime/bounded.ts). A force-killed
+ * daemon's verify steps and tool calls lead their own groups, so nothing else
+ * ends them once the test's home is gone. Never signals a process the daemon
+ * did not record.
+ */
+export async function reapOwned(h: Pick<TestHome, "stateDir">): Promise<void> {
+  const dir = join(h.stateDir, "owned");
+  if (!existsSync(dir)) return;
+  const found = await recoverOwnedProcesses(dir, { graceMs: 1_000 });
+  if (found.failed.length > 0) throw new Error(`could not end the daemon's leftover process groups: ${JSON.stringify(found.failed)}`);
+}
 
 /**
  * The test homes' no-mistakes: `axi status` prints $FLOWRYN_HOME/nm-status (a
@@ -470,7 +508,7 @@ echo "$*" >> "$CTL/calls.log"
 n=$(grep -c . "$CTL/calls.log")
 armed=1
 if [ -f "$CTL/pause-at" ] && [ "$(cat "$CTL/pause-at")" != "$n" ]; then armed=0; fi
-wait_release() { echo $$ > "$CTL/wrapper.pid"; touch "$CTL/$1"; while [ ! -f "$CTL/release" ]; do sleep 0.05; done; }
+wait_release() { echo $$ > "$CTL/wrapper.pid"; touch "$CTL/$1"; ${waitForFileShell(join(ctl, "release"), { exitWithParent: false })}; }
 if [ $armed = 1 ] && [ -f "$CTL/pause-before" ]; then wait_release in-before; fi
 "$REAL" "$@"
 rc=$?
