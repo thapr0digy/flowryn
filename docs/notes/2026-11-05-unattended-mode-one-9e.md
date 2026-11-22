@@ -35,7 +35,7 @@ The user renewed twice on 2026-11-22; the friction was the re-ask, not the check
 - "Renew" mints a grant (action `autonomy-renew`); `flowryn grant use <grant>` runs `away --autonomous --renew <item>`, which grants the same projects for the same span (`grantSpan`: the old grant's length, rounded up to the minute, at most 7 days) from that moment. The new row supersedes a live one; `autonomy.started` carries `renews: u<N>`. The words carry over unless the answer adds new ones.
 - The leader's own `away --autonomous --renew` and a socket call without the answer are refused `approval_required`, naming the chat question. In your terminal, `--renew` is refused: grant again with `flowryn away --autonomous`.
 - Nothing renews by itself, and the briefing never asks. It prints one line (`renewLine`, src/attention/autonomy-report.ts) naming the command:
-  - once the grant has expired: last in the return brief's Autonomous section, after what it decided, merged and parked; and in the leader briefing for 24 h after the expiry;
+  - once the grant has expired: last in the return brief's Autonomous section, after what it decided, merged and parked, when the window's last grant is still the latest (an older window never offers a newer grant); and in the leader briefing for 24 h after the expiry;
   - for a grant longer than 24 h, in the leader briefing from 24 h before its end (`RENEW_NOTICE_MS`).
   A scoped leader that does not see every project of the grant gets no line.
 - The away-merge validator's approval (docs/notes/2026-11-08-merge-sensitive-prs-rr.md) keeps its own 16 h cap; the longer grant changes nothing there.
