@@ -512,6 +512,16 @@ describe("the morning report", () => {
     expect(lines.at(-1)).toContain("To renew it for 8 hours on the same projects, ask the user: flowryn chat-question autonomy-renew:web@2026-11-06T06:00");
   });
 
+  test("assumption: a window's report offers to renew only its own last grant, never a later one", () => {
+    grant(["web"], NOW + 2 * HOUR);
+    grant(["web"], NOW + 6 * HOUR, NOW + 3 * HOUR);
+    tx(db, () => expireAutonomy(db, NOW + 7 * HOUR));
+    const first = autonomyLines(db, { since: NOW - 1, until: NOW + 2 * HOUR, now: NOW + 7 * HOUR, lens: SEES_ALL });
+    expect(first.join("\n")).not.toContain("To renew");
+    const second = autonomyLines(db, { since: NOW + 3 * HOUR - 1, until: NOW + 7 * HOUR, now: NOW + 7 * HOUR, lens: SEES_ALL });
+    expect(second.at(-1)).toContain("Unattended mode u2 ended");
+  });
+
   test("nothing at all when no grant was live in the window", () => {
     expect(autonomyLines(db, { since: NOW, until: NOW + HOUR, now: NOW + HOUR, lens: SEES_ALL })).toEqual([]);
   });

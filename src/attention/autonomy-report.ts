@@ -118,7 +118,7 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
     ...group("Decided", decided),
     ...group("Merged", merges),
     ...group("Parked", parked),
-    // After what it did: the offer to renew, when the grant expired.
-    ...[renewLine(db, input.now, lens, Number.POSITIVE_INFINITY)].filter((l): l is string => l !== null),
+    // After what it did: the offer to renew, when the window's own last grant expired.
+    ...[grants.at(-1)?.id === latestAutonomy(db)?.id ? renewLine(db, input.now, lens, Number.POSITIVE_INFINITY) : null].filter((l): l is string => l !== null),
   ];
 }

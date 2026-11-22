@@ -280,7 +280,8 @@ describe("unattended mode", () => {
       // u1 is no longer the latest grant: its renew item names u2 now if u2 ends in the same minute, else nothing.
       const again = await e.fleet.json(["chat-question", ref], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
       if (again.reply.error) expect(again.reply.error).toMatchObject({ code: "not_found" });
-      else expect((again.reply.data as { question: string }).question).toContain("on the terms of u2");
+      else expect((again.reply.data as { question: string }).question).toContain("on the terms of u2 ");
+      expect(JSON.stringify(again.reply)).not.toContain("terms of u1");
     },
     { timeout: 60_000 },
   );
