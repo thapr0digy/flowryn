@@ -49,7 +49,7 @@ export function resumableFrom(db: Db, prUrl: string, head: string, policy: strin
   ).map(parseVerification);
   const held = new Set(liveJobLeases(db, "verify").map((l) => l.job_id));
   const source = rows.find((v) => interruptedByStop(v) && !held.has(v.id) && existsSync(v.worktree_path));
-  if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name)) return null;
+  if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name || s.rerun?.command !== steps[i]!.rerun?.command)) return null;
   return source;
 }
 

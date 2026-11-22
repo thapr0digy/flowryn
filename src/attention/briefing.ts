@@ -21,7 +21,7 @@ import { HARNESS_IDS } from "../harness/types.ts";
 import { waitedLabel } from "./deadline-defaults.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { RUN_HOLD_KINDS, waitingPointer, waitingRuns } from "./explanations.ts";
-import { FLAKE_KIND } from "../verify/flake.ts";
+import { FLAKE_FAILED_KIND, FLAKE_KIND } from "../verify/flake.ts";
 import { FACTS_NOTE, openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -276,19 +276,25 @@ function recordLines(db: Db): string[] {
 }
 
 /**
- * Landing batches that landed on a flake rerun since the last briefing, each shown once
- * (src/verify/flake.ts): the tests that flaked and the fix task filed for them.
+ * Flake reruns judged since the last briefing, each shown once (src/verify/flake.ts): a batch that
+ * landed on one with the tests that flaked and their fix task, or a rerun that failed or ended unrun.
  */
 function flakeLines(db: Db, lens: ScopeLens): string[] {
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
-  const rows = db.query(`SELECT ts, payload FROM events WHERE kind = '${FLAKE_KIND}' AND ts > ?1 ORDER BY seq`).all(since) as { ts: number; payload: string }[];
+  const rows = db.query(`SELECT ts, kind, payload FROM events WHERE kind IN ('${FLAKE_KIND}', '${FLAKE_FAILED_KIND}') AND ts > ?1 ORDER BY seq`).all(since) as { ts: number; kind: string; payload: string }[];
   return rows
-    .map((r) => ({ ts: r.ts, ...(JSON.parse(r.payload) as { batch: string; project: string; tests: string[]; passes: number; task: string | null; rerun: string }) }))
+    .map((r) => ({ ts: r.ts, kind: r.kind, ...(JSON.parse(r.payload) as { batch: string; project: string; tests?: string[]; passes?: number; task?: string | null; rerun: string | null; ran?: boolean }) }))
     .filter((r) => lens.project(r.project))
     .map((r) => {
-      const tests = `${sanitizeLine(r.tests[0] ?? "-", 80)}${r.tests.length > 1 ? ` (+${r.tests.length - 1} more)` : ""}`;
+      const at = `Flake ${hhmm(r.ts)}: landing batch ${r.batch} (${r.project})`;
+      if (r.kind === FLAKE_FAILED_KIND) {
+        if (r.ran) return `${at}: its failing tests failed again alone (${r.rerun}); fixed forward.`;
+        return `${at}: its flake rerun ended unrun (${r.rerun ?? "the leader retried the batch's verify"}).`;
+      }
+      const tests = r.tests ?? [];
+      const named = `${sanitizeLine(tests[0] ?? "-", 80)}${tests.length > 1 ? ` (+${tests.length - 1} more)` : ""}`;
       const task = r.task ? `; fix task ${r.task}` : "; its fix task was already filed";
-      return `Flake ${hhmm(r.ts)}: landing batch ${r.batch} (${r.project}) landed after ${tests} passed ${r.passes} of ${r.passes} alone (${r.rerun})${task}.`;
+      return `${at} landed after ${named} passed ${r.passes} of ${r.passes} alone (${r.rerun})${task}.`;
     });
 }
 

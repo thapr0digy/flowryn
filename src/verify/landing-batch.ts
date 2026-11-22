@@ -999,7 +999,10 @@ export class LandingBatches {
     if (batch.fix_state === "open") this.endFix(batch, "the leader retried the batch's verify");
     // The retry runs every step in full: a flake rerun still pending at this head is not it.
     const flake = batchFlake(batch);
-    if (flake?.state === "pending") db.query("UPDATE landing_batches SET flake = ?2 WHERE id = ?1").run(batch.id, JSON.stringify({ ...flake, state: "ended" }));
+    if (flake?.state === "pending") {
+      db.query("UPDATE landing_batches SET flake = ?2 WHERE id = ?1").run(batch.id, JSON.stringify({ ...flake, state: "ended" }));
+      appendEvent(db, { source, kind: FLAKE_FAILED_KIND, payload: { batch: batch.id, project: batch.project_id, head: flake.head, of: flake.of, rerun: null, state: "ended", step: null, ran: false }, ts: this.deps.now() });
+    }
     const now = this.deps.now();
     const request = findQueued(db, batchRef(batch.project_id, batch.id), batch.head_sha, policies.full) ?? this.queueVerify(batch, policies.full, now);
     db.query("UPDATE landing_batches SET retried_head = ?2, request_id = ?3, culprit = NULL WHERE id = ?1").run(batch.id, batch.head_sha, request.id);

@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { workflowsConfig } from "../config/workflows.ts";
 import type { FlowrynConfig } from "../config/config.ts";
@@ -23,7 +24,8 @@ import type { Verification, VerifyStep } from "./store.ts";
  *
  * - Only Go (`--- FAIL: TestX` / `FAIL <package>`) and bun (`<file>:` / `(fail) name`) output is
  *   read. A log that names no failure, a build failure, an unhandled error, more than
- *   MAX_TARGETS packages or files, or a name outside SAFE_TARGET earns no rerun.
+ *   MAX_TARGETS packages or files, a name outside SAFE_TARGET, or a log longer than
+ *   FAILURE_LOG_BYTES (its early failures would go unread) earns no rerun.
  * - A test that flaked within FLAKE_WINDOW_MS earns another rerun only while the fix task filed
  *   for it is open. One fix task per test per FLAKE_WINDOW_MS.
  */
@@ -94,7 +96,8 @@ export function failedTests(log: string): FailedTests | null {
       continue;
     }
     const file = BUN_FILE.exec(line);
-    if (file && !bunSummary) {
+    if (file) {
+      bunSummary = false;
       bunFile = file[1]!.replace(/^\.\//, "");
       continue;
     }
@@ -120,9 +123,19 @@ export function rerunCommand(template: string, targets: readonly string[]): stri
   return template.split(FAILED_PLACEHOLDER).join(targets.join(" "));
 }
 
-/** The failures of a verification's failed step, read from its log: sanitised, secrets redacted. */
+/** The failures of a verification's failed step, read from its log: sanitised, secrets redacted. Null when the log is longer than what is read. */
 export function failuresOf(v: Verification, step: VerifyStep): FailedTests | null {
-  return failedTests(redactSecrets(sanitizeBlock(readTail(join(v.dir, step.log), FAILURE_LOG_BYTES))));
+  const path = join(v.dir, step.log);
+  if (logSize(path) > FAILURE_LOG_BYTES) return null;
+  return failedTests(redactSecrets(sanitizeBlock(readTail(path, FAILURE_LOG_BYTES))));
+}
+
+function logSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
 }
 
 // --- a batch's one rerun ---------------------------------------------------------------------------
