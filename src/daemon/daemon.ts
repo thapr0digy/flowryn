@@ -473,8 +473,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       const g = github();
       const key = `${g.api_url} ${g.web_url} ${g.timeout_ms} ${g.token_env.join(",")}`;
       if (!forgeCache || forgeCache.key !== key) {
-        const token = tokenSource(env, g.token_env, resolveTool(config, "gh"), g.api_url, g.web_url);
-        forgeCache = { key, forge: new GitHubForge({ apiUrl: g.api_url, webUrl: g.web_url, token, timeoutMs: g.timeout_ms }) };
+        const token = tokenSource(env, g.token_env, resolveTool(config, "gh"), g.api_url, g.web_url, { log });
+        forgeCache = { key, forge: new GitHubForge({ apiUrl: g.api_url, webUrl: g.web_url, token, timeoutMs: g.timeout_ms, log }) };
       }
       return forgeCache.forge;
     };

@@ -20,6 +20,7 @@ import { applyNmObservation, applyPrObservation, conflictActedOn, headMoveRecord
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 import { applyFeedback, openInlineThreads } from "../reconcile/reviews.ts";
 import { feedbackItems } from "../forge/feedback.ts";
+import { asForgeCaller } from "../forge/spend.ts";
 import type { AutoMergeDelivery } from "../verify/auto-merge.ts";
 
 /**
@@ -80,6 +81,12 @@ const NM_DOWN_AFTER = 3;
 export const VALIDATION_READ_MIN_GAP_MS = 15_000;
 /** A PR's review threads (a GraphQL read, which no ETag makes free) are read at most this often while one waits on an answer. */
 export const REVIEW_THREADS_MIN_GAP_MS = 5 * 60_000;
+/**
+ * What changes slowly is read every this many polls, not every pass: a PR's
+ * reviews and comments, and a red check summary on an unchanged head (a CI
+ * re-run). At the default poll_ms of 60 s that is every 5 min.
+ */
+export const QUIET_READ_POLLS = 5;
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
 
@@ -115,6 +122,12 @@ export class DeliveryWatcher {
   private nmReadAt = Number.NEGATIVE_INFINITY;
   /** When each PR's review threads were last read. */
   private readonly threadsReadAt = new Map<string, number>();
+  /** When each PR's reviews and comments were last read. */
+  private readonly feedbackReadAt = new Map<string, number>();
+  /** Each PR's last check summary, the head it is for and when it was read: a settled one is not read again for the same head. */
+  private readonly lastChecks = new Map<string, { headSha: string; checks: ChecksSummary; notStarted: number[]; at: number }>();
+  /** The pass's PR reads, by PR URL: one `pull` per PR per pass, shared by every watcher. */
+  private passPulls = new Map<string, Promise<PullRequest>>();
 
   constructor(deps: DeliveryWatcherDeps) {
     this.deps = deps;
@@ -165,21 +178,57 @@ export class DeliveryWatcher {
 
   /** One pass over everything the watchers follow. Exposed for tests. */
   async pass(): Promise<void> {
+    this.passPulls = new Map();
     try {
-      await this.watchPrs();
+      await asForgeCaller("watch.prs", () => this.watchPrs());
       // After the PR reads, so a landing they proved retargets the runs stacked on it in the same pass.
-      await this.retargetStacks().catch((error: unknown) => this.deps.log(`delivery watcher: stacks: ${(error as Error).stack ?? String(error)}`));
+      await asForgeCaller("watch.stacks", () => this.retargetStacks()).catch((error: unknown) => this.deps.log(`delivery watcher: stacks: ${(error as Error).stack ?? String(error)}`));
       // Its own failure never holds up the watchers after it.
-      await this.watchReviews().catch((error: unknown) => this.deps.log(`delivery watcher: reviews: ${(error as Error).stack ?? String(error)}`));
+      await asForgeCaller("watch.reviews", () => this.watchReviews()).catch((error: unknown) => this.deps.log(`delivery watcher: reviews: ${(error as Error).stack ?? String(error)}`));
       await this.watchLocalMerges();
-      await this.watchNoMistakes();
+      await asForgeCaller("watch.ci-wait", () => this.watchNoMistakes());
       this.landDeliveredScouts();
       this.resumeCleanups();
-      await this.settleWatches();
+      await asForgeCaller("watch.after", () => this.settleWatches());
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
+    this.passPulls = new Map();
     this.deps.passed?.();
+  }
+
+  /** The PR as this pass read it: the first watcher to ask reads it, the rest share that read; a failed read is not kept. */
+  private pullOf(forge: Forge, ref: PrRef, url: string): Promise<PullRequest> {
+    const pulls = this.passPulls;
+    const shared = pulls.get(url);
+    if (shared) return shared;
+    const read = forge.pull(ref);
+    pulls.set(url, read);
+    read.catch(() => {
+      if (pulls.get(url) === read) pulls.delete(url);
+    });
+    return read;
+  }
+
+  /**
+   * The PR head's checks and, when red, which ones GitHub never started.
+   * Read again only when the head moved, the last summary had none or one
+   * still pending, or it was red QUIET_READ_POLLS polls ago (a re-run on the
+   * same head); a settled green stands until the head moves (a merge reads
+   * its checks afresh, src/policy/merge.ts).
+   */
+  private async checksOf(forge: Forge, ref: PrRef, pr: PullRequest, run: RunWithPolicy, url: string): Promise<{ checks: ChecksSummary; notStarted: number[] }> {
+    const last = this.lastChecks.get(url);
+    const settled = last && last.headSha === pr.headSha && (last.checks.state === "green" || (last.checks.state === "red" && this.deps.now() - last.at < this.quietGapMs()));
+    if (settled) return last;
+    const checks = await forge.checks(ref, pr.headSha);
+    const notStarted = checks.state === "red" ? await this.notStartedOf(forge, ref, checks, run.project_id, url) : [];
+    this.lastChecks.set(url, { headSha: pr.headSha, checks, notStarted, at: this.deps.now() });
+    return { checks, notStarted };
+  }
+
+  private quietGapMs(): number {
+    return QUIET_READ_POLLS * this.deps.pollMs();
   }
 
   /** Stacked runs whose base landed are retargeted; a base that cannot land is flagged (src/lifecycle/stacks.ts). */
@@ -220,9 +269,8 @@ export class DeliveryWatcher {
       const ref = parsePrUrl(delivered.ref, this.deps.webUrl());
       if (!ref) continue;
       try {
-        const pr = await forge.pull(ref);
-        const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
-        const notStarted = checks?.state === "red" ? await this.notStartedOf(forge, ref, checks, run.project_id, delivered.ref) : [];
+        const pr = await this.pullOf(forge, ref, delivered.ref);
+        const { checks, notStarted } = pr.state === "open" ? await this.checksOf(forge, ref, pr, run, delivered.ref) : { checks: null, notStarted: [] };
         const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
         const autoMerge = this.deps.autoMerge;
         const carry =
@@ -268,9 +316,11 @@ export class DeliveryWatcher {
   /**
    * Reviews and comments on every open delivered PR whose ship is delivered
    * or back at work on it (src/reconcile/reviews.ts): each new one steers the
-   * worker, an unanswered thread is raised again. Review threads' resolution
-   * (GraphQL) is read only while an inline thread waits, at most every
-   * REVIEW_THREADS_MIN_GAP_MS per PR. Shares the PR watcher's GitHub backoff.
+   * worker, an unanswered thread is raised again. A PR's feedback is read
+   * every QUIET_READ_POLLS polls, not every pass; its threads' resolution
+   * (GraphQL) only while an inline thread waits, at most every
+   * REVIEW_THREADS_MIN_GAP_MS. Shares the PR watcher's GitHub backoff and
+   * the pass's PR reads.
    */
   private async watchReviews(): Promise<void> {
     const { db, now } = this.deps;
@@ -287,10 +337,12 @@ export class DeliveryWatcher {
       if (!delivered || delivered.kind !== "pr") continue;
       const ref = parsePrUrl(delivered.ref, this.deps.webUrl());
       if (!ref) continue;
+      if (now() - (this.feedbackReadAt.get(delivered.ref) ?? Number.NEGATIVE_INFINITY) < this.quietGapMs()) continue;
       try {
-        const pr = await forge.pull(ref);
+        const pr = await this.pullOf(forge, ref, delivered.ref);
         if (pr.state !== "open") continue;
         const feedback = await forge.feedback(ref);
+        this.feedbackReadAt.set(delivered.ref, now());
         const lastThreads = this.threadsReadAt.get(delivered.ref) ?? Number.NEGATIVE_INFINITY;
         const readThreads = openInlineThreads(db, run.task_id) > 0 && now() - lastThreads >= REVIEW_THREADS_MIN_GAP_MS;
         const threads = readThreads ? await forge.reviewThreads(ref) : null;
@@ -529,7 +581,7 @@ export class DeliveryWatcher {
     const alert = this.deps.ciWaitAlertMin();
     if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return;
     const seen = deliveryBasis(db, run.id);
-    const checks = await this.prCheckCount(nm.pr);
+    const checks = await this.prCheckCount(run, nm.pr);
     if (checks === null || checks > 0) return;
     const project = getProject(db, run.project_id);
     if (!project) return;
@@ -546,14 +598,14 @@ export class DeliveryWatcher {
   }
 
   /** How many checks the PR's head has; 0 with no PR named; null when unknown (GitHub failed or backing off, not a PR here, or no longer open). */
-  private async prCheckCount(prUrl: string): Promise<number | null> {
+  private async prCheckCount(run: RunWithPolicy, prUrl: string): Promise<number | null> {
     if (!prUrl) return 0;
     const ref = parsePrUrl(prUrl, this.deps.webUrl());
     if (!ref || this.deps.now() < this.forgeQuietUntil) return null;
     try {
       const forge = this.deps.forge();
-      const pr = await forge.pull(ref);
-      const count = pr.state === "open" ? (await forge.checks(ref, pr.headSha)).checks.length : null;
+      const pr = await this.pullOf(forge, ref, prUrl);
+      const count = pr.state === "open" ? (await this.checksOf(forge, ref, pr, run, prUrl)).checks.checks.length : null;
       tx(this.deps.db, () => noteForgeUp(this.deps.db, "github", this.deps.now()));
       this.backoffMs = 0;
       return count;
