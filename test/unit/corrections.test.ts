@@ -15,7 +15,7 @@ import {
   listedIds,
   parseChecks,
 } from "../../src/leader/corrections.ts";
-import { learn } from "../../src/leader/learnings.ts";
+import { getLesson, learn, unlearn } from "../../src/leader/learnings.ts";
 import { intentArgs, pendingIntents } from "../../src/journal/journal.ts";
 import { getProject, listProjects, type ProjectRow } from "../../src/lifecycle/projects.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
@@ -131,6 +131,18 @@ describe("the week's corrections", () => {
   });
 });
 
+test("lessons the user unlearned or replaced are not corrections; ones set aside by the cap or expiry still are", () => {
+  const unlearned = lesson("web", "User: wrong lesson.", NOW - 3 * DAY);
+  const replaced = lesson("web", "User: first wording.", NOW - 3 * DAY);
+  const replacement = learn(db, { scope: "default", project: "web", text: "User: better wording.", until: null, replaces: getLesson(db, replaced), max: 25, now: NOW - 2 * DAY, source: "cli" }).lesson.id;
+  const capped = lesson("web", "User: capped.", NOW - 3 * DAY);
+  tx(db, () => {
+    unlearn(db, getLesson(db, unlearned)!, NOW - DAY, "cli");
+    db.query("UPDATE learnings SET archived_at = ?2, archive_reason = 'cap' WHERE id = ?1").run(capped, NOW - DAY);
+  });
+  expect(correctionsOf(db, "web", NOW - CORRECTIONS_WINDOW_MS, NOW).map((r) => r.id).toSorted()).toEqual([`l${capped}`, `l${replacement}`].toSorted());
+});
+
 describe("the weekly pass", () => {
   test("files one approved scout per project with two corrections or more, its list the plan's shared brief; one event; not again within a week", () => {
     seedWeek();
@@ -146,9 +158,6 @@ describe("the weekly pass", () => {
     expect(db.query("SELECT kind, workflow, auto FROM task_policy WHERE task_id = ?1").get(web.task)).toEqual({ kind: "scout", workflow: "corrections", auto: 1 });
     const add = pendingIntents(db).find((i) => i.task_id === web.task)!;
     expect(intentArgs(add).flags).toMatchObject({ kind: "scout", repo: "web" });
-    const phase = db.query("SELECT body FROM plan_phases WHERE task_id = ?1").get(web.task) as { body: string };
-    expect(phase.body).toContain("Follow the correct skill your stage names");
-    expect(phase.body).toContain("## Checks to ship");
     const events = db.query("SELECT payload FROM events WHERE kind = ?1").all(CORRECTIONS_PASS_KIND) as { payload: string }[];
     expect(events).toHaveLength(1);
     expect(JSON.parse(events[0]!.payload)).toMatchObject({ since: NOW - CORRECTIONS_WINDOW_MS, until: NOW, skipped: [] });
@@ -171,12 +180,12 @@ describe("the weekly pass", () => {
     const webTask = first.filed.find((f) => f.project === "web")!.task;
     expect(pass.filed).toEqual([]);
     expect(pass.skipped).toEqual([{ project: "web", why: `${webTask}, the last corrections scout, has not reported` }]);
-    // Once it has reported (its run cleaned), the next week's scout is filed.
+    // Once it has reported (its run landed, before cleanup), the next week's scout is filed.
     tx(db, () => {
       db.query("UPDATE projects SET removed_at = NULL WHERE id = 'api'").run();
       db.query(
         `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
-         VALUES ('r-scout', ?1, 'claude', '2.1.281', 'cleaned', 'gone', 'corrections', 'investigate', '/tmp/s', 'fm/s', 'abc', 'h', ?2, ?2)`,
+         VALUES ('r-scout', ?1, 'claude', '2.1.281', 'landed', 'gone', 'corrections', 'investigate', '/tmp/s', 'fm/s', 'abc', 'h', ?2, ?2)`,
       ).run(webTask, later);
     });
     const third = later + CORRECTIONS_WINDOW_MS;
@@ -206,6 +215,20 @@ function scoutPlan(): { project: ProjectRow; task: string; preamble: string } {
 }
 
 describe("the scout's checks become ships", () => {
+  test("a report written the way the correct skill tells the scout to, its headings and entry template filled in, files a ship", () => {
+    const { project, task, preamble } = scoutPlan();
+    const skill = STAGE_SKILLS.find((s) => s.name === CORRECT_SKILL_NAME)!;
+    const headings = [...skill.body.matchAll(/`## ([^`]+)`/g)].map((m) => m[1]!);
+    const template = skill.body.split("\n").filter((l) => l.startsWith("    ")).map((l) => l.slice(4));
+    const fill: Record<string, string> = { "### ": "### Labels are single words", "Evidence: ": "Evidence: g10.1, l1", "Enforcer: ": "Enforcer: test", "Past mistake: ": "Past mistake: 1a2b3c4" };
+    const entry = template.map((l) => Object.entries(fill).find(([prefix]) => l.startsWith(prefix))?.[1] ?? "A test over every label in ui/.");
+    const report = headings.map((heading, i) => `## ${heading}\n${i === 1 ? entry.join("\n") : "None."}`).join("\n\n");
+    const filed = tx(db, () => fileChecks(db, { project, scoutTask: task, runId: "r-scout", plan: { preamble }, report, skillPath: null, now: NOW + DAY }))!;
+    expect(filed.refused).toEqual([]);
+    expect(filed.ships).toHaveLength(1);
+    expect(db.query("SELECT title FROM plan_phases WHERE plan_id = ?1").get(filed.plan!)).toEqual({ title: "Labels are single words" });
+  });
+
   test("each entry citing two listed ids is one independent approved ship, its brief the scout's list; the rest are refused with the reason", () => {
     const { project, task, preamble } = scoutPlan();
     const report = REPORT(
@@ -281,13 +304,10 @@ describe("plan phases of a scout workflow are scouts", () => {
     for (const id of ["fix", "feature", "feature-ui", "draft", "mine", null]) expect(phaseKind(id)).toBe("ship");
   });
 
-  test("the correct skill is one of the worker skills, within the stage skills' budget, and names its report section", () => {
+  test("the correct skill is one of the worker skills, within the stage skills' budget", () => {
     const skill = STAGE_SKILLS.find((s) => s.name === CORRECT_SKILL_NAME)!;
     expect(skill.body.length).toBeLessThan(6000);
     expect(skill.description.length).toBeLessThan(260);
-    expect(skill.body).toContain("## Checks to ship");
-    expect(skill.body).toContain("fail on that commit and pass on HEAD");
-    expect(skill.body).toContain("rule↔enforcer table");
   });
 
   test("a person's steer carries who sent it; Flowryn's own does not", () => {

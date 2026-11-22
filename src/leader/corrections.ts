@@ -3,7 +3,7 @@ import { appendEvent } from "../db/events.ts";
 import { recordPlan, type PlanPhase } from "../lifecycle/plans.ts";
 import { isDropped } from "../lifecycle/drop.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
-import { TERMINAL_STATES } from "../lifecycle/runs.ts";
+import { TERMINAL_STATES, type RunState } from "../lifecycle/runs.ts";
 import { CHECKS_HEADING, CORRECT_SKILL_NAME } from "../skills/correct.ts";
 import { redactSecrets } from "../util/redact.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
@@ -100,7 +100,8 @@ export function correctionsOf(db: Db, project: string, since: number, until: num
   const lessons = db
     .query(
       `SELECT id, text, created_at, reinforced_at FROM learnings
-       WHERE project = ?1 AND ((created_at >= ?2 AND created_at < ?3) OR (reinforced_at > created_at AND reinforced_at >= ?2 AND reinforced_at < ?3))`,
+       WHERE project = ?1 AND (archive_reason IS NULL OR archive_reason NOT IN ('unlearned', 'replaced'))
+         AND ((created_at >= ?2 AND created_at < ?3) OR (reinforced_at > created_at AND reinforced_at >= ?2 AND reinforced_at < ?3))`,
     )
     .all(project, since, until) as { id: number; text: string; created_at: number; reinforced_at: number }[];
   for (const l of lessons) {
@@ -140,6 +141,9 @@ function scoutBody(project: string, since: number, until: number, count: number)
   ].join("\n");
 }
 
+/** A scout's run has ended once it has delivered its report (landed) or stopped. */
+const SCOUT_ENDED: readonly RunState[] = ["landed", ...TERMINAL_STATES];
+
 /** The latest corrections scout of a project that has not ended, or null. */
 function openScout(db: Db, project: string): string | null {
   const tasks = db
@@ -148,7 +152,7 @@ function openScout(db: Db, project: string): string | null {
   for (const { task_id } of tasks) {
     if (isDropped(db, task_id)) continue;
     const latest = db.query("SELECT state FROM runs WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1").get(task_id) as { state: string } | null;
-    if (!latest || !(TERMINAL_STATES as readonly string[]).includes(latest.state)) return task_id;
+    if (!latest || !(SCOUT_ENDED as readonly string[]).includes(latest.state)) return task_id;
   }
   return null;
 }
