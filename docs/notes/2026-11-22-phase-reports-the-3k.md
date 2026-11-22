@@ -20,7 +20,7 @@ A refusal is `invalid_report` (exit 3), the same code as every other report refu
 ## Choices
 
 - The error code is `invalid_report`, not the `bad_args` the brief named, because every other report refusal (size, symlink, outside the worktree) already uses it.
-- Short reports are exempt. The contract suite's one-line `contract ok` report and the fake harness's one-line reports still deliver, so no contract revision bump was needed. The fake harness's `deliver-decisions` report now opens with a `## Short answer`, because a three-decision report crosses 15 lines. The live lab scouts (`scripts/lab/m2-live.ts`, `scripts/lab/v1-live.ts`) put their `ls src` listing under a one-line short answer for the same reason.
+- Short reports are exempt. The contract suite's one-line `contract ok` report and the fake harness's one-line reports still deliver, so no contract revision bump was needed. The fake harness's `deliver-decisions` report now opens with a `## Short answer`, so it stays deliverable once a decision spec pushes it past 15 lines (four decisions, or three with `Reserved` lines); its three-decision report sat at 14. The live lab scouts (`scripts/lab/m2-live.ts`, `scripts/lab/v1-live.ts`) put their 30-plus-line `ls src` listing under a one-line short answer.
 - The brief's own model report (scout how-lauren-tan-rx) has a 6.1 KB first screen and would be refused by 0.1 KB. The 6 KB limit was kept, because its nine-row proposals table can lose a few words.
 
 ## Tests
