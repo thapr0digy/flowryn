@@ -537,15 +537,19 @@ describe("deliver matches the task kind", () => {
         "Scout",
         `FAKE: write long.md # Cache\\n\\n${evidence}`,
         "FAKE: verb deliver --report $FLOWRYN_REPORT_DIR/long.md",
+        "FAKE: wait-file go",
         `FAKE: write good.md # Cache\\n\\n## Short answer\\nThe cache evicts too early.\\n\\n## Evidence\\n${evidence}`,
         "FAKE: verb deliver --report $FLOWRYN_REPORT_DIR/good.md",
         "FAKE: sleep 30000",
       ];
       const { task, run } = await env.dispatch(steps.join("\n"));
-      const [refused, accepted] = await fakeReplies(env, task, 2);
+      const [refused] = await fakeReplies(env, task, 1);
       expect(refused!.code).toBe(3);
       expect(refused!.reply.error).toMatchObject({ code: "invalid_report" });
       expect(JSON.stringify(refused!.reply.error)).toContain('no \\"## Short answer\\" section');
+      expect(existsSync(join(env.h.dataDir, task, "report.md"))).toBe(false);
+      writeFileSync(join(env.h.dataDir, task, "go"), "");
+      const [, accepted] = await fakeReplies(env, task, 2);
       expect(accepted!.code).toBe(0);
       await env.waitRun(run, delivered, "the run to land with its report");
       expect(readFileSync(join(env.h.dataDir, task, "report.md"), "utf8")).toContain("## Short answer");

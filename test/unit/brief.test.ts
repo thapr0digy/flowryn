@@ -121,9 +121,9 @@ describe("reportProblems", () => {
     expect(reportProblems(`# Cache\n\`\`\`md\n## Short answer\nfake\n\`\`\`\n${lines(20)}`)[0]).toStartWith('no "## Short answer"');
   });
 
-  test("a TL;DR or Summary heading counts as the short answer", () => {
-    expect(reportProblems(`## TL;DR\nIt evicts early.\n## Evidence\n${lines(30)}`)).toEqual([]);
-    expect(reportProblems(`## Summary\nIt evicts early.\n## Evidence\n${lines(30)}`)).toEqual([]);
+  test("only a Short answer heading counts: TL;DR or Summary over 15 lines is refused", () => {
+    expect(reportProblems(`## TL;DR\nIt evicts early.\n## Evidence\n${lines(30)}`)[0]).toStartWith('no "## Short answer"');
+    expect(reportProblems(`## Summary\nIt evicts early.\n## Evidence\n${lines(30)}`)[0]).toStartWith('no "## Short answer"');
   });
 });
 

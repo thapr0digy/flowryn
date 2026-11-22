@@ -426,7 +426,10 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
   // rewrite `real` between the copy above and a read of it, but nothing writes `artifact` afterward.
   const text = readFileSync(artifact, "utf8");
   const problems = reportProblems(text);
-  if (problems.length > 0) throw new FlowrynError("invalid_report", `the report breaks the scout report rules: ${problems.join("; ")}`, "$FLOWRYN_BIN template report");
+  if (problems.length > 0) {
+    if (artifact !== real) rmSync(artifact, { force: true });
+    throw new FlowrynError("invalid_report", `the report breaks the scout report rules: ${problems.join("; ")}`, "$FLOWRYN_BIN template report");
+  }
   return { source: real, artifact, bytes: st.size, text };
 }
 

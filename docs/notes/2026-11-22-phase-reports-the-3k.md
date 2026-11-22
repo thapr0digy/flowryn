@@ -8,10 +8,10 @@ Plan p104, proposal 8. Scout reports had grown to 40 KB, and the leader had to r
 
 `reportProblems` (`src/lifecycle/brief.ts`) checks the stored copy of the report. It is a plain parser with no model:
 
-- **Short answer.** A `## Short answer` section (or `## TL;DR`, `## Summary`) of at most 15 non-blank lines. It must not be empty or a template slot. A report of 15 non-blank lines or fewer needs no heading, because the whole report is already the short answer.
+- **Short answer.** A `## Short answer` section (no other heading counts) of at most 15 non-blank lines. It must not be empty or a template slot. A report of 15 non-blank lines or fewer needs no heading, because the whole report is already the short answer.
 - **First screen.** The first screen is everything from the top of the file to the second `## ` section after the short answer. In the template that is the title, the short answer and the proposals table. It must be 6 KB (6144 UTF-8 bytes) or less. Anything below it, such as an evidence section, is free, and so is anything in a linked file. A short answer buried under evidence fails this rule, because the first screen then runs from the top down past the evidence.
 
-A refusal is `invalid_report` (exit 3), the same code as every other report refusal. The message names each rule the report breaks, and the hint is `$FLOWRYN_BIN template report`. Nothing changes on refusal: the run stays running and the worker delivers again. Headings inside fenced code blocks are text, as in briefs.
+A refusal is `invalid_report` (exit 3), the same code as every other report refusal. The message names each rule the report breaks, and the hint is `$FLOWRYN_BIN template report`. On refusal the stored copy at `<data_dir>/<task>/report.md` is removed, so promote and follow-on context never carry a refused report; the run stays running and the worker delivers again. Headings inside fenced code blocks are text, as in briefs.
 
 ## Template and contract
 

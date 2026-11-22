@@ -50,7 +50,7 @@ const SPEC: SectionDef[] = [
 ];
 
 /** A scout's report (docs/notes/2026-11-22-phase-reports-the-3k.md): reportProblems adds its size rules. */
-const REPORT: SectionDef[] = [{ title: "Short answer", aliases: ["tl;dr", "tldr", "summary"] }];
+const REPORT: SectionDef[] = [{ title: "Short answer" }];
 
 export const DOC_SECTIONS: Readonly<Record<DocKind, readonly SectionDef[]>> = { ship: SHIP, scout: SCOUT, handoff: HANDOFF, spec: SPEC, report: REPORT };
 
