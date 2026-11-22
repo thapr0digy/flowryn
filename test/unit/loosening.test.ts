@@ -38,6 +38,12 @@ describe("findLoosenings", () => {
     expect(findLoosenings(diff("bunfig.toml", ["timeout = 5000"], ["timeout = 20000"])).map((l) => l.kind)).toEqual(["raised"]);
     expect(findLoosenings(diff("Makefile", ["\tgo test -timeout 5m ./..."], ["\tgo test -timeout 10m ./..."])).map((l) => l.kind)).toEqual(["raised"]);
     expect(findLoosenings(diff("Makefile", ["\tgo test -parallel 4 ./..."], ["\tgo test -parallel 8 ./..."]))).toEqual([]);
+    // A package manifest's test script, and Python's tool sections, are test runner config too.
+    expect(findLoosenings(diff("package.json", [`    "test": "bun test --timeout 5000",`], [`    "test": "bun test --timeout 20000",`]))).toEqual([
+      { file: "package.json", kind: "raised", line: `"test": "bun test --timeout 20000",`, from: "5000", to: "20000" },
+    ]);
+    expect(findLoosenings(diff("pyproject.toml", ["timeout = 30"], ["timeout = 60"])).map((l) => l.kind)).toEqual(["raised"]);
+    expect(findLoosenings(diff("package.json", [`  "version": "1.2.0",`], [`  "version": "1.3.0",`]))).toEqual([]);
     // Any other file's numbers are its own business.
     expect(findLoosenings(diff("src/server.ts", ["const timeout = 5000;"], ["const timeout = 9000;"]))).toEqual([]);
   });
@@ -56,6 +62,9 @@ describe("findLoosenings", () => {
   test("a new entry in an allowlist file; comments and removals are not", () => {
     expect(findLoosenings(diff("config/host-allowlist.txt", ["a.example"], ["a.example", "b.example", "# why"])).map((l) => [l.kind, l.line])).toEqual([["allowlist", "b.example"]]);
     expect(findLoosenings(diff("config/allow_list.txt", ["a.example"], []))).toEqual([]);
+    // Removing a list's last entry drops the comma from the one before it: that narrows the list.
+    expect(findLoosenings(diff("config/allowlist.json", [`  "a.example",`, `  "b.example"`], [`  "a.example"`]))).toEqual([]);
+    expect(findLoosenings(diff("config/allowlist.json", [`  "a.example"`], [`  "a.example",`, `  "b.example"`])).map((l) => l.line)).toEqual([`"b.example"`]);
   });
 
   test("a deleted file and an ordinary edit loosen nothing", () => {

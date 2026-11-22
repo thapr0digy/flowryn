@@ -531,13 +531,20 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   return { waived, alreadyMerged: false, localGreen };
 }
 
+/** What proved this head: the gate's local green, else every GitHub check green (at least one); null when nothing did. */
+function verifierProof(facts: MergeFacts, gate: GateResult): string | null {
+  if (gate.localGreen) return `verify ${gate.localGreen}`;
+  const checks = facts.pr ? (facts.checks?.checks ?? []) : [];
+  return checks.length > 0 && checks.every((c) => c.state === "green") ? `GitHub's ${checks.length} check${checks.length === 1 ? "" : "s"}` : null;
+}
+
 /**
  * The gate, then its last step for a fix whose diff loosens a gate: the leader's countersign
- * (src/policy/countersign.ts), asked once the rest of the gate, the verify proof among it, passed.
+ * (src/policy/countersign.ts), asked once the rest of the gate passed and a verifier proved the head.
  */
 export function checkGateAndCountersign(db: Db, facts: MergeFacts, chosen: ChoiceResult, now: number): GateResult {
   const gate = checkGate(facts, chosen);
-  if (!gate.alreadyMerged) requireCountersign(db, { run: facts.run, head: facts.head, loosening: facts.loosening, proof: gate.localGreen, now });
+  if (!gate.alreadyMerged) requireCountersign(db, { run: facts.run, head: facts.head, loosening: facts.loosening, proof: verifierProof(facts, gate), now });
   return gate;
 }
 

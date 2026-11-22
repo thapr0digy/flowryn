@@ -8,7 +8,8 @@ import { basename } from "node:path";
  * positives on ordinary numeric edits away:
  *
  * - raised: a number raised on a changed line of a file named *budget*, or of a test runner's
- *   config (VERIFY_CONFIG) on a line naming a timeout, deadline, threshold, limit or retries.
+ *   config or package manifest (VERIFY_CONFIG) on a line naming a timeout, deadline, threshold,
+ *   limit, retries or budget.
  * - skip: an added line that skips a test (SKIP_MARKERS), in any file but Markdown.
  * - allowlist: a new entry in a file named *allowlist* (or allow-list, allow_list).
  */
@@ -26,8 +27,8 @@ export interface Loosening {
 const MAX_LINE = 160;
 const BUDGET_FILE = /budget/i;
 const ALLOWLIST_FILE = /allow[-_]?list/i;
-/** Test runner config: what a project's verify steps run under. */
-const VERIFY_CONFIG = /^(?:bunfig\.toml|makefile|gnumakefile|.+\.mk|(?:vitest|jest|playwright)\.config\.[cm]?[jt]s|pytest\.ini|tox\.ini|\.golangci\.ya?ml)$/i;
+/** Test runner config: what a project's verify steps run under, scripts and tool sections of package manifests among it. */
+const VERIFY_CONFIG = /^(?:bunfig\.toml|package\.json|makefile|gnumakefile|.+\.mk|(?:vitest|jest|playwright)\.config\.[cm]?[jt]s|jest\.config\.json|pytest\.ini|tox\.ini|pyproject\.toml|setup\.cfg|\.golangci\.ya?ml)$/i;
 const GATE_WORD = /timeout|deadline|threshold|limit|retr(?:y|ies)|budget/i;
 /** A test skipped: JS/TS, Go, Python and Rust spellings. A platform-only skipIf (AGENTS.md's darwin rule) is not one. */
 const SKIP_MARKERS = [/\b(?:test|it|describe|suite|context)\.(?:skip|todo)\s*\(/, /\b(?:xit|xdescribe|xtest)\s*\(/, /\.skipIf\s*\(/, /\b[tb]\.Skip(?:f|Now)?\s*\(/, /@pytest\.mark\.(?:skip|skipif|xfail)\b/, /\bpytest\.skip\s*\(/, /@unittest\.skip/, /#\[ignore\]/];
@@ -77,6 +78,11 @@ function hunks(diff: string): Hunk[] {
   return out;
 }
 
+/** A line as it is compared for a move: trimmed, without a list's trailing comma. */
+function entry(line: string): string {
+  return line.trim().replace(/,$/, "");
+}
+
 function cut(line: string): string {
   const trimmed = line.trim();
   return trimmed.length > MAX_LINE ? `${trimmed.slice(0, MAX_LINE - 1)}…` : trimmed;
@@ -112,8 +118,8 @@ export function findLoosenings(diff: string): Loosening[] {
     const name = basename(h.file);
     const budget = BUDGET_FILE.test(name);
     const verifyConfig = VERIFY_CONFIG.test(name);
-    // A line moved within the hunk is not new.
-    const removed = new Set(h.removed.map((l) => l.trim()));
+    // A line moved within the hunk is not new, nor one that only gained or lost a list's trailing comma.
+    const removed = new Set(h.removed.map(entry));
     if (budget || verifyConfig) {
       h.added.forEach((after, i) => {
         const before = h.removed[i];
@@ -124,7 +130,7 @@ export function findLoosenings(diff: string): Loosening[] {
     }
     for (const added of h.added) {
       const trimmed = added.trim();
-      if (trimmed.length === 0 || removed.has(trimmed)) continue;
+      if (trimmed.length === 0 || removed.has(entry(added))) continue;
       if (!PROSE_FILE.test(name) && isSkip(added)) found.push({ file: h.file, kind: "skip", line: cut(added) });
       else if (ALLOWLIST_FILE.test(name) && !/^(?:#|\/\/)/.test(trimmed)) found.push({ file: h.file, kind: "allowlist", line: cut(added) });
     }

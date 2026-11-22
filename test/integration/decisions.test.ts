@@ -316,6 +316,17 @@ describe("run-scoped and standalone keys", () => {
     expect(added.code).not.toBe(0);
     expect(JSON.stringify(added.reply)).toContain("q901");
   });
+
+  test("decision add refuses the merge gate's countersign origin, so a leader cannot forge a countersign ahead of the gate", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const added = await env.json(["decision", "add", "--origin", "countersign", "--key", "t1-0123456789ab", "--options", "countersign,refuse", "--question", "x", "--body-file", "-"], { stdin: "x" });
+    expect(added.code).not.toBe(0);
+    expect(JSON.stringify(added.reply)).toContain("only it opens a countersign");
+    const db = env.h.db();
+    expect(db.query("SELECT COUNT(*) AS n FROM decisions WHERE origin = 'countersign'").get()).toEqual({ n: 0 });
+    db.close();
+  });
 });
 
 describe("C1 end to end", () => {

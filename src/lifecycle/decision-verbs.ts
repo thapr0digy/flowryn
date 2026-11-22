@@ -10,6 +10,7 @@ import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { findAttempt, matchAttempt } from "../policy/approvals.ts";
+import { COUNTERSIGN_ORIGIN } from "../policy/countersign.ts";
 import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
@@ -212,6 +213,8 @@ const decisionAdd: VerbSpec = {
     const key = stringArg(args, "key");
     const question = stringArg(args, "question");
     if (!key || !question) throw new FlowrynError("bad_args", "decision add needs --key and --question");
+    const origin = stringArg(args, "origin") ?? "leader";
+    if (origin === COUNTERSIGN_ORIGIN) throw new FlowrynError("bad_args", `origin ${COUNTERSIGN_ORIGIN} is the merge gate's own: only it opens a countersign`, "use another --origin");
     const project = stringArg(args, "project");
     if (project && !getProject(ctx.db, project)) throw new FlowrynError("not_found", `no project ${project}`);
     const blocks = (args.blocks as string[] | undefined) ?? [];
@@ -225,7 +228,7 @@ const decisionAdd: VerbSpec = {
     if (recommend && opts.length > 0 && !opts.includes(recommend)) throw new FlowrynError("bad_args", `--recommend must be one of: ${opts.join(", ")}`);
     const context = sanitizeBlock(stringArg(args, "body") ?? "").trim() || null;
     const reserved = reservedReason({ question, context, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: blocksYoloOff(ctx, blocks) }, decisionsConfig(ctx.config()));
-    const made = createStandaloneDecision(ctx.db, { key, question, options: opts, recommendation: recommend, context, origin: stringArg(args, "origin") ?? "leader", reservedReason: reserved, blocks, project: project ?? null, now: ctx.now() });
+    const made = createStandaloneDecision(ctx.db, { key, question, options: opts, recommendation: recommend, context, origin, reservedReason: reserved, blocks, project: project ?? null, now: ctx.now() });
     if (made.created) recordTaskScope(ctx.db, ctx.caller, made.taskId);
     // The row's actual reserved_reason, not the freshly computed one: a repeat add never clears an
     // existing reason, and may only upgrade a null one (createStandaloneDecision's dedup path).

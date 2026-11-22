@@ -13,7 +13,7 @@ import { getRunWithPolicy, isTerminal, type RunRow, type RunWithPolicy } from ".
 import { ulid } from "../util/ulid.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { COUNTERSIGN, countersigned, countersignOf } from "../policy/countersign.ts";
+import { COUNTERSIGN, countersigned, countersignOf, dismissCountersigns } from "../policy/countersign.ts";
 import { DAEMON_CALLER } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergePrepared, type MergeServices } from "../policy/merge-path.ts";
 import type { DeliveryServices } from "../policy/services.ts";
@@ -564,6 +564,7 @@ export class LandingBatches {
       applyDrop(db, { plan: null, tasks: [{ id: task, title: phase?.title ?? task, plan: phase?.plan_id ?? null, inBacklog: true }], dependents: [] }, { reason, by: "daemon", now });
     }
     db.query("UPDATE landing_batches SET fix_state = 'ended' WHERE id = ?1").run(batch.id);
+    dismissCountersigns(db, task, reason, now);
     appendEvent(db, { source: "daemon", kind: "landing.batch_fix_ended", taskId: task, runId: run?.id ?? null, payload: { batch: batch.id, task, why, run: run?.id ?? null, cancelled: run !== null && !isTerminal(run.state) }, ts: now });
   }
 
@@ -594,13 +595,14 @@ export class LandingBatches {
     const decision = countersignOf(this.deps.db, row.task_id, row.head_sha)?.id;
     // The item line keeps the next commands whole; the loosenings themselves are in the decision.
     const detail = decision ? `${row.task_id} loosens a gate; ${decision} asks the countersign` : why;
-    this.hold(batch, LOOSENED_GATE, detail, row.task_id, batch.verification_id, `flowryn decide ${decision ?? "<decision>"} ${COUNTERSIGN} | flowryn batch drop ${batch.id} ${row.task_id}`);
+    this.hold(batch, LOOSENED_GATE, detail, row.task_id, batch.verification_id, `${decision ? `flowryn decide ${decision} ${COUNTERSIGN} | ` : ""}flowryn batch drop ${batch.id} ${row.task_id}`);
   }
 
-  /** A batch held for a loosened gate whose fix the leader has countersigned at the head it delivered. */
+  /** A batch held for a loosened gate whose fix was countersigned at the head it delivered (by the user, on sensitive work). */
   private countersignGiven(batch: BatchRow): boolean {
     const row = batchMembers(this.deps.db, batch.id).find((m) => m.task_id === batch.culprit);
-    return row !== undefined && countersigned(this.deps.db, row.task_id, row.head_sha);
+    const run = row ? getRunWithPolicy(this.deps.db, row.run_id) : null;
+    return row !== undefined && run !== null && countersigned(this.deps.db, run, row.head_sha);
   }
 
   /** Hold the batch for the leader, with one landing_batch_held item naming the next commands. Call inside a transaction. */
@@ -975,6 +977,7 @@ export class LandingBatches {
     if (!row) throw new FlowrynError("not_found", `${taskId} is not in landing batch ${batchId} (it has ${batchMembers(db, batch.id).map((r) => r.task_id).join(", ") || "no branches"})`, `flowryn show ${batchId}`);
     // The fix holds every member: dropping any branch (or the fix itself) ends it, and the rest are rebuilt from main.
     this.endFix(batch, taskId === batch.fix_task ? "the leader dropped the fix" : `the leader dropped ${taskId}, which the fix's branch holds`);
+    dismissCountersigns(db, taskId, `the leader dropped it from landing batch ${batch.id}`, this.deps.now());
     if (taskId === batch.fix_task) {
       appendEvent(db, { source, kind: "landing.batch_dropped", runId: row.run_id, taskId, payload: { batch: batch.id, landing: row.id, verification: batch.verification_id, step: null, fix: true }, ts: this.deps.now() });
       this.deps.kickScheduler();

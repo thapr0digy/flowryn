@@ -519,7 +519,7 @@ describe("fix forward", () => {
     expect(decision.context).toContain("ui/tests/budget.json: raised 228 → 229");
     expect(decision).toMatchObject({ state: "open", origin: "countersign", options: JSON.stringify(["countersign", "refuse"]), reserved_reason: null });
     expect(decision.context).toContain(`Proof: verify ${v.id} passed at this head`);
-    expect(events("merge.loosened_gate")).toEqual([expect.objectContaining({ task, head: fix.head, base: b.head_sha, decision: decision.id, proof: v.id })]);
+    expect(events("merge.loosened_gate")).toEqual([expect.objectContaining({ task, head: fix.head, base: b.head_sha, decision: decision.id, proof: `verify ${v.id}` })]);
     const item = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").get() as { line: string };
     expect(item.line).toContain(`Next: flowryn decide ${decision.id} countersign | flowryn batch drop ${b.id} ${task}`);
     // Another pass asks nothing twice and lands nothing.
@@ -533,6 +533,21 @@ describe("fix forward", () => {
     expect(mainTip()).toBe(fix.head);
     expect([runState(s1), runState(s2), getRunWithPolicy(db, fix.run)!.state]).toEqual(["landed", "landed", "landed"]);
     expect(events("landing.batch_countersigned")).toEqual([expect.objectContaining({ batch: b.id, from: "held" })]);
+  });
+
+  test("dropping the fix of a batch held for a countersign dismisses its open decision", async () => {
+    const { lq, b } = await redBatch();
+    const task = getBatch(db, b.id)!.fix_task!;
+    const fix = deliverFix(b, { "pkg/store/store_test.go": `package store\n\nfunc TestSave(t *testing.T) { t.Skip${"("}"later") }\n` });
+    await lq.pass();
+    verifyBatch("passed");
+    await lq.pass();
+    const decision = countersignOf(db, task, fix.head)!;
+    expect(decision.state).toBe("open");
+
+    tx(db, () => lq.batches.drop(b.id, task));
+    expect(countersignOf(db, task, fix.head)).toMatchObject({ state: "dismissed" });
+    expect(events("decision.dismissed")).toEqual([expect.objectContaining({ decision: decision.id, origin: "countersign", task })]);
   });
 
   test("a refused countersign keeps the batch held; dropping the fix rebuilds the members from main", async () => {

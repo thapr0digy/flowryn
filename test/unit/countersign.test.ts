@@ -9,6 +9,9 @@ import { answerDecision } from "../../src/lifecycle/decision-verbs.ts";
 import { FlowrynError } from "../../src/api/errors.ts";
 import { insertApproval } from "../../src/policy/approvals.ts";
 import { countersignOf } from "../../src/policy/countersign.ts";
+import { verifyConfig } from "../../src/verify/config.ts";
+import { verifyPolicyId } from "../../src/verify/policy.ts";
+import { finishVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { prepareDaemonMerge, type MergeServices } from "../../src/policy/merge-path.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
@@ -17,8 +20,11 @@ import { GIT_ENV, scratchRepos, sh } from "../helpers/scratch-git.ts";
 /**
  * The merge gate's countersign for a fix that loosens a gate (docs/notes/2026-11-22-phase-countersign-gate-7e.md),
  * with real git on a local-only project: the gate the daemon's auto-merge and the landing line run
- * (prepareDaemonMerge). test/unit/landing-batch.test.ts covers a batch's fix-forward.
+ * (prepareDaemonMerge). The project has verify steps unless a test says otherwise; a passed verify at
+ * the head is the verifier's proof. test/unit/landing-batch.test.ts covers a batch's fix-forward.
  */
+
+const VERIFY = '[projects.web]\nverify = ["true"]\n';
 
 const git = gitRunner(Bun.which("git") ?? "git", 30_000, GIT_ENV);
 
@@ -26,6 +32,7 @@ let dir: string;
 let db: Db;
 let primary: string;
 let now: number;
+let configText: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "fw-countersign-"));
@@ -33,6 +40,7 @@ beforeEach(() => {
   migrate(db);
   primary = scratchRepos(dir).primary;
   now = 1_000_000;
+  configText = VERIFY;
   mkdirSync(join(primary, "ui"), { recursive: true });
   writeFileSync(join(primary, "ui", "budget.json"), '{ "brief": 228 }\n');
   sh(primary, ["add", "."]);
@@ -67,7 +75,42 @@ function ship(n: number, files: Record<string, string>, opts: { workflow?: strin
   return { task, head };
 }
 
-const services: () => MergeServices = () => ({ db, config: () => parseConfig("", dir), delivery: inertDelivery({ git }), now: () => now, log: () => {} });
+/** The task's worktree moves on with one more commit of `files`, delivered as its new head. */
+function redeliver(n: number, files: Record<string, string>): string {
+  const task = `t${n}`;
+  const wt = join(dir, `wt-${task}`);
+  for (const [file, text] of Object.entries(files)) writeFileSync(join(wt, file), text);
+  sh(wt, ["add", "."]);
+  sh(wt, ["commit", "-q", "-m", "fix again"]);
+  const head = sh(wt, ["rev-parse", "HEAD"]);
+  tx(db, () => {
+    db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES (?1, ?2, 'local', ?3, ?4, 2)").run(`a${n}b`, task, `flowryn/${task}`, head);
+    appendEvent(db, { source: "cli", kind: "run.delivered", runId: `r${n}`, taskId: task, payload: {}, ts: 2 });
+  });
+  return head;
+}
+
+/** A verify of the task's head that passed under today's verify steps: the verifier's proof. */
+function verified(task: string, head: string): Verification {
+  const policy = verifyPolicyId(verifyConfig(parseConfig(configText, dir), "web")!);
+  return tx(db, () => {
+    const v = insertVerification(db, { project_id: "web", pr_url: `local:flowryn/${task}`, task_id: task, head_sha: head, steps: [], policy_id: policy, dir: (id) => join(dir, "v", id), worktree: (id) => join(dir, `vwt-${id}`), project_path: primary, source: "daemon", now });
+    finishVerification(db, v, { state: "passed", steps: [], tests: null, detail: null, binary: null }, now + 1);
+    return v;
+  });
+}
+
+const services: () => MergeServices = () => ({ db, config: () => parseConfig(configText, dir), delivery: inertDelivery({ git }), now: () => now, log: () => {} });
+
+async function refusal(task: string): Promise<FlowrynError> {
+  try {
+    await prepareDaemonMerge(services(), task);
+  } catch (error) {
+    if (error instanceof FlowrynError) return error;
+    throw error;
+  }
+  throw new Error(`${task} passed the gate`);
+}
 
 async function gate(task: string): Promise<string> {
   try {
@@ -84,11 +127,12 @@ const RAISED = { "ui/budget.json": '{ "brief": 229 }\n' };
 describe("the merge gate's countersign", () => {
   test("a fix that raises a budget is refused loosened_gate with one decision for the leader; countersigned at that head, it passes", async () => {
     const s = ship(1, RAISED);
+    const v = verified(s.task, s.head);
     expect(await gate(s.task)).toBe("loosened_gate");
     const d = countersignOf(db, s.task, s.head)!;
     expect(d).toMatchObject({ state: "open", run_id: null, reserved_reason: null });
     expect(d.context).toContain("ui/budget.json: raised 228 → 229");
-    expect(d.context).toContain("Proof: no local verify");
+    expect(d.context).toContain(`Proof: verify ${v.id} passed at this head`);
     // Asked once: a second pass refuses again without a second decision.
     expect(await gate(s.task)).toBe("loosened_gate");
     expect(db.query("SELECT COUNT(*) AS n FROM decisions").get()).toEqual({ n: 1 });
@@ -98,23 +142,67 @@ describe("the merge gate's countersign", () => {
     expect(await gate(s.task)).toBe("passed");
   });
 
+  test("with no verify steps nothing proves the new number: it keeps refusing and opens no decision", async () => {
+    configText = "";
+    const s = ship(1, RAISED);
+    const refused = await refusal(s.task);
+    expect(refused.code).toBe("loosened_gate");
+    expect(refused.message).toContain("no verifier proved the new number");
+    expect(await gate(s.task)).toBe("loosened_gate");
+    expect(db.query("SELECT COUNT(*) AS n FROM decisions").get()).toEqual({ n: 0 });
+  });
+
   test("a refused countersign keeps refusing, naming the send-back", async () => {
     const s = ship(1, RAISED);
+    verified(s.task, s.head);
     await gate(s.task);
     tx(db, () => answerDecision({ db, now: () => now }, countersignOf(db, s.task, s.head)!, { choice: "refuse", words: null, by: "leader", via: "cli" }));
     await expect(prepareDaemonMerge(services(), s.task)).rejects.toThrow(/answered refuse/);
   });
 
-  test("sensitive work's countersign (asked once the user approved the merge) is reserved for the user", async () => {
+  test("a new head dismisses the countersign asked at the old one, with an event, and asks afresh", async () => {
+    const s = ship(1, RAISED);
+    verified(s.task, s.head);
+    await gate(s.task);
+    const first = countersignOf(db, s.task, s.head)!;
+    const head = redeliver(1, { "ui/budget.json": '{ "brief": 230 }\n' });
+    verified(s.task, head);
+    expect(await gate(s.task)).toBe("loosened_gate");
+    const second = countersignOf(db, s.task, head)!;
+    expect(second.id).not.toBe(first.id);
+    expect(countersignOf(db, s.task, s.head)).toMatchObject({ state: "dismissed" });
+    expect(second.state).toBe("open");
+    const dismissed = db.query("SELECT payload FROM events WHERE kind = 'decision.dismissed'").all() as { payload: string }[];
+    expect(dismissed.map((e) => JSON.parse(e.payload).decision)).toEqual([first.id]);
+  });
+
+  test("sensitive work's countersign (asked once the user approved the merge) is reserved for the user, and only the user's counts", async () => {
     const s = ship(1, RAISED, { sensitive: true });
+    verified(s.task, s.head);
     tx(db, () => insertApproval(db, { task: s.task, ref: `local:flowryn/${s.task}`, head: s.head, channel: "cli-tty", actor: "you", action: "merge", now }));
     expect(await gate(s.task)).toBe("loosened_gate");
-    expect(countersignOf(db, s.task, s.head)!.reserved_reason).toContain("sensitive");
+    const d = countersignOf(db, s.task, s.head)!;
+    expect(d.reserved_reason).toContain("sensitive");
+    tx(db, () => answerDecision({ db, now: () => now }, d, { choice: "countersign", words: "fine", by: "leader", via: "cli" }));
+    expect((await refusal(s.task)).message).toContain("needs the user's countersign");
+  });
+
+  test("sensitive work passes on the user's countersign", async () => {
+    const s = ship(1, RAISED, { sensitive: true });
+    verified(s.task, s.head);
+    tx(db, () => insertApproval(db, { task: s.task, ref: `local:flowryn/${s.task}`, head: s.head, channel: "cli-tty", actor: "you", action: "merge", now }));
+    await gate(s.task);
+    tx(db, () => answerDecision({ db, now: () => now }, countersignOf(db, s.task, s.head)!, { choice: "countersign", words: "yes", by: "captain", via: "cli-tty" }));
+    expect(await gate(s.task)).toBe("passed");
   });
 
   test("a fix that loosens nothing, and a feature that raises a budget, pass with no decision", async () => {
-    expect(await gate(ship(1, { "pkg.go": "package x\n" }).task)).toBe("passed");
-    expect(await gate(ship(2, RAISED, { workflow: "feature" }).task)).toBe("passed");
+    const clean = ship(1, { "pkg.go": "package x\n" });
+    verified(clean.task, clean.head);
+    expect(await gate(clean.task)).toBe("passed");
+    const feature = ship(2, RAISED, { workflow: "feature" });
+    verified(feature.task, feature.head);
+    expect(await gate(feature.task)).toBe("passed");
     expect(db.query("SELECT COUNT(*) AS n FROM decisions").get()).toEqual({ n: 0 });
   });
 });
