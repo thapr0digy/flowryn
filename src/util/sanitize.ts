@@ -36,3 +36,9 @@ export function capStoredText(text: string, max: number = MAX_STORED_TEXT_CHARS)
   if (text.length <= max) return text;
   return `${text.slice(0, max)}\n[truncated ${text.length - max} chars]`;
 }
+
+/** A Markdown code fence for `text` that no run of backticks in it closes. */
+export function fenceFor(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  return "`".repeat(Math.max(3, longest + 1));
+}

@@ -23,6 +23,9 @@ export type VerifyItem = string | string[];
 export const LANDING_MODES = ["queue", "batch", "manual"] as const;
 export type LandingMode = (typeof LANDING_MODES)[number];
 
+/** Where a step's `rerun_failed` command takes the failing packages or test files. */
+export const FAILED_PLACEHOLDER = "{failed}";
+
 /** The review step's name in a verification's steps: no shell command is ever spelled like this. */
 export const REVIEW_STEP = "flowryn:review";
 /** The review step's spend cap and deadline when its entry sets none. */
@@ -48,6 +51,12 @@ export interface VerifyConfig {
    * or null: it always runs. Absent or empty: no step has any (docs/notes/2026-11-06-fast-tests-parallel-36.md).
    */
   when_changed?: (readonly string[] | null)[];
+  /**
+   * Each step's `rerun_failed` command, by its place in the flattened list, or null: a landing batch
+   * whose step fails reruns only that step's failing tests with it (src/verify/flake.ts). Absent: no
+   * step has one. Not part of the verify policy: it never changes what a pass of the step proves.
+   */
+  rerun_failed?: (string | null)[];
   /** A file the steps build, relative to the worktree, copied out before the worktree goes. */
   binary: string | null;
   /** The whole run, every step together. */
@@ -95,24 +104,35 @@ function readReview(raw: Record<string, unknown>, where: string): ReviewConfig {
   };
 }
 
-/** One step: its command, and its when_changed globs or null. */
+/** One step: its command, its when_changed globs or null, and its rerun_failed command or null. */
 interface ReadStep {
   run: string;
   when: string[] | null;
+  rerun: string | null;
+}
+
+const STEP_KEYS = new Set(["run", "when_changed", "rerun_failed"]);
+
+/** `rerun_failed`: a command that names `{failed}`, where the failing packages or test files go. */
+function readRerun(raw: unknown, run: string, where: string): string | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "string" || !raw.includes(FAILED_PLACEHOLDER)) throw new FlowrynError("config_invalid", `${where} verify: rerun_failed of "${run}" must be a command that names ${FAILED_PLACEHOLDER}, where the failing packages or test files go`);
+  return raw.trim();
 }
 
 /**
- * A step as written: a command, or a table `{ run = "...", when_changed = ["src/x/**"] }`.
- * Null when it is neither; throws config_invalid on a table whose globs are malformed.
+ * A step as written: a command, or a table `{ run = "...", when_changed = ["src/x/**"], rerun_failed = "go test {failed}" }`.
+ * Null when it is neither; throws config_invalid on a table whose globs or rerun command are malformed.
  */
 function readStep(raw: unknown, where: string): ReadStep | null {
-  if (isStep(raw)) return { run: raw, when: null };
+  if (isStep(raw)) return { run: raw, when: null, rerun: null };
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const entry = raw as Record<string, unknown>;
-  for (const key of Object.keys(entry)) if (key !== "run" && key !== "when_changed") throw new FlowrynError("config_invalid", `${where} verify: a step table takes run and when_changed, not ${key}`);
+  for (const key of Object.keys(entry)) if (!STEP_KEYS.has(key)) throw new FlowrynError("config_invalid", `${where} verify: a step table takes ${[...STEP_KEYS].join(", ")}, not ${key}`);
   if (!isStep(entry.run)) throw new FlowrynError("config_invalid", `${where} verify: a step table needs run, the command`);
+  const rerun = readRerun(entry.rerun_failed, entry.run, where);
   const globs = entry.when_changed;
-  if (globs === undefined) return { run: entry.run, when: null };
+  if (globs === undefined) return { run: entry.run, when: null, rerun };
   if (!Array.isArray(globs) || globs.length === 0 || !globs.every((g) => typeof g === "string")) {
     throw new FlowrynError("config_invalid", `${where} verify: when_changed of "${entry.run}" must be a non-empty list of globs`);
   }
@@ -123,17 +143,18 @@ function readStep(raw: unknown, where: string): ReadStep | null {
       throw new FlowrynError("config_invalid", `${where} verify: when_changed glob "${glob}" of "${entry.run}" ${(error as Error).message}`);
     }
   }
-  return { run: entry.run, when: [...(globs as string[])] };
+  return { run: entry.run, when: [...(globs as string[])], rerun };
 }
 
 /**
- * The `verify` list, each group of one read as a plain step, with each step's globs in flattened order; null when malformed.
+ * The `verify` list, each group of one read as a plain step, with each step's globs and rerun command in flattened order; null when malformed.
  * A `{ review = true }` entry is REVIEW_STEP, at most once, never in a group, and has no globs.
  */
-function readItems(raw: unknown, where: string): { items: VerifyItem[]; when: (string[] | null)[]; review: ReviewConfig | null } | null {
+function readItems(raw: unknown, where: string): { items: VerifyItem[]; when: (string[] | null)[]; rerun: (string | null)[]; review: ReviewConfig | null } | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const items: VerifyItem[] = [];
   const when: (string[] | null)[] = [];
+  const rerun: (string | null)[] = [];
   let review: ReviewConfig | null = null;
   for (const item of raw) {
     if (isTable(item) && "review" in item) {
@@ -141,12 +162,14 @@ function readItems(raw: unknown, where: string): { items: VerifyItem[]; when: (s
       review = readReview(item, where);
       items.push(REVIEW_STEP);
       when.push(null);
+      rerun.push(null);
       continue;
     }
     const single = readStep(item, where);
     if (single) {
       items.push(single.run);
       when.push(single.when);
+      rerun.push(single.rerun);
       continue;
     }
     if (!Array.isArray(item) || item.length === 0) return null;
@@ -156,8 +179,9 @@ function readItems(raw: unknown, where: string): { items: VerifyItem[]; when: (s
     const steps = group as ReadStep[];
     items.push(steps.length === 1 ? steps[0]!.run : steps.map((step) => step.run));
     when.push(...steps.map((step) => step.when));
+    rerun.push(...steps.map((step) => step.rerun));
   }
-  return { items, when, review };
+  return { items, when, rerun, review };
 }
 
 function positiveMinutes(value: unknown, where: string, key: string): number {
@@ -197,8 +221,9 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const timeout_ms = positiveMinutes(raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN, where, "verify_timeout_min");
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
   const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
+  const rerun_failed = read.rerun.some((r) => r !== null) ? read.rerun : undefined;
   const light = readLight(raw.light_verify, where);
-  return { steps: read.items, ...(when_changed ? { when_changed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms, ...(light ? { light } : {}) };
+  return { steps: read.items, ...(when_changed ? { when_changed } : {}), ...(rerun_failed ? { rerun_failed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms, ...(light ? { light } : {}) };
 }
 
 /** `light_verify`: the verify grammar without a review step; null when unset. */
@@ -207,6 +232,8 @@ function readLight(raw: unknown, where: string): VerifyConfig["light"] {
   const read = readItems(raw, `${where} light_verify:`);
   if (!read) throw new FlowrynError("config_invalid", `${where} light_verify must be a non-empty list of commands (or { run, when_changed } tables), or of lists of commands run in parallel`);
   if (read.review) throw new FlowrynError("config_invalid", `${where} light_verify cannot hold the review step: it belongs in verify`);
+  // A failing light check goes back to its worker; only a batch's full verify reruns failing tests.
+  if (read.rerun.some((r) => r !== null)) throw new FlowrynError("config_invalid", `${where} light_verify cannot take rerun_failed: only the full verify of a landing batch reruns failing tests`);
   const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
   return { steps: read.items, ...(when_changed ? { when_changed } : {}) };
 }

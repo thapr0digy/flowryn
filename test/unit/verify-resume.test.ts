@@ -210,6 +210,16 @@ describe("a verification a stop cut off", () => {
     expect(events(f.db, "pr.verify_resume_dropped")).toEqual([{ verification: second.id, from: first.id, why: expect.stringContaining(`not ${f.head.slice(0, 8)}`) }]);
   }, 30_000);
 
+  test("a cut-off flake rerun is never resumed by a full verify: its passed step ran only the failing tests", async () => {
+    const f = fixture();
+    const first = await interrupted(f);
+    const steps = first.steps.map((s, i) => (i === 0 ? { ...s, rerun: { of: "v0", command: "echo rerun", passes: 3, tests: ["a"] } } : s));
+    tx(f.db, () => f.db.query("UPDATE verifications SET steps = ?2 WHERE id = ?1").run(first.id, JSON.stringify(steps)));
+    writeFileSync(f.go, "");
+    const fresh = admit(f);
+    expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
+  }, 30_000);
+
   test("a verification that failed (not cut off) is never resumed", async () => {
     const f = fixture();
     const v = admit(f, [`echo ran >> ${f.counter}`, "exit 3"]);

@@ -403,3 +403,28 @@ describe("the process table at a deadline", () => {
     expect(retryLogName("2-bun-run-typecheck.log")).toBe("2-bun-run-typecheck.retry.log");
   });
 });
+
+describe("a flake rerun step (docs/notes/2026-11-22-phase-flake-earns-a3.md)", () => {
+  test("it runs its rerun command N times instead of its own, says so in its detail, and passes only when every run did", async () => {
+    const f = fixture();
+    const green = f.insert(["exit 9"]);
+    green.steps[0]!.rerun = { of: "v1", command: "echo rerun-ran", passes: 3, tests: ["pkg TestX"] };
+    await runVerification(f.deps, green, { prNumber: 1, headRef: "flowryn/t", binary: null, timeoutMs: 60_000, path: null }, { PATH: process.env.PATH, HOME: process.env.HOME });
+    const passed = getVerification(f.db, green.id)!;
+    expect(passed.state).toBe("passed");
+    expect(passed.steps[0]).toMatchObject({ name: "exit 9", state: "passed", exit: 0, rerun: { of: "v1", passes: 3 } });
+    expect(passed.steps[0]!.detail).toBe("flake rerun of v1: 1 failing test, 3 times, with `echo rerun-ran`: passed 3 of 3");
+    expect(readFileSync(join(passed.dir, passed.steps[0]!.log), "utf8").match(/rerun-ran/g)).toHaveLength(3);
+
+    const red = f.insert(["true"]);
+    red.steps[0]!.rerun = { of: "v1", command: "exit 4", passes: 3, tests: ["pkg TestX"] };
+    await runVerification(f.deps, red, { prNumber: 1, headRef: "flowryn/t", binary: null, timeoutMs: 60_000, path: null }, { PATH: process.env.PATH, HOME: process.env.HOME });
+    expect(getVerification(f.db, red.id)!.steps[0]).toMatchObject({ state: "failed", exit: 4, detail: "flake rerun of v1: 1 failing test, 3 times, with `exit 4`" });
+  });
+
+  test("a passed rerun is no pass of the step: its time never sets the step's deadline", () => {
+    const f = fixture();
+    pastRun(f, [{ name: "bun test", ms: 1_000, rerun: { of: "v1", command: "bun test a.test.ts", passes: 3, tests: ["a"] } }]);
+    expect(stepDeadlines(f.db, "web", ["bun test"], null)).toEqual([null]);
+  });
+});

@@ -69,6 +69,8 @@ export interface BatchRow {
   fix_base: string | null;
   fix_state: FixState | null;
   fix_since: number | null;
+  /** Its one flake rerun, JSON (src/verify/flake.ts BatchFlake), or null. */
+  flake: string | null;
   reason: string | null;
   detail: string | null;
   created_at: number;
