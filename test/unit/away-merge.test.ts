@@ -259,6 +259,16 @@ describe("the trigger: only an away the user started", () => {
 });
 
 describe("a finished round", () => {
+  test("pass under a 3-day away: the validator's approval still ends 16 hours from the pass, not with the away", () => {
+    const f = fixture();
+    tx(f.db, () => startAway(f.db, { until: NOW + 72 * HOUR, words: null, by: "human", now: NOW - 30 * 60_000 }));
+    expect(pick(f).length).toBe(1);
+    const passedAt = NOW + 60_000;
+    expect(apply(f, "j1", reply(PASS), { now: passedAt })).toMatchObject({ state: "passed" });
+    const row = f.db.query("SELECT expires_at FROM approvals WHERE channel = ?1").get(AWAY_VALIDATOR_CHANNEL) as { expires_at: number };
+    expect(row.expires_at).toBe(passedAt + 16 * HOUR);
+  });
+
   test("pass: an away-validator approval bound to the head, and the verify-backed merge started", () => {
     const f = picked();
     expect(apply(f, "j1", reply(PASS))).toEqual({ validation: "j1", run: "r1", state: "passed" });
