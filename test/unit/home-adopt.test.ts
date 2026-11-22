@@ -8,7 +8,7 @@ import { intentArgs, pendingIntents } from "../../src/journal/journal.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { adoptedLine, adoptHome, readAdoptedMarker, type OldHome } from "../../src/lifecycle/home-adopt.ts";
 import { hasLanded, phaseOfTask, type PhaseRow, type PlanRow } from "../../src/lifecycle/plans.ts";
-import type { ProjectRow } from "../../src/lifecycle/projects.ts";
+import { insertProject, listProjects, type ProjectRow } from "../../src/lifecycle/projects.ts";
 import { renderPlist } from "../../src/service/launchd.ts";
 import { realTasksAxi } from "../helpers/harness.ts";
 
@@ -134,6 +134,24 @@ describe("home adopt assumptions", () => {
     old.policies = [{ ...old.policies[0]!, sensitive: 1, auto: 0, reason: "why", import_source: "legacy:7", mode_reason: "mode", base_branch: "release/2" }];
     tx(db, () => adoptHome(db, config, old, undefined, 1));
     expect(db.query("SELECT * FROM task_policy").all()).toEqual(old.policies);
+  });
+
+  test("a project removed in the old home stays removed here, with its reason, and live work skips it", () => {
+    const { db, config } = mainDb();
+    const old = oldHome([]);
+    old.projects = [{ ...project, removed_at: 5, removed_reason: "retired" }];
+    tx(db, () => adoptHome(db, config, old, undefined, 1));
+    expect(db.query("SELECT removed_at, removed_reason FROM projects WHERE id = 'api'").get()).toEqual({ removed_at: 5, removed_reason: "retired" });
+    expect(listProjects(db)).toEqual([]);
+  });
+
+  test("a project removed in the old home does not clash with this home's project at the same path", () => {
+    const { db, config } = mainDb();
+    tx(db, () => insertProject(db, { ...project, id: "api2" }));
+    const old = oldHome([]);
+    old.projects = [{ ...project, removed_at: 5, removed_reason: "retired" }];
+    tx(db, () => adoptHome(db, config, old, undefined, 1));
+    expect(listProjects(db).map((p) => p.id)).toEqual(["api2"]);
   });
 
   test("a marker that cannot be read still marks the home adopted", () => {

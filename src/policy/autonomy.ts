@@ -127,7 +127,8 @@ export function checkTerms(db: Db, config: FlowrynConfig, terms: AutonomyTerms, 
   if (terms.until <= now) throw new FlowrynError("bad_args", `autonomy until ${stampOf(terms.until)} is not ahead`);
   if (terms.until - now > AUTONOMY_MAX_MS) throw new FlowrynError("bad_args", `autonomy until ${stampOf(terms.until)} is more than 16 hours away`, "--until at most 16h from now");
   for (const id of terms.projects) {
-    if (!PROJECT_ID.test(id) || !getProject(db, id) || getProject(db, id)!.removed_at != null) throw new FlowrynError("bad_args", `no project ${sanitizeLine(id, 40)}`, "flowryn project list");
+    const project = PROJECT_ID.test(id) ? getProject(db, id) : null;
+    if (!project || project.removed_at != null) throw new FlowrynError("bad_args", `no project ${sanitizeLine(id, 40)}`, "flowryn project list");
     let steps: ReturnType<typeof verifyConfig> = null;
     try {
       steps = verifyConfig(config, id);
