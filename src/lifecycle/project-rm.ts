@@ -5,6 +5,7 @@ import { appendEvent } from "../db/events.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { LIVE_BATCH_SQL } from "../verify/batch-store.ts";
+import { hasLanded } from "./plans.ts";
 import { requireActiveProject } from "./projects.ts";
 
 /**
@@ -32,16 +33,17 @@ export function openWorkOf(db: Db, projectId: string): string[] {
   const backlogState = new Map(backlog.map((t) => [t.id, t.state]));
   const openTasks = backlog.filter((t) => t.repo === projectId && t.state !== "done").map((t) => t.id);
   const pendingAdds = ids(db, `SELECT task_id AS id FROM intents WHERE state = 'pending' AND verb = 'add' AND json_extract(args, '$.flags.repo') = ?1 ORDER BY seq`, projectId);
+  // A phase is closed once dropped, merged (landed, cleanup pending) or landed by hasLanded's rule; done tasks leave the backlog snapshot, so its done alone is not enough.
   const phases = db
     .query(
       `SELECT ph.task_id AS id,
-              EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ph.task_id AND r.state = 'landed') AS landed,
+              EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ph.task_id AND r.state = 'landed') AS merged,
               EXISTS (SELECT 1 FROM drops d WHERE d.task_id = ph.task_id) AS dropped
        FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id
        WHERE pl.project_id = ?1 AND pl.state IN ('pending','approved') ORDER BY pl.id, ph.phase_no`,
     )
-    .all(projectId) as { id: string; landed: number; dropped: number }[];
-  const openPhases = phases.filter((p) => !p.dropped && !p.landed && backlogState.get(p.id) !== "done").map((p) => p.id);
+    .all(projectId) as { id: string; merged: number; dropped: number }[];
+  const openPhases = phases.filter((p) => !p.dropped && !p.merged && backlogState.get(p.id) !== "done" && !hasLanded(db, p.id, backlog)).map((p) => p.id);
   // A run's decision belongs to its task's project; a standalone one to the repo its backlog task names (or will, once its add applies).
   const backlogRepo = new Map<string, string | null>(backlog.map((t) => [t.id, t.repo]));
   for (const id of pendingAdds) backlogRepo.set(id, projectId);

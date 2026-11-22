@@ -111,6 +111,29 @@ describe("project rm refuses while the project has open work, naming it", () => 
     expect(openWorkOf(db, "web")).toEqual(["1 open plan phases (t-open)"]);
   });
 
+  test("a plan of cleaned and dropped phases does not block, though their done tasks left the backlog; a queued phase does", () => {
+    tx(db, () => {
+      db.query("INSERT INTO plans (id, project_id, title, state, filed_by, created_at) VALUES ('pl1', 'web', 'P', 'approved', 'leader', 0)").run();
+      db.query(
+        `INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, blocked_by) VALUES
+           ('pl1', 1, 't-cleaned', 'A', 'b', 'fix', '[]'), ('pl1', 2, 't-dropped', 'B', 'b', 'fix', '[]')`,
+      ).run();
+      policy("t-cleaned");
+      run("r1", "t-cleaned", "cleaned", 1);
+      db.query("INSERT INTO drops (task_id, plan_id, title, reason, dropped_by, dropped_at) VALUES ('t-dropped', 'pl1', 'B', 'not needed', 'leader', 0)").run();
+    });
+    backlog([]);
+    expect(rm("web").project).toBe("web");
+
+    tx(db, () => {
+      db.query("INSERT INTO plans (id, project_id, title, state, filed_by, created_at) VALUES ('pl2', 'api', 'Q', 'approved', 'leader', 0)").run();
+      db.query("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, blocked_by) VALUES ('pl2', 1, 't-api-cleaned', 'C', 'b', 'fix', '[]'), ('pl2', 2, 't-api-queued', 'D', 'b', 'fix', '[]')").run();
+      policy("t-api-cleaned", "api");
+      run("r2", "t-api-cleaned", "cleaned", 1);
+    });
+    expect(refusal("api").message).toBe("project api still has open work: 1 open plan phases (t-api-queued)");
+  });
+
   test("an open decision: a run's, by its task's project, or a standalone one, by its backlog repo", () => {
     tx(db, () => {
       policy("t-run");
