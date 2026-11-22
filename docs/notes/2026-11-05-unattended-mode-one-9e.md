@@ -14,7 +14,7 @@ The user (2026-11-05) could not leave Flowryn to run overnight because every rev
 
 Terms:
 
-- `--until` is at most 16 h ahead (`AUTONOMY_MAX_MS`). By default it is `[away] default_hours`, capped at 16 h, and it is cut to the minute.
+- `--until` is at most 7 days ahead (`AUTONOMY_MAX_MS`; 16 h until 2026-11-22). It takes `+7d`, `1d12h`, `+8h`, `HH:MM` or a date and time. By default it is `[away] default_hours`, capped at 7 days, and it is cut to the minute. The chat question states the end and "(at most 7 days)".
 - `--projects` defaults to every project the caller sees that has `verify` steps. Each named project must be in the caller's scope and have `verify` steps, because an autonomous merge goes only through the verify-backed auto-merge or landing queue.
 - A worker cannot call `away`. A reader, a Pi leader and a socket call from the human role without the challenge are refused. Plain `away` (no flag) is unchanged and grants nothing.
 
@@ -25,6 +25,20 @@ The grant ends on:
 - `flowryn back`, which also prints the return brief (`back`);
 - its expiry, ended by the attention tick (`expired`);
 - a new grant (`superseded`).
+
+### Renewing it
+
+The user renewed twice on 2026-11-22; the friction was the re-ask, not the check. Renewing is one tap, and still only the user's own chat answer:
+
+- The item is `autonomy-renew:<projects>@<YYYY-MM-DDTHH:MM>`: the grant's own terms (`autonomyRenewRef`). It names the latest grant only, and only one not ended by `flowryn back` or a newer grant (`renewableAutonomy`): live or expired.
+- `flowryn chat-question autonomy-renew:...` prints one question, "Renew unattended mode for project web for 16 hours from your answer, on the terms of u7 (until …)?", with Renew and No. It names the span, not a new end, so the hooks write it the same after the answer even across the expiry.
+- "Renew" mints a grant (action `autonomy-renew`); `flowryn grant use <grant>` runs `away --autonomous --renew <item>`, which grants the same projects for the same span (`grantSpan`: the old grant's length, rounded up to the minute, at most 7 days) from that moment. The new row supersedes a live one; `autonomy.started` carries `renews: u<N>`. The words carry over unless the answer adds new ones.
+- The leader's own `away --autonomous --renew` and a socket call without the answer are refused `approval_required`, naming the chat question. In your terminal, `--renew` is refused: grant again with `flowryn away --autonomous`.
+- Nothing renews by itself, and the briefing never asks. It prints one line (`renewLine`, src/attention/autonomy-report.ts) naming the command:
+  - once the grant has expired: last in the return brief's Autonomous section, after what it decided, merged and parked, when the window's last grant is still the latest (an older window never offers a newer grant); and in the leader briefing for 24 h after the expiry;
+  - for a grant longer than 24 h, in the leader briefing from 24 h before its end (`RENEW_NOTICE_MS`).
+  A scoped leader that does not see every project of the grant gets no line.
+- The away-merge validator's approval (docs/notes/2026-11-08-merge-sensitive-prs-rr.md) keeps its own 16 h cap; the longer grant changes nothing there.
 
 Automatic away never starts or extends it, and your own message ends only an automatic away, not this grant. When the grant ends, every approval it minted that has not been used ends with it.
 
@@ -86,7 +100,8 @@ The away line says `--autonomous` names the chat question to ask once. The refus
 
 - `test/unit/autonomy.test.ts`:
   - terms and refs;
-  - `checkTerms` (16 h, verify steps, unknown project);
+  - `checkTerms` (7 days, verify steps, unknown project);
+  - renew: the item and its parse, the question's text before and after the expiry, Renew/No/free text, only the latest grant not ended by back, the span to the minute, and when the briefing offers it;
   - one live row, with words kept out of events;
   - project A never covering B;
   - expired and ended grants, and their minted approvals ending;
@@ -101,5 +116,6 @@ The away line says `--autonomous` names the chat question to ask once. The refus
   - from your terminal, in a real pty (`test/helpers/pty.ts`): piped input is refused, a wrong code grants nothing, and the code read from `/dev/tty` grants `u1` on `cli-tty`;
   - with the grant from your terminal, two spec'd ships (one sensitive) go dispatch → automatic design pass → build → ship → landing-queue merge with no input; a third that asks to drop a table parks alone; `flowryn back` prints the Autonomous section with the two gates, the two merges and the parked task;
   - a worker's `away --autonomous` and `back` are refused (exit 77);
-  - the leader without a grant, a socket call without the code, the leader's call of the terminal verb, a wrong code and 17 h are all refused;
-  - the fake Claude leader starts it through the real hooks with your chat answer, once.
+  - the leader without a grant, a socket call without the code, the leader's call of the terminal verb, a wrong code and 7 days and a minute are all refused;
+  - the fake Claude leader starts it through the real hooks with your chat answer, once;
+  - a `+7d` question says "(at most 7 days)"; the leader's own `--renew` and a socket call are refused, a No grants nothing, and Renew starts `u2` for the same span with `renews: u1`.

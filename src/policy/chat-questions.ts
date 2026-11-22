@@ -5,7 +5,7 @@ import { captainAnswerable, getDecision, optionCostsOf, recommendedChoices } fro
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { requireActiveProject } from "../lifecycle/projects.ts";
-import { parseAutonomyRef, parseAwayRef, stampOf } from "./autonomy.ts";
+import { AUTONOMY_MAX_MS, grantSpan, parseAutonomyRef, parseAutonomyRenewRef, parseAwayRef, renewableAutonomy, spanLabel, stampOf, type AutonomyTerms } from "./autonomy.ts";
 import { findRun, getRunWithPolicy, taskTitle } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
 import { getDivergence, isBacklogDivergence } from "../reconcile/divergence.ts";
@@ -23,7 +23,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
  */
 
 /** What an answer to a binding question can authorise. */
-export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "allow-red" | "discard" | "autonomy" | "away";
+export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "allow-red" | "discard" | "autonomy" | "autonomy-renew" | "away";
 
 export interface ChatOption {
   label: string;
@@ -39,7 +39,7 @@ export interface ChatQuestion {
 }
 
 export interface ChatForm {
-  /** The item: q42, k3, g81, d13, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until> or away:<until>. */
+  /** The item: q42, k3, g81, d13, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until>, autonomy-renew:<projects>@<until> or away:<until>. */
   ref: string;
   action: GrantAction;
   task: string | null;
@@ -57,14 +57,15 @@ const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const SEPARATOR = " · ";
 const RECOMMENDED = " (Recommended)";
-const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|(?:merge|allow-red|discard) [A-Za-z0-9][\w.-]*|autonomy [a-z0-9,-]+@\S+|away \d{4}-\d{2}-\d{2}T\d{2}:\d{2}) · /;
+const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|(?:merge|allow-red|discard) [A-Za-z0-9][\w.-]*|autonomy(?:-renew)? [a-z0-9,-]+@\S+|away \d{4}-\d{2}-\d{2}T\d{2}:\d{2}) · /;
 
 /** The item a question binds to, from its prefix (`q42 · `, `merge T17 · `), or null for an ordinary question. */
 export function bindingRef(question: string): string | null {
   const match = BINDING_PREFIX.exec(question);
   if (!match) return null;
   const head = match[1]!;
-  if (head.startsWith("autonomy ")) return `autonomy:${head.slice("autonomy ".length)}`;
+  const terms = /^(autonomy(?:-renew)?) (.+)$/.exec(head);
+  if (terms) return `${terms[1]}:${terms[2]}`;
   if (head.startsWith("away ")) return `away:${head.slice("away ".length)}`;
   const task = /^(merge|allow-red|discard) (.+)$/.exec(head);
   return task ? `${task[1]}:${task[2]}` : head;
@@ -80,11 +81,15 @@ export function parseRef(typed: string): string {
     if (!parseAutonomyRef(trimmed)) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`, "flowryn away --autonomous --until <time> --projects <ids> prints the item to ask");
     return trimmed;
   }
+  if (trimmed.startsWith("autonomy-renew:")) {
+    if (!parseAutonomyRenewRef(trimmed)) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not autonomy-renew:<projects>@<YYYY-MM-DDTHH:MM>`, "the return brief and the briefing print the item to ask");
+    return trimmed;
+  }
   if (trimmed.startsWith("away:")) {
     if (parseAwayRef(trimmed) === null) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not away:<YYYY-MM-DDTHH:MM>`, "the end time, cut to the minute, as flowryn away --until takes it");
     return trimmed;
   }
-  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until> or away:<until>, not "${sanitizeLine(trimmed, 60)}"`);
+  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until>, autonomy-renew:<projects>@<until> or away:<until>, not "${sanitizeLine(trimmed, 60)}"`);
 }
 
 function option(label: string, description: string): ChatOption {
@@ -283,6 +288,10 @@ function discardForm(db: Db, task: string): ChatForm {
 export const AUTONOMY_SUMMARY =
   "While it lasts the daemon passes review gates of tasks dispatched with a full brief whose pinned page and spec are unchanged, merges verified pull requests (sensitive ones included) and takes the worker's recommendation on ordinary questions. A question about a destructive, irreversible, security, credential or outward step parks only its task for you. It never waives a red check or force-pushes; flowryn back ends it.";
 
+function projectsLabel(terms: AutonomyTerms): string {
+  return `${terms.projects.length === 1 ? "project" : "projects"} ${terms.projects.join(", ")}`;
+}
+
 function autonomyForm(db: Db, ref: string): ChatForm {
   const terms = parseAutonomyRef(ref);
   if (!terms) throw new FlowrynError("bad_args", `${sanitizeLine(ref, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`);
@@ -294,13 +303,44 @@ function autonomyForm(db: Db, ref: string): ChatForm {
     action: "autonomy",
     task: null,
     question: {
-      question: `${head}${SEPARATOR}Start unattended mode until ${until} (at most 16 hours) for ${terms.projects.length === 1 ? "project" : "projects"} ${terms.projects.join(", ")}? ${AUTONOMY_SUMMARY}`,
+      question: `${head}${SEPARATOR}Start unattended mode until ${until} (at most ${spanLabel(AUTONOMY_MAX_MS)}) for ${projectsLabel(terms)}? ${AUTONOMY_SUMMARY}`,
       header: "autonomy",
       options: [option("Start autonomy", `Grant the standing approval for ${terms.projects.join(", ")} until ${until}`), option("No", "Grant nothing; away mode alone still wakes the leader")],
       multiSelect: false,
     },
     choices: [
       { label: "Start autonomy", choice: "start" },
+      { label: "No", choice: null },
+    ],
+    binds: null,
+    freeText: null,
+  };
+}
+
+/**
+ * Renewing an expiring or expired grant (docs/notes/2026-11-05-unattended-mode-one-9e.md): the same
+ * projects for the same span, from the user's answer. The text names the span, not an end time,
+ * so it reads the same when the hooks write it again after the answer.
+ */
+function renewForm(db: Db, ref: string): ChatForm {
+  const terms = parseAutonomyRenewRef(ref);
+  if (!terms) throw new FlowrynError("bad_args", `${sanitizeLine(ref, 80)} is not autonomy-renew:<projects>@<YYYY-MM-DDTHH:MM>`);
+  const row = renewableAutonomy(db, terms);
+  for (const id of terms.projects) requireActiveProject(db, id);
+  const span = spanLabel(grantSpan(row));
+  const projects = terms.projects.join(", ");
+  return {
+    ref,
+    action: "autonomy-renew",
+    task: null,
+    question: {
+      question: `autonomy-renew ${ref.slice("autonomy-renew:".length)}${SEPARATOR}Renew unattended mode for ${projectsLabel(terms)} for ${span} from your answer, on the terms of ${row.id} (until ${stampOf(row.expires_at).replace("T", " ")})? ${AUTONOMY_SUMMARY}`,
+      header: "renew",
+      options: [option("Renew", `Grant the standing approval for ${projects} again, for ${span} from now`), option("No", "Grant nothing; unattended mode ends as planned")],
+      multiSelect: false,
+    },
+    choices: [
+      { label: "Renew", choice: "renew" },
       { label: "No", choice: null },
     ],
     binds: null,
@@ -348,6 +388,7 @@ function awayForm(ref: string, now: number, merge: MergeConfig): ChatForm {
 /** The binding form for an item, from what flowrynd knows now and the `[merge]` config. Throws when the item cannot be asked. */
 export function chatForm(db: Db, ref: string, merge: MergeConfig, now: number = Date.now()): ChatForm {
   if (ref.startsWith("autonomy:")) return autonomyForm(db, ref);
+  if (ref.startsWith("autonomy-renew:")) return renewForm(db, ref);
   if (ref.startsWith("away:")) return awayForm(ref, now, merge);
   if (ref.startsWith("merge:")) return mergeForm(db, ref.slice("merge:".length));
   if (ref.startsWith("allow-red:")) return allowRedForm(db, ref.slice("allow-red:".length));

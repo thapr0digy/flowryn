@@ -23,7 +23,9 @@ import { insertApproval, type ApprovalRow } from "./approvals.ts";
  */
 
 /** A grant reaches at most this far ahead. */
-export const AUTONOMY_MAX_MS = 16 * 60 * 60_000;
+export const AUTONOMY_MAX_MS = 7 * 24 * 60 * 60_000;
+/** A grant longer than this gets a renew reminder in the briefing this long before it ends. */
+export const RENEW_NOTICE_MS = 24 * 60 * 60_000;
 /** The approval channel of what autonomy allowed: written only by the daemon's own code. */
 export const AUTONOMOUS_CHANNEL = "autonomous";
 /** The user's words are kept to one line of this many characters. */
@@ -96,21 +98,76 @@ export function canonicalTerms(projects: readonly string[], until: number): Auto
   return { projects: [...new Set(projects.map((id) => id.trim()).filter((id) => id.length > 0))].toSorted(), until: d.getTime() };
 }
 
-/** The chat item a grant binds to: `autonomy:<projects>@<stamp>`. */
-export function autonomyRef(terms: AutonomyTerms): string {
-  return `autonomy:${terms.projects.join(",")}@${stampOf(terms.until)}`;
+type TermsKind = "autonomy" | "autonomy-renew";
+
+function termsRef(kind: TermsKind, terms: AutonomyTerms): string {
+  return `${kind}:${terms.projects.join(",")}@${stampOf(terms.until)}`;
 }
 
-/** The terms a ref names, or null when it is not one. */
-export function parseAutonomyRef(ref: string): AutonomyTerms | null {
-  const m = /^autonomy:([a-z0-9,-]+)@(\S+)$/.exec(ref.trim());
+function parseTermsRef(kind: TermsKind, ref: string): AutonomyTerms | null {
+  const text = ref.trim();
+  if (!text.startsWith(`${kind}:`)) return null;
+  const m = /^([a-z0-9,-]+)@(\S+)$/.exec(text.slice(kind.length + 1));
   if (!m) return null;
   const projects = m[1]!.split(",");
   if (projects.some((p) => !PROJECT_ID.test(p))) return null;
   const until = parseStamp(m[2]!);
   if (until === null) return null;
   const terms = canonicalTerms(projects, until);
-  return autonomyRef(terms) === ref.trim() ? terms : null;
+  return termsRef(kind, terms) === text ? terms : null;
+}
+
+/** The chat item a grant binds to: `autonomy:<projects>@<stamp>`. */
+export function autonomyRef(terms: AutonomyTerms): string {
+  return termsRef("autonomy", terms);
+}
+
+/** The terms a ref names, or null when it is not one. */
+export function parseAutonomyRef(ref: string): AutonomyTerms | null {
+  return parseTermsRef("autonomy", ref);
+}
+
+/** The chat item that renews a grant: `autonomy-renew:<projects>@<stamp>`, the grant's own terms. */
+export function autonomyRenewRef(row: Pick<AutonomyRow, "projects" | "expires_at">): string {
+  return termsRef("autonomy-renew", canonicalTerms(projectsOf(row), row.expires_at));
+}
+
+/** The grant's terms a renew ref names, or null when it is not one. */
+export function parseAutonomyRenewRef(ref: string): AutonomyTerms | null {
+  return parseTermsRef("autonomy-renew", ref);
+}
+
+/** "16 hours", "7 days", "1 day 12 hours", "1 hour 30 minutes": a span to the minute. */
+export function spanLabel(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  const parts: [number, string][] = [
+    [Math.floor(minutes / 1440), "day"],
+    [Math.floor((minutes % 1440) / 60), "hour"],
+    [minutes % 60, "minute"],
+  ];
+  const shown = parts.filter(([n]) => n > 0).map(([n, unit]) => `${n} ${unit}${n === 1 ? "" : "s"}`);
+  return shown.length > 0 ? shown.join(" ") : "0 minutes";
+}
+
+/**
+ * How long a grant was given for, within the cap: what a renew grants again. Rounded up to the
+ * minute, since the end was cut to its minute (`+2h` granted at 22:00:40 ends 23:59 and is 2 hours).
+ */
+export function grantSpan(row: Pick<AutonomyRow, "started_at" | "expires_at">): number {
+  const minutes = Math.max(1, Math.ceil((row.expires_at - row.started_at) / 60_000));
+  return Math.min(minutes * 60_000, AUTONOMY_MAX_MS);
+}
+
+/**
+ * The grant a renew item names, if it may be renewed: the latest grant, with exactly these
+ * terms, not ended by `flowryn back` or a newer grant. Renewing it grants the same projects for
+ * the same span from the user's answer, and only through that answer. Throws not_found or not_ready.
+ */
+export function renewableAutonomy(db: Db, terms: AutonomyTerms): AutonomyRow {
+  const row = latestAutonomy(db);
+  if (!row || row.terms_hash !== termsHash(terms)) throw new FlowrynError("not_found", `${termsRef("autonomy-renew", terms)} names no grant, or a newer grant was made since`, "flowryn show autonomy");
+  if (row.ended_at !== null && row.end_reason !== "expired") throw new FlowrynError("not_ready", `${row.id} was ended (${row.end_reason ?? "?"}); only an expiring or expired grant is renewed`, "flowryn away --autonomous");
+  return row;
 }
 
 export function termsHash(terms: AutonomyTerms): string {
@@ -125,7 +182,7 @@ export function termsHash(terms: AutonomyTerms): string {
 export function checkTerms(db: Db, config: FlowrynConfig, terms: AutonomyTerms, now: number): void {
   if (terms.projects.length === 0) throw new FlowrynError("bad_args", "autonomy needs at least one project with verify steps", "--projects <id>[,<id>]");
   if (terms.until <= now) throw new FlowrynError("bad_args", `autonomy until ${stampOf(terms.until)} is not ahead`);
-  if (terms.until - now > AUTONOMY_MAX_MS) throw new FlowrynError("bad_args", `autonomy until ${stampOf(terms.until)} is more than 16 hours away`, "--until at most 16h from now");
+  if (terms.until - now > AUTONOMY_MAX_MS) throw new FlowrynError("bad_args", `autonomy until ${stampOf(terms.until)} is more than 7 days away`, "--until at most 7d from now");
   for (const id of terms.projects) {
     const project = PROJECT_ID.test(id) ? getProject(db, id) : null;
     if (!project || project.removed_at != null) throw new FlowrynError("bad_args", `no project ${sanitizeLine(id, 40)}`, "flowryn project list");
@@ -186,6 +243,8 @@ function nextId(db: Db): string {
 
 export interface NewAutonomy {
   terms: AutonomyTerms;
+  /** The grant this one renews, on the user's answer to its renew question. */
+  renews?: string;
   channel: AutonomyChannel;
   actor: string;
   grantId: string | null;
@@ -205,7 +264,7 @@ export function startAutonomy(db: Db, a: NewAutonomy): AutonomyRow {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
   ).run(id, a.channel, actor, a.grantId, JSON.stringify(a.terms.projects), words, termsHash(a.terms), a.now, a.terms.until);
   // The words are the user's and may hold anything: the row keeps them, the event does not.
-  appendEvent(db, { source: "cli", kind: "autonomy.started", payload: { autonomy: id, channel: a.channel, projects: a.terms.projects, until: a.terms.until, grant: a.grantId, ...(live ? { superseded: live.id } : {}) }, ts: a.now });
+  appendEvent(db, { source: "cli", kind: "autonomy.started", payload: { autonomy: id, channel: a.channel, projects: a.terms.projects, until: a.terms.until, grant: a.grantId, ...(live ? { superseded: live.id } : {}), ...(a.renews ? { renews: a.renews } : {}) }, ts: a.now });
   return getAutonomy(db, id)!;
 }
 
