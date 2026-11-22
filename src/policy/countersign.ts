@@ -47,7 +47,9 @@ export async function readLoosening(db: Db, git: GitRunner, run: RunWithPolicy, 
   if (fixBase === null && run.workflow !== "fix") return undefined;
   if (head === "") return { base: fixBase ?? "-", found: null, unread: "its head could not be read" };
   const branch = runBase(run, project);
-  const base = fixBase ?? (pr ? `refs/remotes/origin/${branch}` : `refs/heads/${branch}`);
+  // A PR's base is origin's branch; a checkout that never fetched it has only the local one.
+  const remote = pr && (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`], project.path)).code === 0;
+  const base = fixBase ?? (remote ? `refs/remotes/origin/${branch}` : `refs/heads/${branch}`);
   const range = fixBase ? [fixBase, head] : [`${base}...${head}`];
   const diff = await git(["diff", "--unified=0", "--no-renames", "--no-color", "--no-ext-diff", ...range, "--"], project.path);
   if (diff.code !== 0) return { base, found: null, unread: `git diff exited ${diff.code}: ${(diff.stderr || diff.stdout).trim().slice(0, 200) || "no output"}` };
