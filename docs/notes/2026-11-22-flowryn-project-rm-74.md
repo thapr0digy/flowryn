@@ -11,7 +11,7 @@ It refuses with `project_busy`, naming each kind of work and up to five ids, whi
 
 - a live run (`runs.ended_at` unset);
 - a queued or held backlog task whose `repo` is the project, or a backlog add for it still pending in the journal;
-- an open plan phase: a phase of a pending or approved plan that has not landed, is not done in the backlog and was not dropped;
+- an open plan phase: a phase of a pending or approved plan that was not dropped, has no merged (`landed`) run, is not done in the backlog and has not landed by `hasLanded`'s rule (its latest run `cleaned`; `src/lifecycle/plans.ts`). Done tasks leave the backlog snapshot, so a finished phase is known by its cleaned run (fix project-rm-counts-tf: security-triage's p15 phases 1-10 were cleaned, 11-15 dropped, and still blocked). A phase whose latest run was cancelled is parked back in Queued, so it stays open. A plan whose phases are all closed does not block, and rm leaves the plan's own state as it is;
 - an open decision: a run's by its task's project, a standalone one by its backlog task's repo;
 - a live landing batch, a waiting or landing landing-queue entry, an open delivery watch (`watches`), a queued or running verify, or a queued or running ask.
 
@@ -33,4 +33,4 @@ It never touches the checkout on disk, its worktrees or its branches; delete tho
 
 ## Tests
 
-`test/unit/project-rm.test.ts`: each refusal, the removal and its event, list and `--all`, `project set` refused, upkeep's sync and the scheduler's phase autostart skipping it. `test/unit/home-adopt.test.ts`: a removed project adopted stays removed, with no path clash. `test/integration/project-rm.test.ts`: through the real daemon, a project with an open decision is refused; one without is removed, its checkout stays, and upkeep's log names it no more while it still syncs the others.
+`test/unit/project-rm.test.ts`: each refusal (and a plan of cleaned and dropped phases whose done tasks left the backlog not refusing), the removal and its event, list and `--all`, `project set` refused, upkeep's sync and the scheduler's phase autostart skipping it. `test/unit/home-adopt.test.ts`: a removed project adopted stays removed, with no path clash. `test/integration/project-rm.test.ts`: through the real daemon, a project with an open decision is refused; one without is removed, its checkout stays, and upkeep's log names it no more while it still syncs the others.
