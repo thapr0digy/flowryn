@@ -914,7 +914,21 @@ describe("a flaky batch (docs/notes/2026-11-22-phase-flake-earns-a3.md)", () => 
     const brief = (db.query("SELECT body FROM plan_phases WHERE task_id = ?1").get(fixing.fix_task) as { body: string }).body;
     expect(brief).toContain(`verify ${rerun.id} failed at \`bun test\` (its rerun of the failing tests of ${red.id}) (exit 1)`);
     const briefing = composeBriefing(db, { session: null, now: now + 10, morningHour: 99, ageMs: 60_000, markMorning: false }).text;
-    expect(briefing).toContain(`landing batch ${b.id} (web): its failing tests failed again alone (${rerun.id}); fixed forward.`);
+    expect(briefing).toContain(`landing batch ${b.id} (web): its failing tests failed again alone (${rerun.id}).`);
+  });
+
+  test("a rerun verify that fails before its rerun step runs ends the rerun, and the briefing says the tests never ran", async () => {
+    const { lq, b, red, cfg } = await redBatch();
+    const rerun = admitted(cfg);
+    finish(rerun, "failed", [{ ...rerun.steps[0]!, state: "waiting" }]);
+    await lq.pass();
+
+    expect(events("verify.flake_rerun_failed")).toEqual([expect.objectContaining({ batch: b.id, of: red.id, rerun: rerun.id, ran: false })]);
+    expect(batchView(db, getBatch(db, b.id)!)).toMatchObject({ flake: { state: "ended", rerun: rerun.id } });
+    expect(events("verify.flake")).toEqual([]);
+    const briefing = composeBriefing(db, { session: null, now: now + 10, morningHour: 99, ageMs: 60_000, markMorning: false }).text;
+    expect(briefing).toContain(`landing batch ${b.id} (web): its rerun ${rerun.id} ended before its failing tests ran.`);
+    expect(briefing).not.toContain("failed again alone");
   });
 
   test("the weekly rule: a test that flaked this week earns another rerun only while its fix task is open; one fix task per test per week", async () => {

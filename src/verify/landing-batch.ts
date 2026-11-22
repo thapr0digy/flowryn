@@ -414,7 +414,7 @@ export class LandingBatches {
   /**
    * The batch's pending flake rerun, judged by the finished verify of its head: `passed` records
    * the flake (flaky_tests, a fix task, `verify.flake`), `failed` says so (`verify.flake_rerun_failed`)
-   * and the red is fixed forward; a verify that ran no rerun ends it. Returns how it was judged, or null.
+   * and the red is fixed forward; a verify whose rerun step never ran ends it. Returns how it was judged, or null.
    */
   private judgeFlake(batch: BatchRow, project: ProjectRow, v: Verification): FlakeState | null {
     const { db } = this.deps;
@@ -426,10 +426,11 @@ export class LandingBatches {
       if (!fresh || flake?.state !== "pending" || flake.head !== v.head_sha) return null;
       const now = this.deps.now();
       const step = rerunStep(v);
-      const state: FlakeState = !step ? "ended" : step.state === "passed" ? "passed" : "failed";
+      const ran = step !== null && (step.state === "passed" || step.state === "failed" || step.state === "stopped");
+      const state: FlakeState = !ran ? "ended" : step.state === "passed" ? "passed" : "failed";
       db.query("UPDATE landing_batches SET flake = ?2, updated_at = ?3 WHERE id = ?1").run(fresh.id, JSON.stringify({ ...flake, state, verification: v.id }), now);
       if (state === "passed") return { state, task: recordFlake(db, { config: this.deps.config(), project, batch: fresh, flake, rerun: v, red: getVerification(db, flake.of), now }) };
-      appendEvent(db, { source: "daemon", kind: FLAKE_FAILED_KIND, payload: { batch: fresh.id, project: fresh.project_id, head: flake.head, of: flake.of, rerun: v.id, state: v.state, step: step?.name ?? null, ran: step !== null }, ts: now });
+      appendEvent(db, { source: "daemon", kind: FLAKE_FAILED_KIND, payload: { batch: fresh.id, project: fresh.project_id, head: flake.head, of: flake.of, rerun: v.id, state: v.state, step: step?.name ?? null, ran }, ts: now });
       return { state, task: null };
     });
     if (judged?.task) this.deps.kickScheduler();

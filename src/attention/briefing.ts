@@ -288,8 +288,9 @@ function flakeLines(db: Db, lens: ScopeLens): string[] {
     .map((r) => {
       const at = `Flake ${hhmm(r.ts)}: landing batch ${r.batch} (${r.project})`;
       if (r.kind === FLAKE_FAILED_KIND) {
-        if (r.ran) return `${at}: its failing tests failed again alone (${r.rerun}); fixed forward.`;
-        return `${at}: its flake rerun ended unrun (${r.rerun ?? "the leader retried the batch's verify"}).`;
+        if (r.ran) return `${at}: its failing tests failed again alone (${r.rerun}).`;
+        if (r.rerun) return `${at}: its rerun ${r.rerun} ended before its failing tests ran.`;
+        return `${at}: its flake rerun ended when the leader retried the batch's verify.`;
       }
       const tests = r.tests ?? [];
       const named = `${sanitizeLine(tests[0] ?? "-", 80)}${tests.length > 1 ? ` (+${tests.length - 1} more)` : ""}`;
