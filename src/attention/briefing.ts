@@ -1,4 +1,5 @@
-import { autonomyLines } from "./autonomy-report.ts";
+import { autonomyLines, renewLine } from "./autonomy-report.ts";
+import { RENEW_NOTICE_MS } from "../policy/autonomy.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
@@ -333,6 +334,8 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   if (leader) lines.push(leader);
   const away = getAway(db, input.now);
   if (away) lines.push(awayLine(away, input.now));
+  const renew = renewLine(db, input.now, lens, RENEW_NOTICE_MS);
+  if (renew) lines.push(renew);
   const wake = wakeLineFor(db, input.session, input.now);
   if (wake) lines.push(wake);
   const needs = needsLines(db, input.now, input.ageMs, "Needs you", lens);

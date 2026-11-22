@@ -62,6 +62,9 @@ const away: VerbSpec = {
   async local(args, io) {
     // An agent pane (a leader's token) and plain away go to the daemon as they are.
     if (!boolArg(args, "autonomous") || agentIdentity(io.env) !== null) return runServerVerb(serverAway(), args, io);
+    if (stringArg(args, "renew") !== undefined) {
+      return print(io, errorReply({ code: "bad_args", message: "--renew is the Claude leader's relay of your chat answer; in your terminal, grant again", help: "flowryn away --autonomous --until <time> --projects <ids>" }));
+    }
     const reason = notHumanReason({ env: io.env, stdinIsTty: io.stdinIsTty, stdoutIsTty: io.stdoutIsTty });
     if (reason || !io.stdinIsTty || !io.stdoutIsTty) {
       return print(io, errorReply({ code: "human_only", message: `away --autonomous runs only in your own terminal: ${reason ?? "stdin and stdout must both be a terminal"}`, help: "or ask the leader, which asks you once in chat" }));

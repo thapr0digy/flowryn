@@ -3,7 +3,7 @@ import { boolArg, stringArg, type Args, type HandlerCtx, type VerbSpec } from ".
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { listProjects } from "../lifecycle/projects.ts";
-import { AUTONOMY_MAX_MS, autonomyRef, awayRef, canonicalTerms, checkTerms, endAutonomy, projectsOf, stampOf, startAutonomy, type AutonomyRow, type AutonomyTerms } from "../policy/autonomy.ts";
+import { AUTONOMY_MAX_MS, autonomyRef, awayRef, canonicalTerms, checkTerms, endAutonomy, grantSpan, parseAutonomyRenewRef, projectsOf, renewableAutonomy, stampOf, startAutonomy, type AutonomyRow, type AutonomyTerms } from "../policy/autonomy.ts";
 import { AUTONOMY_SUMMARY } from "../policy/chat-questions.ts";
 import { claudeLeaderSession, GRANT_ARG, grantActor, prepareCaptainGrant, takeGrant } from "../policy/grants.ts";
 import { verifyConfig } from "../verify/config.ts";
@@ -19,6 +19,7 @@ import { AWAY_MAX_MS, CHAT_AWAY_BY, clockLabel, endAway, expireAway, getAway, la
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "./briefing.ts";
 import type { CommandMessage, CommandOutcome } from "./notify.ts";
 import { lensFor, projectRefScope, requireInScope } from "../leader/scope.ts";
+import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
  * `flowryn brief`: the briefing on demand, as a session start would show it.
@@ -138,10 +139,11 @@ const away: VerbSpec = {
   summary: "Say you are away: items that need you wake the leader until you are back or it expires; --autonomous also grants unattended mode",
   positionals: [],
   flags: {
-    until: { type: "string", help: "when it ends: HH:MM, +8h, +90m or YYYY-MM-DD HH:MM (default: [away] default_hours)", placeholder: "time" },
+    until: { type: "string", help: "when it ends: HH:MM, +7d, +8h, +90m or YYYY-MM-DD HH:MM (default: [away] default_hours)", placeholder: "time" },
     "body-file": { type: "string", help: "the user's words, from a file or - for stdin", fileFor: "body" },
-    autonomous: { type: "boolean", help: "also grant unattended mode (at most 16h): in your terminal it asks for a code; the Claude leader needs the user's chat answer" },
+    autonomous: { type: "boolean", help: "also grant unattended mode (at most 7 days): in your terminal it asks for a code; the Claude leader needs the user's chat answer" },
     projects: { type: "string", help: "with --autonomous: the projects it covers (default: every project with verify steps you see)", placeholder: "a,b" },
+    renew: { type: "string", help: "with --autonomous: renew the grant this autonomy-renew:<projects>@<until> item names, on the user's chat answer (flowryn grant use passes it)", placeholder: "item" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -150,9 +152,12 @@ const away: VerbSpec = {
   async prepare(ctx, args): Promise<AwayPrepared> {
     if (!boolArg(args, "autonomous")) {
       if (stringArg(args, "projects") !== undefined) throw new FlowrynError("bad_args", "--projects belongs to --autonomous");
+      if (stringArg(args, "renew") !== undefined) throw new FlowrynError("bad_args", "--renew belongs to --autonomous");
       return { autonomy: null, chat: chatAwayGrant(ctx, args) };
     }
     const now = ctx.now();
+    const renew = stringArg(args, "renew");
+    if (renew !== undefined) return { autonomy: renewPrepared(ctx, args, renew, now) };
     const terms = autonomyTermsOf(ctx, args, now);
     const ref = autonomyRef(terms);
     if (ctx.caller.role !== "leader") {
@@ -171,17 +176,21 @@ const away: VerbSpec = {
     if (autonomy) {
       const terms = { projects: autonomy.projects, until: autonomy.until };
       checkTerms(ctx.db, ctx.config(), terms, now);
-      const used = takeGrant(ctx.db, autonomy.grant, `away --autonomous ${autonomyRef(terms)}`, now);
-      if (used.item !== autonomyRef(terms) || used.action !== "autonomy") throw new FlowrynError("approval_required", `grant ${used.id} is for ${used.item}, not ${autonomyRef(terms)}`);
-      const words = [used.words?.trim() ?? "", (stringArg(args, "body") ?? "").trim()].filter((w) => w.length > 0).join(" / ") || null;
-      const row = startAutonomy(ctx.db, { terms, channel: "claude-chat", actor: grantActor(used), grantId: used.id, words, now });
+      const item = autonomy.renews?.ref ?? autonomyRef(terms);
+      // The grant it renews is checked again in this transaction: a newer grant or a back since refuses it.
+      const renewed = autonomy.renews ? renewableAutonomy(ctx.db, parseAutonomyRenewRef(autonomy.renews.ref)!) : null;
+      if (renewed && renewed.id !== autonomy.renews?.id) throw new FlowrynError("approval_required", `${item} now names ${renewed.id}, not ${autonomy.renews?.id ?? "?"}`, `ask the user again: flowryn chat-question ${item}`);
+      const used = takeGrant(ctx.db, autonomy.grant, `away --autonomous ${item}`, now);
+      if (used.item !== item || used.action !== (renewed ? "autonomy-renew" : "autonomy")) throw new FlowrynError("approval_required", `grant ${used.id} is for ${used.item}, not ${item}`);
+      const words = [used.words?.trim() ?? "", (stringArg(args, "body") ?? "").trim()].filter((w) => w.length > 0).join(" / ") || renewed?.words || null;
+      const row = startAutonomy(ctx.db, { terms, channel: "claude-chat", actor: grantActor(used), grantId: used.id, words, now, ...(renewed ? { renews: renewed.id } : {}) });
       // The grant is the user's own chat answer, so the away it rides along with is theirs too.
       const posture = awayAlongside(ctx.db, row.expires_at, words, CHAT_AWAY_BY, now);
       return { data: autonomyStarted(row, posture, now), hints: ["flowryn back ends both and prints the return brief", "flowryn show autonomy"] };
     }
     const text = stringArg(args, "until");
     const until = text === undefined ? now + cfg.default_hours * 60 * 60_000 : parseUntil(text, now);
-    if (until === null) throw new FlowrynError("bad_args", `--until ${text} is not a time`, "HH:MM, +8h, +90m or YYYY-MM-DD HH:MM");
+    if (until === null) throw new FlowrynError("bad_args", `--until ${text} is not a time`, "HH:MM, +7d, +8h, +90m or YYYY-MM-DD HH:MM");
     if (until <= now) throw new FlowrynError("bad_args", `--until ${text} is in the past`);
     if (until - now > AWAY_MAX_MS) throw new FlowrynError("bad_args", `--until ${text} is more than 7 days away`);
     const chat = (prepared as AwayPrepared | undefined)?.chat ?? null;
@@ -211,9 +220,29 @@ const away: VerbSpec = {
 };
 
 interface AwayPrepared {
-  autonomy: { projects: string[]; until: number; grant: string } | null;
+  autonomy: { projects: string[]; until: number; grant: string; renews?: { ref: string; id: string } } | null;
   /** A plain away on the user's chat answer: the grant for `away:<until>`. */
   chat?: { grant: string; ref: string } | null;
+}
+
+/**
+ * `away --autonomous --renew autonomy-renew:<projects>@<until>`, as `flowryn grant use` runs it:
+ * the renewed grant's projects for its span from now, only on the user's chat answer to that
+ * item. A terminal renews by granting again (`flowryn away --autonomous`).
+ */
+function renewPrepared(ctx: HandlerCtx, args: Args, ref: string, now: number): NonNullable<AwayPrepared["autonomy"]> {
+  if (stringArg(args, "until") !== undefined || stringArg(args, "projects") !== undefined) throw new FlowrynError("bad_args", "--renew takes its projects and span from the grant it renews; leave out --until and --projects");
+  const named = parseAutonomyRenewRef(ref);
+  if (!named) throw new FlowrynError("bad_args", `--renew ${sanitizeLine(ref, 80)} is not autonomy-renew:<projects>@<YYYY-MM-DDTHH:MM>`);
+  const config = ctx.config();
+  for (const p of named.projects) requireInScope(config, ctx.caller, projectRefScope(ctx.db, config, p), `project ${p}`);
+  if (!claudeLeaderSession(ctx)) throw new FlowrynError("approval_required", "renewing unattended mode needs the user's chat answer to the Claude leader", "in your own terminal: flowryn away --autonomous");
+  const row = renewableAutonomy(ctx.db, named);
+  const terms = canonicalTerms(named.projects, now + grantSpan(row));
+  checkTerms(ctx.db, config, terms, now);
+  const grant = prepareCaptainGrant(ctx, args, { item: ref, choice: "renew" }, null);
+  if (!grant) throw new FlowrynError("approval_required", `renewing unattended mode needs the user's own answer for ${ref}`, `ask the user: flowryn chat-question ${ref} (then flowryn grant use <grant>)`);
+  return { projects: terms.projects, until: terms.until, grant, renews: { ref, id: row.id } };
 }
 
 /**
@@ -236,7 +265,7 @@ function chatAwayGrant(ctx: HandlerCtx, args: Args): { grant: string; ref: strin
 }
 
 /**
- * The terms `--until` and `--projects` name, checked: the end at most 16h ahead (default
+ * The terms `--until` and `--projects` name, checked: the end at most 7 days ahead (default
  * `[away] default_hours`, capped), each project in the caller's scope with verify steps
  * (default: every such project the caller sees).
  */
@@ -244,7 +273,7 @@ function autonomyTermsOf(ctx: Pick<HandlerCtx, "db" | "config" | "caller">, args
   const config = ctx.config();
   const text = stringArg(args, "until");
   const until = text === undefined ? now + Math.min(awayConfig(config).default_hours * 60 * 60_000, AUTONOMY_MAX_MS) : parseUntil(text, now);
-  if (until === null) throw new FlowrynError("bad_args", `--until ${text} is not a time`, "HH:MM, +8h, +90m or YYYY-MM-DD HH:MM");
+  if (until === null) throw new FlowrynError("bad_args", `--until ${text} is not a time`, "HH:MM, +7d, +8h, +90m or YYYY-MM-DD HH:MM");
   const named = stringArg(args, "projects");
   const lens = lensFor(ctx.db, config, ctx.caller.scope);
   let projects: string[];
@@ -300,7 +329,7 @@ const autonomyBegin: VerbSpec = {
   summary: "Start a /dev/tty grant of unattended mode: the terms you would grant, and the code to type back",
   positionals: [],
   flags: {
-    until: { type: "string", help: "when it ends (at most 16h)" },
+    until: { type: "string", help: "when it ends (at most 7 days)" },
     projects: { type: "string", help: "the projects it covers" },
     "body-file": { type: "string", help: "your words", fileFor: "body" },
   },

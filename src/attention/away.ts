@@ -217,8 +217,8 @@ export function takePendingBrief(db: Db, now: number): AwayEnded | null {
 }
 
 /**
- * Parse `--until`: `HH:MM` (the next time the clock reads it), `+8h`,
- * `+90m` or `2h30m` (from now), or a local date and time
+ * Parse `--until`: `HH:MM` (the next time the clock reads it), `+7d`, `+8h`,
+ * `+90m`, `2h30m` or `1d12h` (from now), or a local date and time
  * (`2026-10-06 08:00`, `2026-10-06T08:00`). Null when it is none of these.
  */
 export function parseUntil(text: string, now: number): number | null {
@@ -231,8 +231,8 @@ export function parseUntil(text: string, now: number): number | null {
     const at = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m).getTime();
     return at > now ? at : new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, h, m).getTime();
   }
-  const span = /^\+?(?:(\d{1,3})h)?(?:(\d{1,4})m)?$/.exec(value);
-  if (span && (span[1] !== undefined || span[2] !== undefined)) return now + (Number(span[1] ?? 0) * 60 + Number(span[2] ?? 0)) * 60_000;
+  const span = /^\+?(?:(\d{1,2})d)?(?:(\d{1,3})h)?(?:(\d{1,4})m)?$/.exec(value);
+  if (span && (span[1] !== undefined || span[2] !== undefined || span[3] !== undefined)) return now + ((Number(span[1] ?? 0) * 24 + Number(span[2] ?? 0)) * 60 + Number(span[3] ?? 0)) * 60_000;
   const stamp = /^(\d{4})-(\d{2})-(\d{2})[t ](\d{2}):(\d{2})$/.exec(value);
   if (stamp) {
     const [y, mo, d, h, mi] = stamp.slice(1).map(Number) as [number, number, number, number, number];

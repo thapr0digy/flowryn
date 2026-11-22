@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type LaunchdDeps, type LaunchctlResult, agentPid, bootstrapDomain, kickstart, launchdDomain, loadAgent, renderPlist, servicePlist, unloadAgent } from "../../src/service/launchd.ts";
+import { processTypeCheck } from "../../src/doctor/doctor.ts";
 
 const LABEL = "dev.flowryn.flowrynd.test";
 const PLIST = "/tmp/dev.flowryn.flowrynd.test.plist";
@@ -129,6 +130,12 @@ describe("launchd domain", () => {
   });
 
   // macOS only: plutil ships with macOS.
+  test.skipIf(process.platform !== "darwin")("the plist runs the daemon as ProcessType Interactive in every domain, so launchd does not throttle verify children", () => {
+    const spec = { label: LABEL, program: ["/d/flowryn", "daemon", "run"], env: {}, logDir: "/l", workingDir: "/w" };
+    for (const domain of [GUI, USER, undefined]) expect(parsedPlist(renderPlist(spec, domain)).ProcessType).toBe("Interactive");
+  });
+
+  // macOS only: plutil ships with macOS.
   test.skipIf(process.platform !== "darwin")("the plist install writes and --print shows has the session types for the domain it bootstraps into", async () => {
     const spec = { label: LABEL, program: ["/d/flowryn", "daemon", "run"], env: {}, logDir: "/l", workingDir: "/w" };
     expect(parsedPlist(await servicePlist(spec, fakeLaunchd({ loadedIn: null, desktop: false }).deps)).LimitLoadToSessionType).toEqual(["Aqua", "Background"]);
@@ -162,12 +169,49 @@ describe("launchd domain", () => {
   });
 
   // macOS only: plutil ships with macOS.
-  test.skipIf(process.platform !== "darwin")("the user/<uid> plist passes plutil -lint", () => {
+  test.skipIf(process.platform !== "darwin")("the gui/<uid> and user/<uid> plists pass plutil -lint", () => {
     const dir = mkdtempSync(join(tmpdir(), "launchd-"));
     try {
       const path = join(dir, "agent.plist");
-      writeFileSync(path, renderPlist({ label: LABEL, program: ["/d/flowryn"], env: {}, logDir: "/l", workingDir: "/w" }, USER));
-      expect(Bun.spawnSync(["/usr/bin/plutil", "-lint", path]).exitCode).toBe(0);
+      for (const domain of [GUI, USER]) {
+        writeFileSync(path, renderPlist({ label: LABEL, program: ["/d/flowryn"], env: {}, logDir: "/l", workingDir: "/w" }, domain));
+        expect(Bun.spawnSync(["/usr/bin/plutil", "-lint", path]).exitCode).toBe(0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("doctor launchd throttle check", () => {
+  test("warns with the reinstall hint when the plist names no ProcessType or another one", async () => {
+    const missing = await processTypeCheck("/a.plist", async () => ({ processType: null }));
+    expect(missing).toMatchObject({ check: "launchd throttle", status: "warn" });
+    expect(missing.detail).toContain("has no ProcessType");
+    expect(missing.detail).toContain("reinstall to apply: flowryn daemon install");
+    expect((await processTypeCheck("/a.plist", async () => ({ processType: "Background" }))).detail).toContain("has ProcessType Background");
+    expect(await processTypeCheck("/a.plist", async () => ({ processType: "Interactive" }))).toMatchObject({ status: "ok" });
+  });
+
+  test("an unreadable plist warns with the read error", async () => {
+    const check = await processTypeCheck("/a.plist", async () => {
+      throw new Error("plutil could not read /a.plist");
+    });
+    expect(check).toEqual({ check: "launchd throttle", status: "warn", detail: "plutil could not read /a.plist" });
+  });
+
+  // macOS only: the check reads the plist through plutil, which ships with macOS.
+  test.skipIf(process.platform !== "darwin")("a plist written before ProcessType warns; the one install writes now passes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "launchd-"));
+    try {
+      const path = join(dir, "agent.plist");
+      const current = renderPlist({ label: LABEL, program: ["/d/flowryn", "daemon", "run"], env: {}, logDir: "/l", workingDir: "/w" }, GUI);
+      writeFileSync(path, current.replace(/\n  <key>ProcessType<\/key>\n  <string>Interactive<\/string>/, ""));
+      const old = await processTypeCheck(path);
+      expect(old.status).toBe("warn");
+      expect(old.detail).toContain("reinstall to apply");
+      writeFileSync(path, current);
+      expect(await processTypeCheck(path)).toMatchObject({ status: "ok", detail: "ProcessType Interactive" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

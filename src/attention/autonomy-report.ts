@@ -1,7 +1,7 @@
 import type { Db } from "../db/db.ts";
 import type { ScopeLens } from "../leader/scope.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
-import { autonomyLine, type AutonomyRow } from "../policy/autonomy.ts";
+import { autonomyLine, autonomyRenewRef, grantSpan, latestAutonomy, projectsOf, RENEW_NOTICE_MS, spanLabel, stampOf, type AutonomyRow } from "../policy/autonomy.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -39,6 +39,25 @@ function group(heading: string, lines: string[]): string[] {
   if (lines.length === 0) return [`${heading}: none.`];
   const shown = lines.slice(0, MAX_AUTONOMY_LINES);
   return [`${heading} (${lines.length}):`, ...shown, ...(lines.length > shown.length ? [`+${lines.length - shown.length} more: flowryn show autonomy`] : [])];
+}
+
+/**
+ * The renew offer for the latest grant, or null: once it has expired (for `shownFor` after), and
+ * from RENEW_NOTICE_MS before its end for a grant longer than that. A line, never a question:
+ * only the user's answer to `flowryn chat-question autonomy-renew:...` renews it.
+ */
+export function renewLine(db: Db, now: number, lens: Pick<ScopeLens, "project">, shownFor: number): string | null {
+  const row = latestAutonomy(db);
+  if (!row || (row.ended_at !== null && row.end_reason !== "expired")) return null;
+  if (!projectsOf(row).every((p) => lens.project(p))) return null;
+  const span = grantSpan(row);
+  const ends = stampOf(row.expires_at).replace("T", " ");
+  const ask = `ask the user: flowryn chat-question ${autonomyRenewRef(row)} (then flowryn grant use <grant>)`;
+  if (row.expires_at <= now) {
+    return now - row.expires_at <= shownFor ? `Unattended mode ${row.id} ended at ${ends}. To renew it for ${spanLabel(span)} on the same projects, ${ask}.` : null;
+  }
+  if (span > RENEW_NOTICE_MS && row.expires_at - now <= RENEW_NOTICE_MS) return `Unattended mode ${row.id} ends at ${ends}. If the user wants it renewed for ${spanLabel(span)} from their answer on the same projects, ${ask}.`;
+  return null;
 }
 
 /** The grants that were live at some point in the window. */
@@ -99,5 +118,7 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
     ...group("Decided", decided),
     ...group("Merged", merges),
     ...group("Parked", parked),
+    // After what it did: the offer to renew, when the window's own last grant expired.
+    ...[grants.at(-1)?.id === latestAutonomy(db)?.id ? renewLine(db, input.now, lens, Number.POSITIVE_INFINITY) : null].filter((l): l is string => l !== null),
   ];
 }

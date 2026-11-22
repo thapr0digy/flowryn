@@ -19,6 +19,7 @@ import { parseOpenDecisions } from "./report-decisions.ts";
 import { correctionsPlanOf, fileChecks } from "../leader/corrections.ts";
 import { CORRECT_SKILL_NAME } from "../skills/correct.ts";
 import { skillPath } from "../skills/stages.ts";
+import { reportProblems } from "./brief.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { deliveryBasis, requireDeliveryBasis, type BasisPart, type DeliveryBasis } from "./observed.ts";
@@ -387,7 +388,7 @@ function isInside(path: string, root: string): boolean {
 /**
  * Verify a scout's report and copy it to `<data_dir>/<task>/report.md`: a
  * regular file inside the run's worktree or its report directory, no
- * symlink, at most 1 MB. A report elsewhere is refused rather than read, and
+ * symlink, at most 1 MB, that a leader reads in a minute (reportProblems). A report elsewhere is refused rather than read, and
  * whatever sits at the destination is replaced, never written through.
  */
 function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): DeliveredReport {
@@ -427,6 +428,11 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
   // Read the stored copy, not the worker-controlled source: the worker's own process could still
   // rewrite `real` between the copy above and a read of it, but nothing writes `artifact` afterward.
   const text = readFileSync(artifact, "utf8");
+  const problems = reportProblems(text);
+  if (problems.length > 0) {
+    if (artifact !== real) rmSync(artifact, { force: true });
+    throw new FlowrynError("invalid_report", `the report breaks the scout report rules: ${problems.join("; ")}`, "$FLOWRYN_BIN template report");
+  }
   return { source: real, artifact, bytes: st.size, text };
 }
 
