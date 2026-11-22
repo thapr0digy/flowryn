@@ -14,7 +14,7 @@ A worker used to start from one paragraph, and every stage after design only got
 - Scout: `## Intent`, `## Context`, `## Questions`, `## Out of scope`.
 - Security and Out of scope may say `None: <reason>`. A bare `None.` is refused.
 - Headings match case-insensitively, plus a few aliases (`User's intent`, `Security bar`, `Non-goals`). Order is free, and a heading inside a fenced code block is text.
-- `flowryn template ship|scout|handoff|spec` prints each shape. Leaders, readers, you and workers can all run it.
+- `flowryn template ship|scout|handoff|spec|report` prints each shape (`report`: docs/notes/2026-11-22-phase-reports-the-3k.md). Leaders, readers, you and workers can all run it.
 - `--loose <reason>` skips the check, but only from your own terminal (the user's answer to q142). A leader's `--loose` is refused. The reason is kept as a `brief.loose` event.
 - Not checked: `--kind ask`, `--task <id>` (its body is already recorded), phases of a plan from an approved design (they carry that design's spec), `promote --body-file` (a note; the scout's report is carried), and every run dispatched before this change.
 - `flowryn plan` takes the brief its phases share with `--brief-file <path>`, checked as a ship brief (or `--loose <reason>` from your terminal). This differs from the design, which put the brief in the plan's preamble. A plan's `## ` sections are already its phases, so the brief needs its own file. It is kept on `plans.preamble` and carried into each phase's task file.
