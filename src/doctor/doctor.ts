@@ -7,7 +7,7 @@ import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts"
 import { divergedMigrations, integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
 import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.ts";
-import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
+import { isLoaded, plistPath, PROCESS_TYPE, readInstalledPlist, selfCommand, serviceLabel } from "../service/launchd.ts";
 import { isLockHeld, tryExclusiveLock } from "../util/flock.ts";
 import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERIFIED_LAVISH_AXI, VERSION } from "../version.ts";
@@ -253,9 +253,36 @@ async function daemonChecks(home: string, config: FlowrynConfig, env: DoctorEnv)
   const plist = plistPath(label);
   if (process.platform === "darwin") {
     if (!existsSync(plist)) checks.push({ check: "launchd", status: "warn", detail: "agent not installed (flowryn daemon install)" });
-    else checks.push({ check: "launchd", status: (await isLoaded(label)) ? "ok" : "warn", detail: `${plist}${(await isLoaded(label)) ? " loaded" : " installed but not loaded"}` });
+    else {
+      const loaded = await isLoaded(label);
+      checks.push({ check: "launchd", status: loaded ? "ok" : "warn", detail: `${plist}${loaded ? " loaded" : " installed but not loaded"}` });
+      checks.push(await processTypeCheck(plist));
+    }
   }
   return checks;
+}
+
+/**
+ * Whether the installed plist runs the daemon unthrottled. A plist written
+ * before ProcessType Interactive leaves launchd's light resource limits on the
+ * daemon and every verify child it runs, so timing checks fail regardless of
+ * the change. `daemon restart` re-bootstraps the same plist, so only a
+ * reinstall applies it.
+ */
+export async function processTypeCheck(plist: string, read: (path: string) => Promise<{ processType: string | null }> = readInstalledPlist): Promise<Check> {
+  let processType: string | null;
+  try {
+    processType = (await read(plist)).processType;
+  } catch (error) {
+    return { check: "launchd throttle", status: "warn", detail: (error as Error).message };
+  }
+  if (processType === PROCESS_TYPE) return { check: "launchd throttle", status: "ok", detail: `ProcessType ${PROCESS_TYPE}` };
+  const found = processType === null ? "no ProcessType" : `ProcessType ${processType}`;
+  return {
+    check: "launchd throttle",
+    status: "warn",
+    detail: `${plist} has ${found}, so launchd throttles the daemon and its verify children (timing checks fail); reinstall to apply: flowryn daemon install`,
+  };
 }
 
 function binaryCheck(): Check | null {

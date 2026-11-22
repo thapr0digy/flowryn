@@ -44,6 +44,9 @@ function xml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** The scheduling class the agent runs in: unthrottled, like an app in use. */
+export const PROCESS_TYPE = "Interactive";
+
 const BACKGROUND_SESSION = `
   <key>LimitLoadToSessionType</key>
   <array>
@@ -63,9 +66,11 @@ export interface PlistSpec {
  * The launchd agent (design section 15): absolute paths, an explicit PATH,
  * KeepAlive and log paths. KeepAlive restarts the daemon after a crash or a
  * kill, but not after a clean exit, so `flowryn daemon stop` stays stopped.
- * Flowryn rotates its own log; these files catch only crash output. For the
- * user/<uid> domain (no desktop session) it also names the Background session
- * type: a plist without one defaults to Aqua, which user/<uid> refuses ("134:
+ * Flowryn rotates its own log; these files catch only crash output.
+ * ProcessType Interactive lifts launchd's default light resource limits, which
+ * throttle the daemon's CPU and so every verify child it runs (tests, headless
+ * Chrome), making timing checks fail. For the user/<uid> domain (no desktop
+ * session) it also names the Background session type: a plist without one defaults to Aqua, which user/<uid> refuses ("134:
  * Service cannot load in requested session").
  */
 export function renderPlist(spec: PlistSpec, domain?: string): string {
@@ -97,7 +102,9 @@ ${env}
     <false/>
   </dict>
   <key>ThrottleInterval</key>
-  <integer>10</integer>${domain?.startsWith("user/") ? BACKGROUND_SESSION : ""}
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>${PROCESS_TYPE}</string>${domain?.startsWith("user/") ? BACKGROUND_SESSION : ""}
   <key>StandardOutPath</key>
   <string>${xml(join(spec.logDir, "launchd.out.log"))}</string>
   <key>StandardErrorPath</key>
@@ -304,6 +311,7 @@ export interface InstalledPlist {
   program: string[];
   env: Record<string, string>;
   workingDir: string | null;
+  processType: string | null;
 }
 
 /** Read an installed plist through plutil (it accepts XML and binary plists alike), within a time limit. */
@@ -311,14 +319,19 @@ export async function readInstalledPlist(path: string, timeoutMs: number = SMOKE
   const { stdout, stderr, exitCode, timedOut } = await runProc(["/usr/bin/plutil", "-convert", "json", "-o", "-", path], process.env, timeoutMs);
   if (timedOut) throw new Error(`plutil did not read ${path} within ${timeoutMs / 1000} s`);
   if (exitCode !== 0) throw new Error(`plutil could not read ${path}: ${(stderr || stdout).trim()}`);
-  const raw = JSON.parse(stdout) as { ProgramArguments?: unknown; EnvironmentVariables?: unknown; WorkingDirectory?: unknown };
+  const raw = JSON.parse(stdout) as { ProgramArguments?: unknown; EnvironmentVariables?: unknown; WorkingDirectory?: unknown; ProcessType?: unknown };
   const program = Array.isArray(raw.ProgramArguments) ? raw.ProgramArguments.filter((a): a is string => typeof a === "string") : [];
   const env = raw.EnvironmentVariables && typeof raw.EnvironmentVariables === "object" ? (raw.EnvironmentVariables as Record<string, string>) : {};
-  return { program, env, workingDir: typeof raw.WorkingDirectory === "string" ? raw.WorkingDirectory : null };
+  return {
+    program,
+    env,
+    workingDir: typeof raw.WorkingDirectory === "string" ? raw.WorkingDirectory : null,
+    processType: typeof raw.ProcessType === "string" ? raw.ProcessType : null,
+  };
 }
 
 /** How the installed plist differs from what `daemon install` would write now; empty when it does not. */
-export function plistDrift(installed: InstalledPlist, spec: PlistSpec): string[] {
+export function plistDrift(installed: Pick<InstalledPlist, "program" | "env" | "workingDir">, spec: PlistSpec): string[] {
   const drift: string[] = [];
   if (JSON.stringify(installed.program) !== JSON.stringify(spec.program)) drift.push(`program ${installed.program.join(" ")} ≠ ${spec.program.join(" ")}`);
   const keys = [...new Set([...Object.keys(installed.env), ...Object.keys(spec.env)])].toSorted();
