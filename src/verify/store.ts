@@ -38,6 +38,12 @@ export interface VerifyStep {
   when_changed?: readonly string[];
   /** A step kept from the interrupted verification this one resumes (its id): it passed (or was skipped) there and is not run again. */
   resumed_from?: string;
+  /**
+   * A landing batch's flake rerun (src/verify/flake.ts): instead of its own command, the step ran
+   * only the tests that failed in verification `of`, `passes` times in a row, with its `rerun_failed`
+   * command (`command`, the failing packages or files filled in). It passes only when every run did.
+   */
+  rerun?: { of: string; command: string; passes: number; tests: string[] };
 }
 
 /** What a verification cut off by a daemon stop records (src/verify/runner.ts): never judged. */

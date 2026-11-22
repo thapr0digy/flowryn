@@ -13,6 +13,7 @@ import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, pool
 import { hostState } from "../sched/scheduler.ts";
 import { BATCH_REF_PREFIX, liveBatchAt } from "./batch-store.ts";
 import { lightVerifyConfig, verifyConfig, type VerifyConfig } from "./config.ts";
+import { pendingFlakeAt, withRerun } from "./flake.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
@@ -67,7 +68,10 @@ export function resumeSteps(from: Verification, steps: readonly VerifyStep[]): V
 /** Take the request's slot and insert its running verification. Call inside a transaction; throws OverCapacity when the pool is full. */
 export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfig, caps: Record<string, number>, root: string, projectPath: string, now: number): Verification {
   const policy = verifyPolicyId(config);
-  const fresh = initialSteps(config.steps, config.when_changed);
+  const steps = initialSteps(config.steps, config.when_changed);
+  // A landing batch's flake rerun (src/verify/flake.ts): the failed step runs only its failing tests.
+  const flake = request.policy_id === policy ? pendingFlakeAt(db, request.pr_url, request.head_sha) : null;
+  const fresh = flake ? withRerun(steps, flake) : steps;
   const source = resumableFrom(db, request.pr_url, request.head_sha, policy, fresh);
   const resumed = source ? resumeSteps(source, fresh) : null;
   const v = insertVerification(db, {

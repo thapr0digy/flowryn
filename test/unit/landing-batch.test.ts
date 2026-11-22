@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { composeBriefing } from "../../src/attention/briefing.ts";
 import { openItem } from "../../src/attention/items.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { effectiveConfig } from "../../src/config/effective.ts";
@@ -18,6 +19,7 @@ import { batchView, FIX_DEADLINE_MS, landingBoardLines } from "../../src/verify/
 import { landingCell, landingProgress, LandingQueue, liveLanding, type LandingRow } from "../../src/verify/landing-queue.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { findQueued, getRequest, markStarted } from "../../src/verify/queue.ts";
+import { admitRequest } from "../../src/verify/start.ts";
 import { finishVerification, insertVerification, type Verification, type VerifyStep } from "../../src/verify/store.ts";
 import { GIT_ENV, scratchRepos, sh } from "../helpers/scratch-git.ts";
 
@@ -830,5 +832,113 @@ describe("what keeps a batch honest", () => {
     expect(landingProgress(db, row(s1))).not.toContain("batch");
     expect(landingCell(db, row(s1))).not.toContain("batch");
     expect(landingBoardLines(db)).toEqual([]);
+  });
+});
+
+describe("a flaky batch (docs/notes/2026-11-22-phase-flake-earns-a3.md)", () => {
+  const STORE_LOG = "--- FAIL: TestSave (0.00s)\n    store_test.go:12: wrong\nFAIL\texample.com/app/pkg/store\t0.01s\n";
+  const TEST = "example.com/app/pkg/store TestSave";
+  const COMMAND = "go test -count=1 example.com/app/pkg/store";
+  const flaky = () => parseConfig(`[projects.web]\nverify = [{ run = "bun test", rerun_failed = "go test -count=1 {failed}" }]\nlanding = "batch"\n`, dir);
+
+  /** Two routine branches in one batch on the flaky config, its verify red at `bun test`, and the pass that judges it. */
+  async function redBatch(log = STORE_LOG): Promise<{ lq: LandingQueue; b: BatchRow; s1: Ship; s2: Ship; red: Verification; cfg: FlowrynConfig }> {
+    const cfg = flaky();
+    const s1 = ship(1, { "pkg/store/store.go": "package store\n" });
+    const s2 = ship(2, { "pkg/web/web.go": "package web\n" });
+    const lq = queue(cfg);
+    await lq.pass();
+    const b = batchOf();
+    const red = verifyBatch("failed", failedStep("bun test", log), cfg);
+    await lq.pass();
+    return { lq, b, s1, s2, red, cfg };
+  }
+
+  /** The verify runner's admission of the batch's request: the steps it runs. */
+  const admitted = (cfg: FlowrynConfig) => tx(db, () => admitRequest(db, getRequest(db, batchOf().request_id!)!, verifyConfig(cfg, "web")!, { validation: 5 }, join(dir, "v"), primary, now));
+  const finish = (v: Verification, state: "passed" | "failed", steps: VerifyStep[]) => tx(db, () => finishVerification(db, v, { state, steps, tests: null, detail: null, binary: null }, now + 1));
+  const flakyRows = () => db.query("SELECT test, target, flakes, last_verification, task_id FROM flaky_tests ORDER BY test").all();
+
+  test("failing tests that pass 3 of 3 alone at the same head land the batch, record the flake and file one fix task", async () => {
+    const { lq, b, s1, s2, red, cfg } = await redBatch();
+    // rerun_failed never changes the policy: the batch's pass counts under the same one.
+    expect(fullPolicy(cfg)).toBe(fullPolicy());
+    const rerunning = getBatch(db, b.id)!;
+    expect(rerunning).toMatchObject({ state: "verifying", fix_task: null, verification_id: red.id });
+    expect(rerunning.detail).toContain(`verify ${red.id} failed at \`bun test\`; rerunning its 1 failing test alone, 3 times`);
+    expect(events("verify.flake_rerun")).toEqual([expect.objectContaining({ batch: b.id, head: b.head_sha, of: red.id, step: "bun test", command: COMMAND, targets: ["example.com/app/pkg/store"], tests: [TEST], passes: 3, request: rerunning.request_id })]);
+    expect(getRequest(db, rerunning.request_id!)).toMatchObject({ state: "queued", head_sha: b.head_sha, policy_id: fullPolicy() });
+    expect(db.query("SELECT COUNT(*) AS n FROM plans").get()).toEqual({ n: 0 });
+    expect(batchView(db, rerunning)).toMatchObject({ flake: { state: "pending", of: red.id, tests: [TEST] } });
+
+    // The runner runs the failed step's failing tests only, 3 times; the rest as configured.
+    const rerun = admitted(cfg);
+    expect(rerun.steps[0]).toMatchObject({ name: "bun test", rerun: { of: red.id, command: COMMAND, passes: 3, tests: [TEST] } });
+    finish(rerun, "passed", [{ ...rerun.steps[0]!, state: "passed", exit: 0, ms: 5 }]);
+    await lq.pass();
+
+    expect(getBatch(db, b.id)!.state).toBe("landed");
+    expect(mainTip()).toBe(b.head_sha);
+    expect([runState(s1), runState(s2)]).toEqual(["landed", "landed"]);
+    const [flake] = events("verify.flake");
+    expect(flake).toMatchObject({ batch: b.id, project: "web", head: b.head_sha, of: red.id, rerun: rerun.id, step: "bun test", command: COMMAND, passes: 3, tests: [TEST], ticketed: [] });
+    const task = flake!.task as string;
+    expect(flakyRows()).toEqual([{ test: TEST, target: "example.com/app/pkg/store", flakes: 1, last_verification: red.id, task_id: task }]);
+    // One non-blocking fix task, through the plan-phase path, its brief naming the test and the failing run.
+    expect(db.query("SELECT state, filed_by FROM plans").all()).toEqual([{ state: "approved", filed_by: `daemon (flaky tests in landing batch ${b.id})` }]);
+    const phase = db.query("SELECT title, body FROM plan_phases WHERE task_id = ?1").get(task) as { title: string; body: string };
+    expect(phase.title).toBe(`Fix flaky ${TEST}`);
+    expect(phase.body).toContain(`- ${TEST}`);
+    expect(phase.body).toContain(`\`${COMMAND}\``);
+    expect(phase.body).toContain("Never add a retry, a skip or a longer timeout");
+    expect(phase.body).toContain("```\n--- FAIL: TestSave (0.00s)");
+    expect(pendingIntents(db, "backlog").filter((i) => i.task_id === task).map((i) => i.verb)).toEqual(["add"]);
+    // The briefing says so once.
+    const brief = () => composeBriefing(db, { session: null, now: now + 10, morningHour: 99, ageMs: 60_000, markMorning: false }).text;
+    expect(brief()).toContain(`Flake `);
+    expect(brief()).toContain(`landing batch ${b.id} (web) landed after ${TEST} passed 3 of 3 alone (${rerun.id}); fix task ${task}.`);
+  });
+
+  test("a rerun that fails fixes the batch forward as before, with nothing recorded as flaky; no second rerun at that head", async () => {
+    const { lq, b, red, cfg } = await redBatch();
+    const rerun = admitted(cfg);
+    finish(rerun, "failed", [{ ...failedStep("bun test", STORE_LOG)[0]!, rerun: rerun.steps[0]!.rerun! }]);
+    await lq.pass();
+
+    const fixing = getBatch(db, b.id)!;
+    expect(fixing).toMatchObject({ state: "fixing", verification_id: rerun.id, fix_state: "open" });
+    expect(events("verify.flake_rerun_failed")).toEqual([expect.objectContaining({ batch: b.id, of: red.id, rerun: rerun.id, ran: true })]);
+    expect(events("verify.flake")).toEqual([]);
+    expect(flakyRows()).toEqual([]);
+    expect(events("verify.flake_rerun")).toHaveLength(1);
+    const brief = (db.query("SELECT body FROM plan_phases WHERE task_id = ?1").get(fixing.fix_task) as { body: string }).body;
+    expect(brief).toContain(`verify ${rerun.id} failed at \`bun test\` (its rerun of the failing tests of ${red.id}) (exit 1)`);
+  });
+
+  test("the weekly rule: a test that flaked this week earns another rerun only while its fix task is open; one fix task per test per week", async () => {
+    // Flaked two days ago with no fix task: no rerun, fixed forward, and the refusal says why.
+    tx(db, () => db.query("INSERT INTO flaky_tests (project_id, test, target, flakes, first_seen, last_seen, last_verification) VALUES ('web', ?1, 'example.com/app/pkg/store', 1, ?2, ?2, 'v0')").run(TEST, now - 2 * 86_400_000));
+    const { b } = await redBatch();
+    expect(getBatch(db, b.id)!.state).toBe("fixing");
+    expect(events("verify.flake_rerun")).toEqual([]);
+    expect(events("verify.flake_refused")).toEqual([expect.objectContaining({ batch: b.id, tests: [TEST], why: expect.stringContaining(`${TEST} already flaked within the week (2 days ago, v0) and has no fix task`) })]);
+  });
+
+  test("an open fix task keeps the rerun and files no second task; a log naming no tests earns none", async () => {
+    tx(db, () => db.query("INSERT INTO flaky_tests (project_id, test, target, flakes, first_seen, last_seen, last_verification, task_id, task_filed_at) VALUES ('web', ?1, 'example.com/app/pkg/store', 1, ?2, ?2, 'v0', 'fix-flaky-open', ?2)").run(TEST, now - 86_400_000));
+    const { lq, b, cfg } = await redBatch();
+    const rerun = admitted(cfg);
+    finish(rerun, "passed", [{ ...rerun.steps[0]!, state: "passed", exit: 0, ms: 5 }]);
+    await lq.pass();
+    expect(getBatch(db, b.id)!.state).toBe("landed");
+    expect(events("verify.flake")).toEqual([expect.objectContaining({ task: null, ticketed: [TEST] })]);
+    expect(db.query("SELECT COUNT(*) AS n FROM plans").get()).toEqual({ n: 0 });
+    expect(flakyRows()).toEqual([expect.objectContaining({ test: TEST, flakes: 2, task_id: "fix-flaky-open" })]);
+  });
+
+  test("a red whose log names no failing test it can rerun alone is fixed forward, with the refusal recorded", async () => {
+    const { b } = await redBatch("error: cannot connect to the database\n");
+    expect(getBatch(db, b.id)!.state).toBe("fixing");
+    expect(events("verify.flake_refused")).toEqual([expect.objectContaining({ batch: b.id, tests: [], why: expect.stringContaining("names no failing tests") })]);
   });
 });

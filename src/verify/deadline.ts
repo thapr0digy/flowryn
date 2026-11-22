@@ -39,7 +39,8 @@ export function recentPasses(db: Db, projectId: string): Map<string, number[]> {
       continue;
     }
     for (const step of steps) {
-      if (step.state !== "passed" || typeof step.ms !== "number" || (step.attempts ?? 1) > 1 || (step.hangs ?? 0) > 0) continue;
+      // A flake rerun ran another command under the step's name: it is no pass of the step.
+      if (step.state !== "passed" || typeof step.ms !== "number" || (step.attempts ?? 1) > 1 || (step.hangs ?? 0) > 0 || step.rerun) continue;
       const key = normalizeStep(step.name);
       const seen = passes.get(key) ?? [];
       if (seen.length < HISTORY_PASSES) passes.set(key, [...seen, step.ms]);

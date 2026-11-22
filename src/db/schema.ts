@@ -1028,6 +1028,27 @@ DROP INDEX landing_batches_live;
 CREATE UNIQUE INDEX landing_batches_live ON landing_batches(project_id) WHERE state IN ('verifying','fixing','landing','held');
 `;
 
+/**
+ * Migration 66, flakes earn one rerun (docs/notes/2026-11-22-phase-flake-earns-a3.md): a red batch's
+ * failing tests rerun once at the same head (landing_batches.flake, JSON: src/verify/flake.ts), and
+ * each test that then passed is a flaky_tests row, with the one fix task filed for it.
+ */
+const FLAKY_TESTS_SQL = /* sql */ `
+ALTER TABLE landing_batches ADD COLUMN flake TEXT;
+CREATE TABLE flaky_tests (
+  project_id TEXT NOT NULL,
+  test TEXT NOT NULL,
+  target TEXT NOT NULL,
+  flakes INTEGER NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  last_verification TEXT NOT NULL,
+  task_id TEXT,
+  task_filed_at INTEGER,
+  PRIMARY KEY (project_id, test)
+);
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1323,6 +1344,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 63, name: "decisions-option-costs", sql: OPTION_COSTS_SQL },
   { version: 64, name: "landing-batches", sql: LANDING_BATCHES_SQL },
   { version: 65, name: "batch-fix", sql: BATCH_FIX_SQL },
+  { version: 66, name: "flaky-tests", sql: FLAKY_TESTS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
