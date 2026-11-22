@@ -24,7 +24,7 @@ import { activateStage, neededPools, positionOf, projectLimit, type StagePos } f
 import { explainHumanWaits } from "../attention/human-waits.ts";
 import { queuedRequests } from "../verify/queue.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
-import { fullPools, OverCapacity, projectAtLimit, ProjectAtLimit } from "./pools.ts";
+import { FREED_AT_DELIVERY, fullPools, OverCapacity, projectAtLimit, ProjectAtLimit, workersToRetire } from "./pools.ts";
 import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, clearUsageLimit, pausedAccounts, usageGate, usagePauses } from "./usage.ts";
 import { moveLegacyCapacity } from "./legacy.ts";
@@ -222,8 +222,34 @@ export class Scheduler {
     await this.step("review revivals", async () => {
       if ((await this.reviveReviews()) > 0) this.deps.kickJournal();
     });
+    await this.step("retire freed workers", () => this.retireFreedWorkers());
     await this.step("grant", () => this.grant());
     await this.step("alerts", async () => this.alerts());
+  }
+
+  /**
+   * A batch project's delivery freed its worker's slot (docs/notes/2026-11-22-phase-free-the-rn.md):
+   * once the reconciler judges that worker idle, it exits by its recorded identity, so no worker runs
+   * without a slot. A send-back then starts a fresh one through a grant. A refused exit waits out the
+   * same backoff as a refused replacement, and is tried again.
+   */
+  private async retireFreedWorkers(): Promise<void> {
+    const { db, now } = this.deps;
+    for (const { id } of workersToRetire(db)) {
+      // Read again: an earlier exit was awaited, and a steer or a send-back since then keeps this worker.
+      const candidate = workersToRetire(db, id)[0];
+      if (!candidate || this.backingOff(id, now()) || this.relaunching.has(id) || this.deps.isLaunching(id)) continue;
+      const exited = await this.verifiedExit(candidate.id);
+      if (!exited.ok) {
+        const attempts = this.backOff(candidate.id);
+        this.deps.log(`sched: the delivered worker of ${candidate.id} did not exit (${exited.detail ?? "unverified"}; attempt ${attempts})`);
+        continue;
+      }
+      this.exitRefusals.delete(candidate.id);
+      tx(db, () =>
+        appendEvent(db, { source: "daemon", kind: "run.worker_retired", runId: candidate.id, taskId: candidate.task_id, payload: { pid: candidate.proc_pid, reason: FREED_AT_DELIVERY, detail: exited.detail ?? null }, ts: now() }),
+      );
+    }
   }
 
   private async step(name: string, fn: () => Promise<void>): Promise<void> {
@@ -600,6 +626,14 @@ export class Scheduler {
     }
   }
 
+  /** One more refused exit of the run's worker: the next attempt waits twice as long, up to EXIT_BACKOFF_MAX_MS. Returns the attempts so far. */
+  private backOff(runId: string): number {
+    const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
+    const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
+    this.exitRefusals.set(runId, { attempts, nextAt: this.deps.now() + backoff });
+    return attempts;
+  }
+
   /** A refused worker replacement waits out its backoff: no exit attempt holds the pass meanwhile. */
   private backingOff(runId: string, t: number): boolean {
     const refusals = this.exitRefusals.get(runId);
@@ -618,9 +652,7 @@ export class Scheduler {
   /** One refused worker replacement: an event when the episode starts, one P1 once it has lasted EXIT_REFUSALS_FOR_ITEM attempts. */
   private replacementRefused(runId: string, detail: string): void {
     const { db, now } = this.deps;
-    const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
-    const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
-    this.exitRefusals.set(runId, { attempts, nextAt: now() + backoff });
+    const attempts = this.backOff(runId);
     this.deps.log(`sched: the replacement worker for ${runId} waits: the old worker did not exit (${detail}; attempt ${attempts})`);
     if (attempts !== 1 && attempts < EXIT_REFUSALS_FOR_ITEM) return;
     tx(db, () => {

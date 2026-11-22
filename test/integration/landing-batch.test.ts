@@ -144,4 +144,36 @@ describe("landing batches", () => {
     },
     { timeout: 360_000 },
   );
+
+  test(
+    "a delivery frees its worker slot and the idle worker is retired; a send-back starts a fresh session that delivers again and lands",
+    async () => {
+      // The light check fails until fixed.txt exists. Its output rides in the send-back, which the fresh session's task file
+      // carries as its note, ahead of the dispatch body: the new worker commits fixed.txt and delivers again.
+      const light = `if [ -f fixed.txt ]; then ${PASS}; else printf 'missing fixed.txt\\nFAKE: commit fixed.txt fixed\\nFAKE: deliver-local\\nFAKE: sleep 120000\\n'; exit 1; fi`;
+      const gate = gated();
+      env = await makeShipEnv({ mode: "local-only", yolo: true, extraConfig: `[projects.web]\nverify = ${JSON.stringify([PASS])}\nlanding = "batch"\nlight_verify = ${JSON.stringify([`${gate.step.replace(PASS, "true")}; ${light}`])}\n` });
+      const e = env;
+      const first = await ship(e, "one.txt", "one");
+      const [session] = query<{ agent_session: string }>(e, "SELECT agent_session FROM runs WHERE id = ?1", first.run);
+      // Delivered: the run holds no live lease, and its worker slot was freed at delivery.
+      expect(query(e, "SELECT 1 FROM pool_leases WHERE run_id = ?1 AND released_at IS NULL", first.run)).toHaveLength(0);
+      expect(query<{ released_by: string }>(e, "SELECT released_by FROM pool_leases WHERE run_id = ?1 AND pool = 'worker' ORDER BY id DESC LIMIT 1", first.run)[0]!.released_by).toBe("delivered to the landing line");
+      // The light check waits on the gate while the idle worker is retired and read dead.
+      await waitUntil(() => e.fleet.events(first.run).includes("run.worker_retired"), 60_000, "the delivered worker retired");
+      await e.fleet.waitRun(first.run, (r) => r.liveness === "dead", "the retired worker read dead");
+
+      gate.open();
+      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND state = 'landed'", first.task).length > 0, 180_000, "the redelivered branch to land");
+      const kinds = e.fleet.events(first.run);
+      expect(kinds.filter((k) => k === "verify.sent_back")).toHaveLength(1);
+      expect(kinds.filter((k) => k === "run.fresh_worker")).toHaveLength(1);
+      expect(kinds).not.toContain("run.auto_resumed");
+      const [after] = query<{ agent_session: string }>(e, "SELECT agent_session FROM runs WHERE id = ?1", first.run);
+      expect(after!.agent_session).not.toBe(session!.agent_session);
+      expect(sh(e.fleet.repo, ["ls-tree", "--name-only", "main"]).split("\n")).toEqual(expect.arrayContaining(["one.txt", "fixed.txt"]));
+      await e.fleet.waitRun(first.run, (r) => r.state === "cleaned", "cleanup");
+    },
+    { timeout: 300_000 },
+  );
 });
