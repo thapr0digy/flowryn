@@ -70,8 +70,9 @@ export interface PlistSpec {
  * ProcessType Interactive lifts launchd's default light resource limits, which
  * throttle the daemon's CPU and so every verify child it runs (tests, headless
  * Chrome), making timing checks fail. For the user/<uid> domain (no desktop
- * session) it also names the Background session type: a plist without one defaults to Aqua, which user/<uid> refuses ("134:
- * Service cannot load in requested session").
+ * session) it also names the Background session type: a plist without one
+ * defaults to Aqua, which user/<uid> refuses ("134: Service cannot load in
+ * requested session").
  */
 export function renderPlist(spec: PlistSpec, domain?: string): string {
   const args = spec.program.map((a) => `    <string>${xml(a)}</string>`).join("\n");
