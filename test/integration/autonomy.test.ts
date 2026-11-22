@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { DOC_TEMPLATES } from "../../src/lifecycle/brief-templates.ts";
+import { stampOf } from "../../src/policy/autonomy.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
@@ -248,11 +249,7 @@ describe("unattended mode", () => {
       expect(weekQ.question).toContain("(at most 7 days) for project web?");
 
       await grantFromTerminal(e, { projects: "web", until: "+2h" });
-      const ref = `autonomy-renew:web@${rows<{ expires_at: number }>(e, "SELECT expires_at FROM autonomy_grants WHERE id = 'u1'").map((r) => {
-        const d = new Date(r.expires_at);
-        const p = (n: number) => String(n).padStart(2, "0");
-        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-      })[0]}`;
+      const ref = `autonomy-renew:web@${stampOf(rows<{ expires_at: number }>(e, "SELECT expires_at FROM autonomy_grants WHERE id = 'u1'")[0]!.expires_at)}`;
       // The leader's own call renews nothing: it needs the user's answer.
       const self = await e.fleet.json(["away", "--autonomous", "--renew", ref], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
       expect(self.code).toBe(2);
