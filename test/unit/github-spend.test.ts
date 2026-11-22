@@ -211,19 +211,23 @@ describe("a quiet delivered PR", () => {
     expect(pulls()).toBe(2);
   });
 
-  test("assumption: a settled green summary is not read again for the same head; a new head is", async () => {
+  test("assumption: a settled green summary is read again after QUIET_READ_POLLS polls (a late check or a re-run going red); a new head at once", async () => {
     const w = watcher();
     await w.pass();
     expect(checkReads()).toBe(1);
-    for (let i = 0; i < 10; i++) {
+    for (let i = 1; i < QUIET_READ_POLLS; i++) {
       now += MIN;
       await w.pass();
     }
     expect(checkReads()).toBe(1);
-    fake.pr("acme/web", 7).headSha = HEAD_B;
+    fake.setChecks("acme/web", HEAD, [{ name: "ci/test", state: "red" }]);
     now += MIN;
     await w.pass();
     expect(checkReads()).toBe(2);
+    fake.pr("acme/web", 7).headSha = HEAD_B;
+    now += MIN;
+    await w.pass();
+    expect(checkReads()).toBe(3);
   });
 
   test("assumption: pending checks are read every pass; a red summary again after QUIET_READ_POLLS polls (a re-run on the same head)", async () => {
@@ -260,16 +264,18 @@ describe("a quiet delivered PR", () => {
     expect(reviewReads()).toBe(2);
   });
 
-  test("a simulated hour costs under 100 requests, down from about 420", async () => {
+  test("a simulated hour costs 120 requests, down from about 420, and all but the first reads are 304s", async () => {
     const w = watcher();
     for (let i = 0; i < 60; i++) {
       await w.pass();
       now += MIN;
     }
     const total = fake.requests.length;
-    // 60 pulls, one green check read (2 requests), 12 review reads (3 lists each); no GraphQL with no inline thread waiting.
-    expect(total).toBe(60 + 2 + 12 * 3);
-    expect(total).toBeLessThan(100);
+    // 60 pulls, 12 green check reads (2 requests each), 12 review reads (3 lists each); no GraphQL with no inline thread waiting.
+    expect(total).toBe(60 + 12 * 2 + 12 * 3);
+    const charged = fake.requests.filter((r) => r.status !== 304).length;
+    // The first check read and review read; the pull was read at delivery, and every later answer is unchanged.
+    expect(charged).toBe(2 + 3);
   });
 });
 

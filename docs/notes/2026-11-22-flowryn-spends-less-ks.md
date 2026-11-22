@@ -29,10 +29,10 @@ The tally is in memory: a restart, or a forge rebuilt for new `[github]` config,
 Per pass of the delivery watcher (`[github] poll_ms`, 60 s by default):
 
 - One `pull` per PR per pass, shared by the PR watcher, the review watcher and the CI-wait check. A failed read is not shared.
-- Checks are read again only when the head moved, the last summary had no checks or a pending one, or it was red `QUIET_READ_POLLS` (5) polls ago, which catches a CI re-run on the same head. A settled green summary stands until the head moves: a merge reads its checks afresh (src/policy/merge.ts), so the gate never rests on it.
+- Checks are read again only when the head moved, the last summary had no checks or a pending one, or it was read `QUIET_READ_POLLS` (5) polls ago. A settled green or red summary can still change on the same head (a check that registers late, a CI re-run), so it is read again on that cadence. A merge reads its checks afresh (src/policy/merge.ts) either way.
 - Reviews and comments are read every `QUIET_READ_POLLS` polls (5 min at the default) instead of every pass. Review threads (GraphQL) keep their own 5-min floor and are read only with the feedback.
 
-A quiet delivered PR in ready now costs 60 pulls, one check read (2 requests) and 12 feedback reads (3 lists each): 98 requests an hour against the fake forge, down from about 420. The 5-poll cadence is a multiple of `poll_ms` rather than a fixed 5 min so a test home with a short poll keeps its reviews prompt; no config key was added.
+A quiet delivered PR in ready now costs 60 pulls, 12 check reads (2 requests each) and 12 feedback reads (3 lists each): 120 requests an hour against the fake forge, down from about 420. All but the first of each are unchanged answers, 304s that GitHub does not count against the rate limit. The 5-poll cadence is a multiple of `poll_ms` rather than a fixed 5 min so a test home with a short poll keeps its reviews prompt; no config key was added.
 
 Not done: GitHub App identity, gh-axi's own use, and `poll_ms` itself.
 

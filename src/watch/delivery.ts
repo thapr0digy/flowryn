@@ -213,13 +213,12 @@ export class DeliveryWatcher {
   /**
    * The PR head's checks and, when red, which ones GitHub never started.
    * Read again only when the head moved, the last summary had none or one
-   * still pending, or it was red QUIET_READ_POLLS polls ago (a re-run on the
-   * same head); a settled green stands until the head moves (a merge reads
-   * its checks afresh, src/policy/merge.ts).
+   * still pending, or it was read QUIET_READ_POLLS polls ago: a settled green
+   * or red can still change on the same head (a late check, a re-run).
    */
   private async checksOf(forge: Forge, ref: PrRef, pr: PullRequest, run: RunWithPolicy, url: string): Promise<{ checks: ChecksSummary; notStarted: number[] }> {
     const last = this.lastChecks.get(url);
-    const settled = last && last.headSha === pr.headSha && (last.checks.state === "green" || (last.checks.state === "red" && this.deps.now() - last.at < this.quietGapMs()));
+    const settled = last && last.headSha === pr.headSha && (last.checks.state === "green" || last.checks.state === "red") && this.deps.now() - last.at < this.quietGapMs();
     if (settled) return last;
     const checks = await forge.checks(ref, pr.headSha);
     const notStarted = checks.state === "red" ? await this.notStartedOf(forge, ref, checks, run.project_id, url) : [];
