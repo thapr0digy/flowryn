@@ -33,10 +33,10 @@ const VERIFY_CONFIG = /^(?:bunfig\.toml|package\.json|makefile|gnumakefile|.+\.m
 const GATE_WORD = /timeout|deadline|threshold|limit|retr(?:y|ies)|budget/i;
 /** Package manifests: their numbers are mostly dependency versions. */
 const MANIFEST = /^(?:package\.json|pyproject\.toml|setup\.cfg)$/i;
-/** A test runner's timeout in a manifest: a `--timeout`, `--testTimeout` or `-timeout` flag, or a `timeout` key. */
-const TIMEOUT_SETTING = /(?:^|[\s"'])--?(?:timeout|testTimeout)\b|(?:^|[\s"'])timeout["']?\s*[:=]/i;
-/** A dependency's version spec: a range operator before a dotted version, or a quoted x.y.z. */
-const VERSION_SPEC = /(?:\^|~=?|[<>]=?|[=!]=)\s*v?\d+(?:\.\d+)+|["']v?\d+\.\d+\.\d+/;
+/** A test runner's timeout in a manifest: a `--timeout`, `--testTimeout` or `-timeout` flag, or a `timeout` or `testTimeout` key. */
+const TIMEOUT_SETTING = /(?:^|[\s"'])--?(?:test)?timeout\b|(?:^|[\s"'])(?:test)?timeout["']?\s*[:=]/i;
+/** What comes right before a number that is part of a version: a range operator or `@`, or the dotted parts before it (1.2.0's 2.0). */
+const VERSION_PREFIX = /(?:[\^~@]|[<>]=?|[=!~]=)\s*v?$|\d\.$/;
 /** A test skipped: JS/TS, Go, Python and Rust spellings. A platform-only skipIf (AGENTS.md's darwin rule) is not one. */
 const SKIP_MARKERS = [/\b(?:test|it|describe|suite|context)\.(?:skip|todo)\s*\(/, /\b(?:xit|xdescribe|xtest)\s*\(/, /\.skipIf\s*\(/, /\b[tb]\.Skip(?:f|Now)?\s*\(/, /@pytest\.mark\.(?:skip|skipif|xfail)\b/, /\bpytest\.skip\s*\(/, /@unittest\.skip/, /#\[ignore\]/];
 const PLATFORM_SKIP = /\.skipIf\s*\(\s*process\.platform\b/;
@@ -100,8 +100,11 @@ function value(n: string, unit: string | undefined): { v: number; dim: string } 
   return scale ? { v: Number(n) * scale.factor, dim: scale.dim } : { v: Number(n), dim: "plain" };
 }
 
-/** The first number `after` raises over `before`, when the two lines differ only in their numbers. */
-export function raisedNumber(before: string, after: string): { from: string; to: string } | null {
+/**
+ * The first number `after` raises over `before`, when the two lines differ only in their numbers.
+ * With `versions` false, a number that is part of a version (^6.8.0, >=2.3) is never one.
+ */
+export function raisedNumber(before: string, after: string, versions = true): { from: string; to: string } | null {
   const skeleton = (s: string) => s.replace(NUMBER, "#").replace(/\s+/g, " ").trim();
   if (skeleton(before) !== skeleton(after)) return null;
   const old = [...before.matchAll(NUMBER)];
@@ -109,6 +112,7 @@ export function raisedNumber(before: string, after: string): { from: string; to:
   for (let i = 0; i < Math.min(old.length, now.length); i++) {
     const a = value(old[i]![1]!, old[i]![2]);
     const b = value(now[i]![1]!, now[i]![2]);
+    if (!versions && VERSION_PREFIX.test(after.slice(0, now[i]!.index))) continue;
     if (a.dim === b.dim && b.v > a.v) return { from: old[i]![0], to: now[i]![0] };
   }
   return null;
@@ -117,7 +121,7 @@ export function raisedNumber(before: string, after: string): { from: string; to:
 /** Whether a changed line of `name` may hold a gate's number: any line of a budget file, a gate's line of a test runner's config. */
 function gateLine(name: string, line: string): boolean {
   if (BUDGET_FILE.test(name)) return true;
-  if (MANIFEST.test(name)) return TIMEOUT_SETTING.test(line) && !VERSION_SPEC.test(line);
+  if (MANIFEST.test(name)) return TIMEOUT_SETTING.test(line);
   return VERIFY_CONFIG.test(name) && GATE_WORD.test(line);
 }
 
@@ -135,7 +139,7 @@ export function findLoosenings(diff: string): Loosening[] {
     h.added.forEach((after, i) => {
       const before = h.removed[i];
       if (before === undefined || !gateLine(name, after)) return;
-      const raised = raisedNumber(before, after);
+      const raised = raisedNumber(before, after, !MANIFEST.test(name));
       if (raised) found.push({ file: h.file, kind: "raised", line: cut(after), ...raised });
     });
     for (const added of h.added) {

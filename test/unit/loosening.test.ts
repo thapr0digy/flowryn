@@ -45,6 +45,9 @@ describe("findLoosenings", () => {
     expect(findLoosenings(diff("pyproject.toml", ["timeout = 30"], ["timeout = 60"])).map((l) => l.kind)).toEqual(["raised"]);
     expect(findLoosenings(diff("package.json", [`  "version": "1.2.0",`], [`  "version": "1.3.0",`]))).toEqual([]);
     expect(findLoosenings(diff("setup.cfg", ["timeout = 30"], ["timeout = 60"])).map((l) => l.kind)).toEqual(["raised"]);
+    // Jest's own key in package.json, and a script that pins its runner's version.
+    expect(findLoosenings(diff("package.json", [`    "testTimeout": 5000`], [`    "testTimeout": 20000`])).map((l) => [l.from, l.to])).toEqual([["5000", "20000"]]);
+    expect(findLoosenings(diff("package.json", [`    "test": "npx vitest@^1.2.0 --testTimeout 5000",`], [`    "test": "npx vitest@^1.2.0 --testTimeout 20000",`])).map((l) => [l.from, l.to])).toEqual([["5000", "20000"]]);
   });
 
   test("a dependency bump in a package manifest raises nothing, even when the package's name says limit or timeout", () => {
