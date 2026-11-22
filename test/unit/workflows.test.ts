@@ -31,7 +31,11 @@ afterEach(() => {
 describe("workflows (design section 11)", () => {
   test("the built-in workflows; only feature-ui carries visual QA, and a ship's ends in the merge gate", () => {
     const wf = workflowsConfig(cfg(""));
-    expect(Object.keys(wf).toSorted()).toEqual(["draft", "feature", "feature-ui", "fix", "scout"]);
+    expect(Object.keys(wf).toSorted()).toEqual(["corrections", "draft", "feature", "feature-ui", "fix", "scout"]);
+    // The weekly corrections scout: a scout whose one stage carries the correct skill.
+    expect(flowLine(wf.corrections!)).toBe("investigate");
+    expect(wf.corrections!.stages[0]).toMatchObject({ skill: "correct" });
+    expect(workflowFor(cfg(""), "corrections", "scout").id).toBe("corrections");
     expect(flowLine(wf.feature!)).toBe("design (review) → build → ship (merge)");
     expect(flowLine(wf["feature-ui"]!)).toBe("design (review) → build → qa (review) → ship (merge)");
     expect(flowLine(wf.fix!)).toBe("build → ship (merge)");

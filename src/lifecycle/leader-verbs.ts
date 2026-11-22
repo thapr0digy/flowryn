@@ -86,7 +86,7 @@ const steer: VerbSpec = {
     if (body.length === 0) throw new FlowrynError("bad_args", "the steer goes in --body-file -");
     const urgent = boolArg(args, "urgent");
     const endTurn = boolArg(args, "end-turn");
-    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent, endTurn);
+    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent, endTurn, ctx.caller.role);
     return { data: { steer: message.id, run: run.id, task: run.task_id, liveness: run.liveness, urgent, ...(endTurn ? { end_turn: true } : {}) }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {

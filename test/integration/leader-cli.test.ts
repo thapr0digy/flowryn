@@ -80,7 +80,7 @@ describe("flowryn lead", () => {
       "--model",
       "haiku",
     ]);
-    expect(piLeaderArgs(files, ["--model", "x/y"])).toEqual(["-e", files.piExtension, "--skill", files.skillDir, "--append-system-prompt", files.appendPrompt, "--model", "x/y"]);
+    expect(piLeaderArgs(files, ["--model", "x/y"])).toEqual(["-e", files.piExtension, "--skill", files.skillDir, "--skill", files.correctSkillDir, "--append-system-prompt", files.appendPrompt, "--model", "x/y"]);
     const launched = leaderEnv({ PATH: "/usr/bin", CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "parent", FLOWRYN_RUN: "r1", HOME: "/h" }, { token: "fwl_x", session: "L7", files, inactiveMs: 60_000 });
     expect(launched).toMatchObject({ FLOWRYN_TOKEN: "fwl_x", FLOWRYN_LEADER_SESSION: "L7", FLOWRYN_BIN: files.bin, PATH: `${files.binDir}:/usr/bin`, HOME: "/h" });
     expect(launched.CLAUDECODE).toBeUndefined();

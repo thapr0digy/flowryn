@@ -53,7 +53,7 @@ export function claudeLeaderArgs(files: LeaderFiles, passthrough: string[]): str
 
 export function piLeaderArgs(files: LeaderFiles, passthrough: string[]): string[] {
   // --append-system-prompt takes text or a file (M0 p05); -e scopes the extension to this process (M0 p12).
-  const args = ["-e", files.piExtension, "--skill", files.skillDir];
+  const args = ["-e", files.piExtension, "--skill", files.skillDir, "--skill", files.correctSkillDir];
   return [...args, "--append-system-prompt", files.appendPrompt, ...passthrough];
 }
 

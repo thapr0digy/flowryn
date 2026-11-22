@@ -2,6 +2,7 @@ import type { UpkeepConfig } from "../config/upkeep.ts";
 import { pruneExplanations, type PruneReport } from "../attention/explanations.ts";
 import { closeSeenInfoItems, INFO_KEEP_MS } from "../attention/items.ts";
 import { tx, type Db } from "../db/db.ts";
+import { correctionsPass, type CorrectionsPass } from "../leader/corrections.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import type { BuildPass, MergeBuilder } from "./build.ts";
@@ -16,7 +17,8 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * (`clean_ended_hours`). Before all three, and even when the pass otherwise
  * waits, it prunes closed wait explanations past their retention
  * (`explanations_keep_days`, `explanations_keep_per_run`) and closes
- * informational items presented over a day ago (closeSeenInfoItems): each one
+ * informational items presented over a day ago (closeSeenInfoItems), and once a
+ * week files the corrections scouts (src/leader/corrections.ts): each one
  * SQLite transaction, no checkout. The fourth hook, the conflict nudge, rides the
  * delivery watcher's PR reads (src/reconcile/delivery.ts).
  *
@@ -48,6 +50,8 @@ export interface PassReport {
   pruned: PruneReport | null;
   /** Informational items closed by their retention this pass. */
   infoClosed: string[];
+  /** The weekly corrections pass (src/leader/corrections.ts), or null when it was not due. */
+  corrections: CorrectionsPass | null;
   synced: string[];
   build: BuildPass | null;
   swept: { run: string; outcome: string; reason: string }[];
@@ -103,7 +107,7 @@ export class Upkeep {
     this.running = this.passOnce()
       .catch((error: unknown) => {
         this.deps.log(`upkeep: ${(error as Error).stack ?? String(error)}`);
-        return { pruned: null, infoClosed: [], synced: [], build: null, swept: [] } satisfies PassReport;
+        return { pruned: null, infoClosed: [], corrections: null, synced: [], build: null, swept: [] } satisfies PassReport;
       })
       .finally(() => {
         this.running = null;
@@ -135,9 +139,21 @@ export class Upkeep {
     }
   }
 
+  private corrections(): CorrectionsPass | null {
+    try {
+      const pass = correctionsPass(this.deps.db, this.deps.projects(), this.deps.now());
+      if (pass && pass.filed.length > 0) this.deps.log(`upkeep: filed ${pass.filed.length} corrections scouts (${pass.filed.map((f) => `${f.project} ${f.task}`).join(", ")})`);
+      return pass;
+    } catch (error) {
+      // Like a failed prune, it must not stop the sync, build and sweep behind it; the next pass tries again.
+      this.deps.log(`upkeep: the weekly corrections pass failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
   private async passOnce(): Promise<PassReport> {
     const config = this.deps.config();
-    const report: PassReport = { pruned: this.prune(config), infoClosed: this.closeInfo(), synced: [], build: null, swept: [] };
+    const report: PassReport = { pruned: this.prune(config), infoClosed: this.closeInfo(), corrections: this.corrections(), synced: [], build: null, swept: [] };
     const waiting = this.deps.busy();
     if (waiting) {
       report.waited = waiting;
