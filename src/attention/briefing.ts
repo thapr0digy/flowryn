@@ -283,7 +283,7 @@ function flakeLines(db: Db, lens: ScopeLens): string[] {
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
   const rows = db.query(`SELECT ts, kind, payload FROM events WHERE kind IN ('${FLAKE_KIND}', '${FLAKE_FAILED_KIND}') AND ts > ?1 ORDER BY seq`).all(since) as { ts: number; kind: string; payload: string }[];
   return rows
-    .map((r) => ({ ts: r.ts, kind: r.kind, ...(JSON.parse(r.payload) as { batch: string; project: string; tests?: string[]; passes?: number; task?: string | null; rerun: string | null; ran?: boolean }) }))
+    .map((r) => ({ ts: r.ts, kind: r.kind, ...(JSON.parse(r.payload) as { batch: string; project: string; tests?: string[]; passes?: number; task?: string | null; rerun: string | null; ran?: boolean; landed?: boolean }) }))
     .filter((r) => lens.project(r.project))
     .map((r) => {
       const at = `Flake ${hhmm(r.ts)}: landing batch ${r.batch} (${r.project})`;
@@ -295,6 +295,7 @@ function flakeLines(db: Db, lens: ScopeLens): string[] {
       const tests = r.tests ?? [];
       const named = `${sanitizeLine(tests[0] ?? "-", 80)}${tests.length > 1 ? ` (+${tests.length - 1} more)` : ""}`;
       const task = r.task ? `; fix task ${r.task}` : "; its fix task was already filed";
+      if (r.landed === false) return `${at}: ${named} passed ${r.passes} of ${r.passes} alone (${r.rerun}), but a later step failed${task}.`;
       return `${at} landed after ${named} passed ${r.passes} of ${r.passes} alone (${r.rerun})${task}.`;
     });
 }

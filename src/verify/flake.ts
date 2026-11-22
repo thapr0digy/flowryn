@@ -265,7 +265,7 @@ export function recordFlake(db: Db, input: { config: FlowrynConfig; project: Pro
     source: "daemon",
     kind: FLAKE_KIND,
     taskId: task,
-    payload: { batch: input.batch.id, project: project.id, head: flake.head, of: flake.of, rerun: rerun.id, step: flake.step, command: flake.command, passes: FLAKE_PASSES, tests: flake.tests, task, ticketed: flake.tests.filter((t) => !unticketed.includes(t)) },
+    payload: { batch: input.batch.id, project: project.id, head: flake.head, of: flake.of, rerun: rerun.id, step: flake.step, command: flake.command, passes: FLAKE_PASSES, tests: flake.tests, landed: rerun.state === "passed", task, ticketed: flake.tests.filter((t) => !unticketed.includes(t)) },
     ts: now,
   });
   return task;
@@ -281,7 +281,7 @@ function fileFixTask(db: Db, input: { config: FlowrynConfig; project: ProjectRow
   const first = sanitizeLine(tests[0]!, 60);
   const title = `Fix flaky ${first}${tests.length > 1 ? ` (+${tests.length - 1} more)` : ""}`;
   const body = [
-    `Landing batch ${batch.id} of ${project.id}: verify ${flake.of} failed at \`${flake.step}\`, then its failing tests passed ${FLAKE_PASSES} of ${FLAKE_PASSES} when run again alone at the same head (verify ${rerun.id}), so the batch landed. These tests are flaky:`,
+    `Landing batch ${batch.id} of ${project.id}: verify ${flake.of} failed at \`${flake.step}\`, then its failing tests passed ${FLAKE_PASSES} of ${FLAKE_PASSES} when run again alone at the same head (verify ${rerun.id}), ${rerun.state === "passed" ? "so the batch landed" : "but a later step failed, so the batch was not landed"}. These tests are flaky:`,
     "",
     ...tests.map((t) => `- ${sanitizeLine(t, 200)}`),
     "",

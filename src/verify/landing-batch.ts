@@ -426,7 +426,7 @@ export class LandingBatches {
       if (!fresh || flake?.state !== "pending" || flake.head !== v.head_sha) return null;
       const now = this.deps.now();
       const step = rerunStep(v);
-      const ran = step !== null && (step.state === "passed" || step.state === "failed" || step.state === "stopped");
+      const ran = step !== null && (step.state === "passed" || step.state === "failed");
       const state: FlakeState = !ran ? "ended" : step.state === "passed" ? "passed" : "failed";
       db.query("UPDATE landing_batches SET flake = ?2, updated_at = ?3 WHERE id = ?1").run(fresh.id, JSON.stringify({ ...flake, state, verification: v.id }), now);
       if (state === "passed") return { state, task: recordFlake(db, { config: this.deps.config(), project, batch: fresh, flake, rerun: v, red: getVerification(db, flake.of), now }) };
