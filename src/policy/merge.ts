@@ -37,6 +37,7 @@ import { findAwayApproval } from "../attention/away-merge.ts";
 import { batchRef, landingBatchOfRun } from "../verify/batch-store.ts";
 import { shortPolicy } from "../verify/policy.ts";
 import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification } from "../verify/store.ts";
+import { readLoosening, requireCountersign, type LooseningFacts } from "./countersign.ts";
 
 /**
  * The merge gate (design section 7, policy/merge), in order: the canonical PR
@@ -92,6 +93,8 @@ export interface MergeFacts {
   commits?: CommitInfo[] | null;
   /** Read when the project has verify steps, or when every red check may be one GitHub never started; absent: no verify is required. */
   local?: LocalEvidence;
+  /** A fix's diff read for loosened gates (src/policy/countersign.ts); absent: the run is not a fix. */
+  loosening?: LooseningFacts;
 }
 
 /** The local verifications of this head the gate requires, and the red checks GitHub never ran that they cover. */
@@ -184,7 +187,8 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
     if (!annotationsUnread) tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
     const local = localEvidence(mc, project.id, canonicalPrUrl(ref, mc.github.web_url), pr.headSha, notStarted);
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
-    return { ...base, head: pr.headSha, pr, checks, remote, ...(commits ? { commits } : {}), ...(local ? { local } : {}) };
+    const loosening = pr.state === "open" ? await readLoosening(mc.db, mc.git, run, project, pr.headSha, true) : undefined;
+    return { ...base, head: pr.headSha, pr, checks, remote, ...(commits ? { commits } : {}), ...(local ? { local } : {}), ...(loosening ? { loosening } : {}) };
   }
   const head = (await out(mc.git, run.worktree_path, ["rev-parse", "HEAD"])) ?? "";
   const primaryBranch = await out(mc.git, project.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -197,7 +201,8 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
     head !== "" && (batch ? (await ancestor(`refs/heads/${project.default_branch}`, batch.head_sha)) && (await ancestor(head, batch.head_sha)) : await ancestor(`refs/heads/${project.default_branch}`, head));
   const local = batch ? localEvidence(mc, project.id, batchRef(project.id, batch.id), batch.head_sha, []) : localEvidence(mc, project.id, base.ref, head, []);
   const commits = head === "" ? null : await branchCommits(mc.git, project.path, project.default_branch, head);
-  return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, commits, ...(local ? { local } : {}) };
+  const loosening = await readLoosening(mc.db, mc.git, run, project, head, false);
+  return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, commits, ...(local ? { local } : {}), ...(loosening ? { loosening } : {}) };
 }
 
 const COMMIT_FIELD = "\x00";
@@ -524,6 +529,23 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
     throw new FlowrynError("approval_required", "merge refused: sensitive work needs a human approval even under yolo", `approve in your shell: flowryn approve ${task}`);
   }
   return { waived, alreadyMerged: false, localGreen };
+}
+
+/** What proved this head: the gate's local green, else every GitHub check green (at least one); null when nothing did. */
+function verifierProof(facts: MergeFacts, gate: GateResult): string | null {
+  if (gate.localGreen) return `verify ${gate.localGreen}`;
+  const checks = facts.pr ? (facts.checks?.checks ?? []) : [];
+  return checks.length > 0 && checks.every((c) => c.state === "green") ? `GitHub's ${checks.length} check${checks.length === 1 ? "" : "s"}` : null;
+}
+
+/**
+ * The gate, then its last step for a fix whose diff loosens a gate: the leader's countersign
+ * (src/policy/countersign.ts), asked once the rest of the gate passed and a verifier proved the head.
+ */
+export function checkGateAndCountersign(db: Db, facts: MergeFacts, chosen: ChoiceResult, now: number): GateResult {
+  const gate = checkGate(facts, chosen);
+  if (!gate.alreadyMerged) requireCountersign(db, { run: facts.run, head: facts.head, loosening: facts.loosening, proof: verifierProof(facts, gate), now });
+  return gate;
 }
 
 export function channelOf(choice: ApprovalChoice): Channel {

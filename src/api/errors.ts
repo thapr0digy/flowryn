@@ -72,6 +72,8 @@ export const ERROR_CODES = {
   invalid_project: EXIT.validation,
   invalid_report: EXIT.validation,
   invalid_todo: EXIT.validation,
+  // a fix diff loosens a gate (raised budget or timeout, new skip, wider allowlist) without the leader's countersign
+  loosened_gate: EXIT.policy,
   merge_in_flight: EXIT.policy,
   merge_refused: EXIT.policy,
   // a project's account scope with none for the harness (docs/notes/2026-10-22-multiple-ai-provider-u9.md)

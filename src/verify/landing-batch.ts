@@ -13,6 +13,7 @@ import { getRunWithPolicy, isTerminal, type RunRow, type RunWithPolicy } from ".
 import { ulid } from "../util/ulid.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import type { GitRunner } from "../policy/landed.ts";
+import { COUNTERSIGN, countersigned, countersignOf, dismissCountersigns } from "../policy/countersign.ts";
 import { DAEMON_CALLER } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergePrepared, type MergeServices } from "../policy/merge-path.ts";
 import type { DeliveryServices } from "../policy/services.ts";
@@ -93,6 +94,8 @@ const RETRY_CODES = new Set(["checks_pending", "forge_unavailable", "merge_in_fl
 const REVERIFY_CODES = new Set(["verify_failed", "verify_stale", "red_checks"]);
 /** How long a batch waits for its fix task's delivery before it is held for the leader (the fix keeps going). */
 export const FIX_DEADLINE_MS = 60 * 60_000;
+/** A held batch's reason while a member's gate loosening waits for the leader's countersign (src/policy/countersign.ts). */
+const LOOSENED_GATE = "loosened_gate";
 /** Changed files listed per member in a fix task's brief; the rest are counted. */
 const FIX_FILES_SHOWN = 12;
 
@@ -266,6 +269,11 @@ export class LandingBatches {
     // A held batch whose fix ran late still takes the fix when it is delivered.
     if (batch.state === "held") {
       if (batch.fix_state === "open") await this.driveFix(batch, project);
+      else if (batch.reason === LOOSENED_GATE && this.countersignGiven(batch)) {
+        tx(db, () => this.moveBatch(getBatch(db, batch.id)!, "landing", { reason: null, detail: `${batch.culprit ?? "-"}'s gate loosening was countersigned` }, this.deps.now(), "daemon", "landing.batch_countersigned"));
+        await this.land(getBatch(db, batch.id)!, project);
+        return liveBatch(db, project.id) !== null;
+      }
       return true;
     }
     const main = await this.mainTip(project);
@@ -556,6 +564,7 @@ export class LandingBatches {
       applyDrop(db, { plan: null, tasks: [{ id: task, title: phase?.title ?? task, plan: phase?.plan_id ?? null, inBacklog: true }], dependents: [] }, { reason, by: "daemon", now });
     }
     db.query("UPDATE landing_batches SET fix_state = 'ended' WHERE id = ?1").run(batch.id);
+    dismissCountersigns(db, task, reason, now);
     appendEvent(db, { source: "daemon", kind: "landing.batch_fix_ended", taskId: task, runId: run?.id ?? null, payload: { batch: batch.id, task, why, run: run?.id ?? null, cancelled: run !== null && !isTerminal(run.state) }, ts: now });
   }
 
@@ -576,14 +585,34 @@ export class LandingBatches {
     }
   }
 
+  /**
+   * A green batch whose member `row` is a fix that loosens a gate: held until the leader
+   * countersigns it (its decision is open, src/policy/countersign.ts), then landed (drive); a
+   * refusal leaves it held for a drop. Call inside a transaction.
+   */
+  private holdForCountersign(batch: BatchRow, row: LandingRow, why: string): void {
+    if (batch.state !== "landing") return;
+    const decision = countersignOf(this.deps.db, row.task_id, row.head_sha)?.id;
+    // The item line keeps the next commands whole; the loosenings themselves are in the decision.
+    const detail = decision ? `${row.task_id} loosens a gate; ${decision} asks the countersign` : why;
+    this.hold(batch, LOOSENED_GATE, detail, row.task_id, batch.verification_id, `${decision ? `flowryn decide ${decision} ${COUNTERSIGN} | ` : ""}flowryn batch drop ${batch.id} ${row.task_id}`);
+  }
+
+  /** A batch held for a loosened gate whose fix was countersigned at the head it delivered (by the user, on sensitive work). */
+  private countersignGiven(batch: BatchRow): boolean {
+    const row = batchMembers(this.deps.db, batch.id).find((m) => m.task_id === batch.culprit);
+    const run = row ? getRunWithPolicy(this.deps.db, row.run_id) : null;
+    return row !== undefined && run !== null && countersigned(this.deps.db, run, row.head_sha);
+  }
+
   /** Hold the batch for the leader, with one landing_batch_held item naming the next commands. Call inside a transaction. */
-  private hold(batch: BatchRow, reason: string, detail: string, culprit: string | null, verification: string | null = null): void {
+  private hold(batch: BatchRow, reason: string, detail: string, culprit: string | null, verification: string | null = null, nextCommands: string | null = null): void {
     const { db } = this.deps;
     const now = this.deps.now();
     const members = batchMembers(db, batch.id);
     const owner = members.find((m) => m.task_id === culprit) ?? members[0] ?? null;
     const retry = `flowryn batch retry ${batch.id}`;
-    const next = reason !== "verify_failed" ? retry : `flowryn batch drop ${batch.id} ${owner?.task_id ?? "<task>"}${batch.retried_head !== batch.head_sha ? ` | ${retry}` : ""}`;
+    const next = nextCommands ?? (reason !== "verify_failed" ? retry : `flowryn batch drop ${batch.id} ${owner?.task_id ?? "<task>"}${batch.retried_head !== batch.head_sha ? ` | ${retry}` : ""}`);
     const seq = this.moveBatch(batch, "held", { reason, detail, culprit, verification_id: verification ?? batch.verification_id }, now);
     if (batch.item_id) resolveItem(db, batch.item_id, "landing.batch_held", now);
     // The digest keeps the next commands whole: the reason is cut first (the batch keeps it whole, show lb<N> prints it).
@@ -626,6 +655,11 @@ export class LandingBatches {
           return;
         }
         if (RETRY_CODES.has(error.code)) return;
+        // A fix that loosens a gate waits for the leader's countersign; the batch lands once it is given (drive).
+        if (error.code === "loosened_gate" && !onMain) {
+          tx(db, () => this.holdForCountersign(getBatch(db, batch.id)!, row, error.message));
+          return;
+        }
         if (REVERIFY_CODES.has(error.code) && !onMain) {
           await this.rebuild(batch, project, `the gate refused its verify for ${row.task_id}: ${error.message}`, batch.integrations);
           return;
@@ -943,6 +977,7 @@ export class LandingBatches {
     if (!row) throw new FlowrynError("not_found", `${taskId} is not in landing batch ${batchId} (it has ${batchMembers(db, batch.id).map((r) => r.task_id).join(", ") || "no branches"})`, `flowryn show ${batchId}`);
     // The fix holds every member: dropping any branch (or the fix itself) ends it, and the rest are rebuilt from main.
     this.endFix(batch, taskId === batch.fix_task ? "the leader dropped the fix" : `the leader dropped ${taskId}, which the fix's branch holds`);
+    dismissCountersigns(db, taskId, `the leader dropped it from landing batch ${batch.id}`, this.deps.now());
     if (taskId === batch.fix_task) {
       appendEvent(db, { source, kind: "landing.batch_dropped", runId: row.run_id, taskId, payload: { batch: batch.id, landing: row.id, verification: batch.verification_id, step: null, fix: true }, ts: this.deps.now() });
       this.deps.kickScheduler();

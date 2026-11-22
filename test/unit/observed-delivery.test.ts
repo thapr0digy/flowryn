@@ -123,6 +123,8 @@ const git: GitRunner = async (args) => {
     if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${repo.head}\n`, stderr: "" };
     if (args[0] === "rev-parse") return { code: 0, stdout: `${MERGED}\n`, stderr: "" };
     if (args[0] === "merge-base") return { code: repo.onDefault ? 0 : 1, stdout: "", stderr: "" };
+    // The fix's diff the merge gate reads for loosened gates (src/policy/countersign.ts): nothing loosened.
+    if (args[0] === "diff") return { code: 0, stdout: "", stderr: "" };
     return { code: 1, stdout: "", stderr: "not faked" };
   };
   const gate = repo.gate;

@@ -10,6 +10,8 @@ import { PROJECT_VERBS } from "../../src/lifecycle/projects.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import { answerDecision } from "../../src/lifecycle/decision-verbs.ts";
+import { countersignOf } from "../../src/policy/countersign.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
 import { batchMembers, batchRef, fixBranch, fixStartOf, getBatch, isBatchFix, liveBatch, type BatchRow } from "../../src/verify/batch-store.ts";
@@ -494,6 +496,81 @@ describe("fix forward", () => {
     // Nothing before the fix was rewritten: both members' merge commits are on main's first-parent line under it.
     expect(sh(primary, ["rev-list", "--first-parent", `${b.base_sha}..main`]).split("\n")).toEqual([fix.head, b.head_sha, s1.head]);
     expect(parents(b.head_sha)).toEqual([s1.head, s2.head]);
+  });
+
+  test("a fix that raises a budget holds the green batch as loosened_gate with a countersign decision; the leader's countersign lands it", async () => {
+    mkdirSync(join(primary, "ui", "tests"), { recursive: true });
+    writeFileSync(join(primary, "ui", "tests", "budget.json"), '{ "brief": 228 }\n');
+    sh(primary, ["add", "."]);
+    sh(primary, ["commit", "-q", "-m", "budget"]);
+    const { lq, b, s1, s2 } = await redBatch();
+    const task = getBatch(db, b.id)!.fix_task!;
+    const fix = deliverFix(b, { "pkg/store/fix.go": "package store\n", "ui/tests/budget.json": '{ "brief": 229 }\n' });
+    await lq.pass();
+    const v = verifyBatch("passed");
+    await lq.pass();
+
+    // Green, but not landed: the fix's own diff raises a budget, so it waits for the leader's countersign.
+    const held = getBatch(db, b.id)!;
+    expect(held).toMatchObject({ state: "held", reason: "loosened_gate", culprit: task, verification_id: v.id });
+    expect(mainTip()).toBe(b.base_sha);
+    const decision = countersignOf(db, task, fix.head)!;
+    expect(held.detail).toBe(`${task} loosens a gate; ${decision.id} asks the countersign`);
+    expect(decision.context).toContain("ui/tests/budget.json: raised 228 → 229");
+    expect(decision).toMatchObject({ state: "open", origin: "countersign", options: JSON.stringify(["countersign", "refuse"]), reserved_reason: null });
+    expect(decision.context).toContain(`Proof: verify ${v.id} passed at this head`);
+    expect(events("merge.loosened_gate")).toEqual([expect.objectContaining({ task, head: fix.head, base: b.head_sha, decision: decision.id, proof: `verify ${v.id}` })]);
+    const item = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").get() as { line: string };
+    expect(item.line).toContain(`Next: flowryn decide ${decision.id} countersign | flowryn batch drop ${b.id} ${task}`);
+    // Another pass asks nothing twice and lands nothing.
+    await lq.pass();
+    expect(db.query("SELECT COUNT(*) AS n FROM decisions WHERE origin = 'countersign'").get()).toEqual({ n: 1 });
+    expect(getBatch(db, b.id)!.state).toBe("held");
+
+    tx(db, () => answerDecision({ db, now: () => now }, decision, { choice: "countersign", words: "the brief screen grew by one icon", by: "leader", via: "cli" }));
+    await lq.pass();
+    expect(getBatch(db, b.id)!.state).toBe("landed");
+    expect(mainTip()).toBe(fix.head);
+    expect([runState(s1), runState(s2), getRunWithPolicy(db, fix.run)!.state]).toEqual(["landed", "landed", "landed"]);
+    expect(events("landing.batch_countersigned")).toEqual([expect.objectContaining({ batch: b.id, from: "held" })]);
+  });
+
+  test("dropping the fix of a batch held for a countersign dismisses its open decision", async () => {
+    const { lq, b } = await redBatch();
+    const task = getBatch(db, b.id)!.fix_task!;
+    const fix = deliverFix(b, { "pkg/store/store_test.go": `package store\n\nfunc TestSave(t *testing.T) { t.Skip${"("}"later") }\n` });
+    await lq.pass();
+    verifyBatch("passed");
+    await lq.pass();
+    const decision = countersignOf(db, task, fix.head)!;
+    expect(decision.state).toBe("open");
+
+    tx(db, () => lq.batches.drop(b.id, task));
+    expect(countersignOf(db, task, fix.head)).toMatchObject({ state: "dismissed" });
+    expect(events("decision.dismissed")).toEqual([expect.objectContaining({ decision: decision.id, origin: "countersign", task })]);
+  });
+
+  test("a refused countersign keeps the batch held; dropping the fix rebuilds the members from main", async () => {
+    const { lq, b, s1, s2 } = await redBatch();
+    const task = getBatch(db, b.id)!.fix_task!;
+    const fix = deliverFix(b, { "pkg/store/store_test.go": `package store\n\nfunc TestSave(t *testing.T) { t.Skip${"("}"later") }\n` });
+    await lq.pass();
+    verifyBatch("passed");
+    await lq.pass();
+    const decision = countersignOf(db, task, fix.head)!;
+    expect(getBatch(db, b.id)).toMatchObject({ state: "held", reason: "loosened_gate" });
+    expect(decision.context).toContain("adds a test skip");
+
+    tx(db, () => answerDecision({ db, now: () => now }, decision, { choice: "refuse", words: null, by: "leader", via: "cli" }));
+    await lq.pass();
+    expect(getBatch(db, b.id)!.state).toBe("held");
+    expect(mainTip()).toBe(b.base_sha);
+
+    tx(db, () => lq.batches.drop(b.id, task));
+    await lq.pass();
+    const next = batchOf();
+    expect(next.id).not.toBe(b.id);
+    expect(batchMembers(db, next.id).map((r) => r.task_id)).toEqual([s1.task, s2.task]);
   });
 
   test("a second red holds the batch for the leader; dropping a branch then cancels the fix and rebuilds the rest from main", async () => {
