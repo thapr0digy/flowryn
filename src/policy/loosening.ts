@@ -8,8 +8,9 @@ import { basename } from "node:path";
  * positives on ordinary numeric edits away:
  *
  * - raised: a number raised on a changed line of a file named *budget*, or of a test runner's
- *   config or package manifest (VERIFY_CONFIG) on a line naming a timeout, deadline, threshold,
- *   limit, retries or budget.
+ *   config (VERIFY_CONFIG) on a line naming a timeout, deadline, threshold, limit, retries or
+ *   budget. In a package manifest (MANIFEST) only a test runner's timeout flag or key counts,
+ *   never a dependency's version spec.
  * - skip: an added line that skips a test (SKIP_MARKERS), in any file but Markdown.
  * - allowlist: a new entry in a file named *allowlist* (or allow-list, allow_list).
  */
@@ -30,6 +31,12 @@ const ALLOWLIST_FILE = /allow[-_]?list/i;
 /** Test runner config: what a project's verify steps run under, scripts and tool sections of package manifests among it. */
 const VERIFY_CONFIG = /^(?:bunfig\.toml|package\.json|makefile|gnumakefile|.+\.mk|(?:vitest|jest|playwright)\.config\.[cm]?[jt]s|jest\.config\.json|pytest\.ini|tox\.ini|pyproject\.toml|setup\.cfg|\.golangci\.ya?ml)$/i;
 const GATE_WORD = /timeout|deadline|threshold|limit|retr(?:y|ies)|budget/i;
+/** Package manifests: their numbers are mostly dependency versions. */
+const MANIFEST = /^(?:package\.json|pyproject\.toml|setup\.cfg)$/i;
+/** A test runner's timeout in a manifest: a `--timeout`, `--testTimeout` or `-timeout` flag, or a `timeout` key. */
+const TIMEOUT_SETTING = /(?:^|[\s"'])--?(?:timeout|testTimeout)\b|(?:^|[\s"'])timeout["']?\s*[:=]/i;
+/** A dependency's version spec: a range operator before a dotted version, or a quoted x.y.z. */
+const VERSION_SPEC = /(?:\^|~=?|[<>]=?|[=!]=)\s*v?\d+(?:\.\d+)+|["']v?\d+\.\d+\.\d+/;
 /** A test skipped: JS/TS, Go, Python and Rust spellings. A platform-only skipIf (AGENTS.md's darwin rule) is not one. */
 const SKIP_MARKERS = [/\b(?:test|it|describe|suite|context)\.(?:skip|todo)\s*\(/, /\b(?:xit|xdescribe|xtest)\s*\(/, /\.skipIf\s*\(/, /\b[tb]\.Skip(?:f|Now)?\s*\(/, /@pytest\.mark\.(?:skip|skipif|xfail)\b/, /\bpytest\.skip\s*\(/, /@unittest\.skip/, /#\[ignore\]/];
 const PLATFORM_SKIP = /\.skipIf\s*\(\s*process\.platform\b/;
@@ -107,6 +114,13 @@ export function raisedNumber(before: string, after: string): { from: string; to:
   return null;
 }
 
+/** Whether a changed line of `name` may hold a gate's number: any line of a budget file, a gate's line of a test runner's config. */
+function gateLine(name: string, line: string): boolean {
+  if (BUDGET_FILE.test(name)) return true;
+  if (MANIFEST.test(name)) return TIMEOUT_SETTING.test(line) && !VERSION_SPEC.test(line);
+  return VERIFY_CONFIG.test(name) && GATE_WORD.test(line);
+}
+
 function isSkip(line: string): boolean {
   return !PLATFORM_SKIP.test(line) && SKIP_MARKERS.some((m) => m.test(line));
 }
@@ -116,18 +130,14 @@ export function findLoosenings(diff: string): Loosening[] {
   const found: Loosening[] = [];
   for (const h of hunks(diff)) {
     const name = basename(h.file);
-    const budget = BUDGET_FILE.test(name);
-    const verifyConfig = VERIFY_CONFIG.test(name);
     // A line moved within the hunk is not new, nor one that only gained or lost a list's trailing comma.
     const removed = new Set(h.removed.map(entry));
-    if (budget || verifyConfig) {
-      h.added.forEach((after, i) => {
-        const before = h.removed[i];
-        if (before === undefined || (!budget && !GATE_WORD.test(after))) return;
-        const raised = raisedNumber(before, after);
-        if (raised) found.push({ file: h.file, kind: "raised", line: cut(after), ...raised });
-      });
-    }
+    h.added.forEach((after, i) => {
+      const before = h.removed[i];
+      if (before === undefined || !gateLine(name, after)) return;
+      const raised = raisedNumber(before, after);
+      if (raised) found.push({ file: h.file, kind: "raised", line: cut(after), ...raised });
+    });
     for (const added of h.added) {
       const trimmed = added.trim();
       if (trimmed.length === 0 || removed.has(entry(added))) continue;

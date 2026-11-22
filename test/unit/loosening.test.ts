@@ -44,6 +44,22 @@ describe("findLoosenings", () => {
     ]);
     expect(findLoosenings(diff("pyproject.toml", ["timeout = 30"], ["timeout = 60"])).map((l) => l.kind)).toEqual(["raised"]);
     expect(findLoosenings(diff("package.json", [`  "version": "1.2.0",`], [`  "version": "1.3.0",`]))).toEqual([]);
+    expect(findLoosenings(diff("setup.cfg", ["timeout = 30"], ["timeout = 60"])).map((l) => l.kind)).toEqual(["raised"]);
+  });
+
+  test("a dependency bump in a package manifest raises nothing, even when the package's name says limit or timeout", () => {
+    for (const [before, after] of [
+      [`    "express-rate-limit": "^6.7.0",`, `    "express-rate-limit": "^6.8.0",`],
+      [`    "p-limit": "^3.1.0",`, `    "p-limit": "^3.2.0",`],
+      [`    "p-timeout": "~4.1.0",`, `    "p-timeout": "~4.2.0",`],
+      [`    "connect-timeout": "1.9.0",`, `    "connect-timeout": "1.9.1",`],
+    ] as const) {
+      expect(findLoosenings(diff("package.json", [before], [after]))).toEqual([]);
+    }
+    expect(findLoosenings(diff("pyproject.toml", [`  "ratelimit>=2.2",`], [`  "ratelimit>=2.3",`]))).toEqual([]);
+    expect(findLoosenings(diff("pyproject.toml", [`  "pytest-timeout==2.2.0",`], [`  "pytest-timeout==2.3.1",`]))).toEqual([]);
+    // A manifest line naming a limit that is not a test runner's timeout is not a gate either.
+    expect(findLoosenings(diff("package.json", [`    "max-limit": 10,`], [`    "max-limit": 20,`]))).toEqual([]);
     // Any other file's numbers are its own business.
     expect(findLoosenings(diff("src/server.ts", ["const timeout = 5000;"], ["const timeout = 9000;"]))).toEqual([]);
   });

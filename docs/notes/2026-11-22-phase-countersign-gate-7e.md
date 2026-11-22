@@ -20,7 +20,7 @@ Feature work is not checked.
 
 - **raised**: a changed line whose only difference is a higher number. This counts in two places:
   - any line of a file whose name contains `budget`;
-  - a line in a test runner's config (`bunfig.toml`, `package.json`, `Makefile`/`*.mk`, `vitest|jest|playwright.config.*`, `jest.config.json`, `pytest.ini`, `tox.ini`, `pyproject.toml`, `setup.cfg`, `.golangci.yml`) that names a timeout, deadline, threshold, limit, budget or retries. So `"test": "bun test --timeout 5000"` raised to `20000` in `package.json` counts.
+  - a line in a test runner's config (`bunfig.toml`, `package.json`, `Makefile`/`*.mk`, `vitest|jest|playwright.config.*`, `jest.config.json`, `pytest.ini`, `tox.ini`, `pyproject.toml`, `setup.cfg`, `.golangci.yml`) that names a timeout, deadline, threshold, limit, budget or retries. In a package manifest (`package.json`, `pyproject.toml`, `setup.cfg`) only a test runner's timeout counts: a `--timeout`, `--testTimeout` or `-timeout` flag, or a `timeout` key, and never a line with a dependency's version spec (`^6.7.0`, `>=2.2`, `"1.9.0"`). So `"test": "bun test --timeout 5000"` raised to `20000` in `package.json` counts, but bumping `express-rate-limit` from `^6.7.0` to `^6.8.0` does not.
 
   Units of one dimension are compared after scaling: `5m` to `400s` counts as raised, and `200kb` to `1mb` counts too.
 - **skip**: an added line that skips a test, in any file except Markdown. The spellings are:
