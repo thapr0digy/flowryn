@@ -15,7 +15,7 @@ import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import {
   channelOf,
-  checkGate,
+  checkGateAndCountersign,
   chooseApproval,
   DAEMON_CALLER,
   executeMerge,
@@ -113,7 +113,7 @@ export async function prepareDaemonMerge(s: MergeServices, task: string): Promis
   const seen = deliveryBasis(s.db, run.id);
   const facts = await gatherFacts(mergeContext(s), run, project);
   const chosen = chooseApproval(s.db, facts, { caller: DAEMON_CALLER }, "merge", s.now());
-  return { facts, gate: checkGate(facts, chosen), chosen, seen };
+  return { facts, gate: checkGateAndCountersign(s.db, facts, chosen, s.now()), chosen, seen };
 }
 
 function sourceOf(caller: MergeCaller): EventSource {

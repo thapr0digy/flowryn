@@ -12,6 +12,7 @@ import { getVerification } from "./store.ts";
  *   verifying → landing → landed
  *       ↘ fixing (a red verify: one fix task on top of the batch) → verifying (at the fix's head)
  *       ↘ held (a second red, a fix that failed or ran late, a timeout: the leader drops a branch or retries)
+ *   landing ↘ held (loosened_gate: a fix loosens a gate) → landing once the leader countersigns it (src/policy/countersign.ts)
  *   any live state ↘ dissolved (rebuilt, emptied, or batch mode off)
  *
  * The one place a batch's head moves: its fix's delivery, a fast-forward of the head it started on.
