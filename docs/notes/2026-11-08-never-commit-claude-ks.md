@@ -21,7 +21,7 @@ The fix is no-mistakes' global config, the one place that reaches every project'
 agent_args_override: { claude: ["--settings", '{"attribution":{"commit":"","pr":""}}'] }
 ```
 
-`flowryn doctor` checks it (`attributionCheck`, src/doctor/nomistakes.ts, check `no-mistakes PR attribution`) whenever a project delivers through no-mistakes: ok when `agent_args_override.claude` carries a `--settings` (inline JSON, `--settings=` form, or an absolute file) whose `attribution.commit` and `attribution.pr` are both `""`; otherwise a warn naming the line to add. The line is built from `NO_ATTRIBUTION`, so it cannot drift from the worker settings. Doctor only reads the file, as its `auto_fix.ci` check does: rewriting the user's commented YAML would lose their comments. A per-repo `.claude/settings.json` was rejected: it covers one project, and a repo that opts out of project settings in no-mistakes drops it.
+`flowryn doctor` checks it (`attributionCheck`, src/doctor/nomistakes.ts, check `no-mistakes PR attribution`) whenever a project delivers through no-mistakes: ok when `agent_args_override.claude` carries `--settings` with inline JSON whose `attribution.commit` and `attribution.pr` are both `""`; otherwise a warn naming the line to add. The line is built from `NO_ATTRIBUTION`, so it cannot drift from the worker settings. Doctor only reads the file, as its `auto_fix.ci` check does: rewriting the user's commented YAML would lose their comments. A per-repo `.claude/settings.json` was rejected: it covers one project, and a repo that opts out of project settings in no-mistakes drops it.
 
 ## Guidance
 
@@ -49,6 +49,6 @@ Commit messages, emails and the PR body are worker-written input: they are match
 
 - `test/unit/ai-attribution.test.ts`: the matcher's case, spacing, tab and CRLF variants and its near misses; the gate step's refusals (commit, PR body, unlistable commits, more than three hits) and passes; `branchCommits` against a real git repo; the leader settings, built and as written by `writeLeaderFiles`.
 - `test/unit/harness.test.ts`: the written worker settings file (launch and resume) has empty attribution; every ship mode's delivery lines carry the guidance.
-- `test/unit/doctor-nomistakes.test.ts`: the no-mistakes attribution check: no config or no claude `--settings` warns with the line to add; the advised line pasted into a config passes, as do a block list, the `--settings=` form and an absolute file; attribution left on, a relative path, bad JSON or bad YAML warns; no check without a no-mistakes project, and the config is never written.
+- `test/unit/doctor-nomistakes.test.ts`: the no-mistakes attribution check: no config or no claude `--settings` warns with the line to add; the advised line pasted into a config passes, as does a block list with other args first; attribution left on, a settings file path, bad JSON or bad YAML warns; no check without a no-mistakes project, and the config is never written.
 - `test/unit/forge.test.ts`: `pullCommits` and the PR body against the fake GitHub, and the 250-commit refusal.
 - `test/integration/delivery.test.ts`: through the real CLI and the fake forge, a PR whose commit carries `Co-Authored-By:  Claude … <NoReply@Anthropic.com>` is refused naming its commit and the fix, and a clean PR merges.

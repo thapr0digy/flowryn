@@ -134,20 +134,16 @@ describe("no-mistakes' PR attribution in doctor", () => {
     });
   });
 
-  test("a block list, the --settings= form and an absolute settings file pass", () => {
+  test("a block list with other args before --settings passes", () => {
     const block = `agent_args_override:\n  claude:\n    - --model\n    - sonnet\n    - --settings\n    - '${OFF}'\n`;
     expect(attributionCheck("c", block).status).toBe("ok");
-    expect(attributionCheck("c", `agent_args_override:\n  claude: ['--settings=${OFF}']\n`).status).toBe("ok");
-    const file = join(dir, "nm-claude.json");
-    writeFileSync(file, OFF);
-    expect(attributionCheck("c", `agent_args_override:\n  claude: [--settings, ${file}]\n`).status).toBe("ok");
   });
 
-  test("attribution left on, a relative path, bad JSON or bad YAML warns", () => {
+  test("attribution left on, a settings file path, bad JSON or bad YAML warns", () => {
     const pr = JSON.stringify({ attribution: { commit: "" } });
     expect(attributionCheck("c", `agent_args_override:\n  claude: ['--settings', '${pr}']\n`).detail).toStartWith('the claude --settings value does not set attribution.commit and attribution.pr to ""');
-    expect(attributionCheck("c", "agent_args_override:\n  claude: [--settings, nm.json]\n").detail).toStartWith('the claude --settings path "nm.json" is not absolute');
-    expect(attributionCheck("c", "agent_args_override:\n  claude: ['--settings', '{nope']\n").detail).toStartWith("the claude --settings value cannot be read as JSON");
+    expect(attributionCheck("c", "agent_args_override:\n  claude: [--settings, /nm/claude.json]\n").detail).toStartWith("the claude --settings value is not inline JSON");
+    expect(attributionCheck("c", "agent_args_override:\n  claude: ['--settings', '{nope']\n").detail).toStartWith("the claude --settings value is not inline JSON");
     expect(attributionCheck("c", "agent_args_override: [unclosed\n").detail).toStartWith("c does not parse as YAML");
   });
 

@@ -121,14 +121,10 @@ export const NM_CLAUDE_SETTINGS_ARGS = ["--settings", JSON.stringify({ attributi
 
 const ATTRIBUTION_FIX = `add \`agent_args_override: { claude: ["--settings", '${NM_CLAUDE_SETTINGS_ARGS[1]}'] }\` (or append those two items to an existing claude list)`;
 
-/** The last `--settings` value in an agent's extra args, in either `--settings v` or `--settings=v` form. */
+/** The value after the last `--settings` in an agent's extra args. */
 function settingsArg(args: readonly string[]): string | null {
-  let value: string | null = null;
-  args.forEach((arg, i) => {
-    if (arg === "--settings" && i + 1 < args.length) value = args[i + 1]!;
-    else if (arg.startsWith("--settings=")) value = arg.slice("--settings=".length);
-  });
-  return value;
+  const at = args.lastIndexOf("--settings");
+  return at >= 0 && at + 1 < args.length ? args[at + 1]! : null;
 }
 
 /** Whether a Claude settings object hides both commit and PR attribution. */
@@ -142,10 +138,10 @@ function hidesAttribution(settings: unknown): boolean {
 /**
  * Doctor's word on no-mistakes' PR attribution, from its global config's text
  * (null when the file is absent): ok only when `agent_args_override.claude`
- * passes `--settings` (inline JSON or an absolute file) hiding commit and PR
+ * passes `--settings` with inline JSON hiding commit and PR
  * attribution. `agent_args_override` is global-only, so no repo layer applies.
  */
-export function attributionCheck(where: string, text: string | null, readFile: (path: string) => string = (path) => readFileSync(path, "utf8")): Check {
+export function attributionCheck(where: string, text: string | null): Check {
   const check = "no-mistakes PR attribution";
   const warn = (why: string): Check => ({
     check,
@@ -166,11 +162,9 @@ export function attributionCheck(where: string, text: string | null, readFile: (
   if (value === null) return warn("no-mistakes' claude agent gets no --settings");
   let settings: unknown;
   try {
-    if (value.trimStart().startsWith("{")) settings = JSON.parse(value);
-    else if (value.startsWith("/")) settings = JSON.parse(readFile(value));
-    else return warn(`the claude --settings path ${JSON.stringify(value)} is not absolute (no-mistakes runs claude in its run worktree)`);
+    settings = JSON.parse(value);
   } catch (error) {
-    return warn(`the claude --settings value cannot be read as JSON (${(error as Error).message.split("\n")[0]})`);
+    return warn(`the claude --settings value is not inline JSON (${(error as Error).message.split("\n")[0]})`);
   }
   if (!hidesAttribution(settings)) return warn("the claude --settings value does not set attribution.commit and attribution.pr to \"\"");
   return { check, status: "ok", detail: `${where} passes claude --settings hiding commit and PR attribution` };
