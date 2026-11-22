@@ -6,13 +6,13 @@ import { DOC_TEMPLATES } from "./brief-templates.ts";
 const KINDS = Object.keys(DOC_TEMPLATES) as DocKind[];
 
 /**
- * `flowryn template <ship|scout|handoff|spec>`: the shape Flowryn checks a
- * brief, a stage handoff or a design build spec against
+ * `flowryn template <ship|scout|handoff|spec|report>`: the shape Flowryn checks a
+ * brief, a stage handoff, a design build spec or a scout's report against
  * (docs/notes/2026-11-05-workers-get-rich-hx.md). Read-only; fill every {{slot}}.
  */
 const templateVerb: VerbSpec = {
   name: "template",
-  summary: "Print the shape of a ship or scout brief, a stage handoff, or a design build spec",
+  summary: "Print the shape of a ship or scout brief, a stage handoff, a design build spec, or a scout report",
   positionals: [{ name: "kind", required: true, help: KINDS.join(", ") }],
   flags: {},
   kind: "read",

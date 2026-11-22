@@ -72,7 +72,12 @@ export const NO_AI_ATTRIBUTION_LINE = '  Commits and PR body: no AI Co-authored-
 
 /** The "finished" lines: how this worker delivers, and that it is verified. */
 export function deliveryLines(d: ContractDelivery): string[] {
-  if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
+  if (d.kind === "scout") {
+    return [
+      "- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.",
+      "  Write reports under $FLOWRYN_REPORT_DIR ($FLOWRYN_BIN template report): ## Short answer (15 lines at most) and any proposals table first, within 6 KB; evidence in linked files.",
+    ];
+  }
   if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", NO_AI_ATTRIBUTION_LINE, `  Finished: $FLOWRYN_BIN deliver --local${handoffFlag(d)}. It is verified.`];
   if (d.mode === "direct-PR") {
     return [

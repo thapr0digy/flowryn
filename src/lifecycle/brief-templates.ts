@@ -83,4 +83,17 @@ const SPEC = `# Build spec: <title>
 {{The other ways, doing nothing included, and why each lost.}}
 `;
 
-export const DOC_TEMPLATES: Readonly<Record<DocKind, string>> = { ship: SHIP, scout: SCOUT, handoff: HANDOFF, spec: SPEC };
+/** A scout's report: what the leader reads first, then pointers to the detail (reportProblems). */
+const REPORT = `# <one-line title>
+
+## Short answer
+{{At most 15 lines: the answer to each question, then what you recommend. The leader reads only this before deciding.}}
+
+## Proposals
+{{Optional: one table row per proposal, ranked (name, where, effort, expected effect). Drop the section when there are none.}}
+
+## Evidence
+{{One line per linked file under $FLOWRYN_REPORT_DIR (relative link) holding the detail: commands, output, sources. Detail stays out of this file's first screen.}}
+`;
+
+export const DOC_TEMPLATES: Readonly<Record<DocKind, string>> = { ship: SHIP, scout: SCOUT, handoff: HANDOFF, spec: SPEC, report: REPORT };

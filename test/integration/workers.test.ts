@@ -529,6 +529,31 @@ describe("deliver matches the task kind", () => {
   );
 
   test(
+    "a scout report over 15 lines with no short answer is refused naming the rule; the same report under a short answer delivers",
+    async () => {
+      const env = await fleet();
+      const evidence = Array.from({ length: 16 }, (_, i) => `- finding ${i + 1}`).join("\\n");
+      const steps = [
+        "Scout",
+        `FAKE: write long.md # Cache\\n\\n${evidence}`,
+        "FAKE: verb deliver --report $FLOWRYN_REPORT_DIR/long.md",
+        `FAKE: write good.md # Cache\\n\\n## Short answer\\nThe cache evicts too early.\\n\\n## Evidence\\n${evidence}`,
+        "FAKE: verb deliver --report $FLOWRYN_REPORT_DIR/good.md",
+        "FAKE: sleep 30000",
+      ];
+      const { task, run } = await env.dispatch(steps.join("\n"));
+      const [refused, accepted] = await fakeReplies(env, task, 2);
+      expect(refused!.code).toBe(3);
+      expect(refused!.reply.error).toMatchObject({ code: "invalid_report" });
+      expect(JSON.stringify(refused!.reply.error)).toContain('no \\"## Short answer\\" section');
+      expect(accepted!.code).toBe(0);
+      await env.waitRun(run, delivered, "the run to land with its report");
+      expect(readFileSync(join(env.h.dataDir, task, "report.md"), "utf8")).toContain("## Short answer");
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
     "a scout's deliver --pr is refused with bad_args",
     async () => {
       const env = await fleet();

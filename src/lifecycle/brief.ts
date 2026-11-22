@@ -1,11 +1,11 @@
 /**
  * Structured briefs (docs/notes/2026-11-05-workers-get-rich-hx.md). A ship's
- * or a scout's dispatched body, a stage handoff and a design stage's build
- * spec are Markdown documents with fixed `## ` sections. This is the plain
+ * or a scout's dispatched body, a stage handoff, a design stage's build
+ * spec and a scout's report are Markdown documents with fixed `## ` sections. This is the plain
  * parser that checks them: no model, only headings, bodies and placeholders.
  */
 
-export type DocKind = "ship" | "scout" | "handoff" | "spec";
+export type DocKind = "ship" | "scout" | "handoff" | "spec" | "report";
 
 interface SectionDef {
   /** The heading as the template writes it. */
@@ -49,7 +49,10 @@ const SPEC: SectionDef[] = [
   { title: "Rejected alternatives", noneOk: true },
 ];
 
-export const DOC_SECTIONS: Readonly<Record<DocKind, readonly SectionDef[]>> = { ship: SHIP, scout: SCOUT, handoff: HANDOFF, spec: SPEC };
+/** A scout's report (docs/notes/2026-11-22-phase-reports-the-3k.md): reportProblems adds its size rules. */
+const REPORT: SectionDef[] = [{ title: "Short answer", aliases: ["tl;dr", "tldr", "summary"] }];
+
+export const DOC_SECTIONS: Readonly<Record<DocKind, readonly SectionDef[]>> = { ship: SHIP, scout: SCOUT, handoff: HANDOFF, spec: SPEC, report: REPORT };
 
 /** A brief may also carry these, unchecked: the leader's build instructions (firstmate's "spec" half). */
 export const OPTIONAL_SHIP_SECTIONS = ["Spec"] as const;
@@ -68,12 +71,16 @@ export function normalizeHeading(heading: string): string {
     .trim();
 }
 
-/** The `## ` sections of a Markdown document, in order; a heading inside a fenced code block is text. */
-export function parseSections(markdown: string): Section[] {
-  const sections: Section[] = [];
-  let current: Section | null = null;
+/** A section with the index of its heading line. */
+interface PlacedSection extends Section {
+  line: number;
+}
+
+function scanSections(markdown: string): PlacedSection[] {
+  const sections: PlacedSection[] = [];
+  let current: PlacedSection | null = null;
   let fence: string | null = null;
-  for (const line of markdown.split(/\r?\n/)) {
+  for (const [index, line] of markdown.split(/\r?\n/).entries()) {
     const fenceMark = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (fenceMark) {
       if (fence === null) fence = fenceMark[0]!;
@@ -81,13 +88,18 @@ export function parseSections(markdown: string): Section[] {
     }
     const heading = fence === null && !fenceMark ? /^##\s+(.+?)\s*#*\s*$/.exec(line) : null;
     if (heading) {
-      current = { heading: heading[1]!, body: "" };
+      current = { heading: heading[1]!, body: "", line: index };
       sections.push(current);
       continue;
     }
     if (current) current.body += `${line}\n`;
   }
-  return sections.map((s) => ({ heading: s.heading, body: s.body.trim() }));
+  return sections.map((s) => ({ ...s, body: s.body.trim() }));
+}
+
+/** The `## ` sections of a Markdown document, in order; a heading inside a fenced code block is text. */
+export function parseSections(markdown: string): Section[] {
+  return scanSections(markdown).map(({ heading, body }) => ({ heading, body }));
 }
 
 /** A template slot left as it was: a line that is wholly `{{...}}` (code with braces inside a line is text). */
@@ -95,7 +107,7 @@ const PLACEHOLDER = /^\s*\{\{[^\n]*\}\}\s*$/m;
 const ONLY_TODO = /^(?:todo|tbd|tba|fixme|\.\.\.|…|-)\.?$/i;
 const NONE_WITH_REASON = /^none\s*[:.—-]\s*\S/i;
 
-function sectionFor(def: SectionDef, sections: Section[]): Section | undefined {
+function sectionFor<S extends Section>(def: SectionDef, sections: S[]): S | undefined {
   const names = new Set([normalizeHeading(def.title), ...(def.aliases ?? []).map(normalizeHeading)]);
   return sections.find((s) => names.has(normalizeHeading(s.heading)));
 }
@@ -139,6 +151,44 @@ export function docProblems(kind: DocKind, markdown: string): string[] {
   }
   if (missing.length > 0) problems.unshift(`missing section${missing.length === 1 ? "" : "s"}: ${missing.map((m) => `## ${m}`).join(", ")}`);
   return problems;
+}
+
+/** A report's `## Short answer` holds at most this many non-blank lines; a report this short needs none. */
+export const REPORT_SHORT_ANSWER_LINES_MAX = 15;
+/** The most a report's first screen (start to the end of the section after its short answer) may weigh, in UTF-8 bytes. */
+export const REPORT_FIRST_SCREEN_BYTES_MAX = 6 * 1024;
+
+function nonBlankLines(text: string): number {
+  return text.split(/\r?\n/).filter((l) => l.trim() !== "").length;
+}
+
+/**
+ * Every problem with a scout's report, one line each naming the rule; empty
+ * when it passes (docs/notes/2026-11-22-phase-reports-the-3k.md). The leader
+ * reads a report in a minute: a `## Short answer` of at most 15 lines, and a
+ * first screen (the start through the section after the short answer, such
+ * as a proposals table) of at most 6 KB; evidence goes in linked files. A
+ * report of 15 lines or fewer is its own short answer and needs no heading.
+ */
+export function reportProblems(markdown: string): string[] {
+  const sections = scanSections(markdown);
+  const found = sectionFor(REPORT[0]!, sections);
+  if (!found) {
+    if (nonBlankLines(markdown) <= REPORT_SHORT_ANSWER_LINES_MAX) return firstScreenProblems(markdown, "the report");
+    return [`no "## Short answer" section: a report over ${REPORT_SHORT_ANSWER_LINES_MAX} lines opens with one of at most ${REPORT_SHORT_ANSWER_LINES_MAX} lines`];
+  }
+  const problems = docProblems("report", markdown);
+  const lines = nonBlankLines(found.body);
+  if (lines > REPORT_SHORT_ANSWER_LINES_MAX) problems.push(`"## Short answer" is ${lines} lines: keep it to ${REPORT_SHORT_ANSWER_LINES_MAX} or fewer and move the rest to linked evidence files`);
+  const end = sections[sections.indexOf(found) + 2]?.line;
+  const firstScreen = end === undefined ? markdown : markdown.split(/(?<=\n)/).slice(0, end).join("");
+  return [...problems, ...firstScreenProblems(firstScreen, 'the first screen (the start through the section after "## Short answer")')];
+}
+
+function firstScreenProblems(text: string, what: string): string[] {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= REPORT_FIRST_SCREEN_BYTES_MAX) return [];
+  return [`${what} is ${(bytes / 1024).toFixed(1)} KB: keep it to ${REPORT_FIRST_SCREEN_BYTES_MAX / 1024} KB and move evidence into linked files`];
 }
 
 /** The kind of brief a dispatch of this task kind must carry, or null when none is checked. */
