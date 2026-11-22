@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
 import { autonomyGateVerdict, autonomyVerdict, PARKING_CLASSES } from "../../src/attention/autonomy-pass.ts";
-import { autonomyLines } from "../../src/attention/autonomy-report.ts";
+import { autonomyLines, renewLine } from "../../src/attention/autonomy-report.ts";
 import { findOpenRunItem, openItem, resolveDecisionItems } from "../../src/attention/items.ts";
 import { decisionsConfig, RESERVED_CLASSES } from "../../src/attention/decisions-policy.ts";
 import { parseConfig } from "../../src/config/config.ts";
@@ -24,13 +24,18 @@ import {
   autonomyFor,
   autonomyForRun,
   autonomyRef,
+  autonomyRenewRef,
   canonicalTerms,
   checkTerms,
+  grantSpan,
   endAutonomy,
   expireAutonomy,
   liveAutonomy,
   mintAutonomyApproval,
   parseAutonomyRef,
+  parseAutonomyRenewRef,
+  renewableAutonomy,
+  spanLabel,
   startAutonomy,
   startedUnderAutonomy,
 } from "../../src/policy/autonomy.ts";
@@ -91,8 +96,11 @@ describe("the standing approval's record", () => {
     expect(parseAutonomyRef("autonomy:web,api@2026-11-06T08:00")).toBeNull();
   });
 
-  test("checkTerms: ahead, at most 16 hours, each project registered with verify steps", () => {
+  test("checkTerms: ahead, at most 7 days, each project registered with verify steps", () => {
+    expect(AUTONOMY_MAX_MS).toBe(7 * 24 * HOUR);
     expect(refusal(() => checkTerms(db, CONFIG, canonicalTerms(["web"], NOW + HOUR), NOW))).toBe("ok");
+    expect(refusal(() => checkTerms(db, CONFIG, canonicalTerms(["web"], NOW + 7 * 24 * HOUR), NOW))).toBe("ok");
+    expect(() => checkTerms(db, CONFIG, canonicalTerms(["web"], NOW + 7 * 24 * HOUR + 60_000), NOW)).toThrow("more than 7 days away");
     expect(refusal(() => checkTerms(db, CONFIG, canonicalTerms(["web"], NOW - HOUR), NOW))).toBe("bad_args");
     expect(refusal(() => checkTerms(db, CONFIG, canonicalTerms(["web"], NOW + AUTONOMY_MAX_MS + 60_000), NOW))).toBe("bad_args");
     expect(refusal(() => checkTerms(db, CONFIG, canonicalTerms(["bare"], NOW + HOUR), NOW))).toBe("bad_args");
@@ -147,6 +155,7 @@ describe("the chat question binds exactly the terms", () => {
     expect(form.action).toBe("autonomy");
     expect(bindingRef(form.question.question)).toBe(ref);
     expect(form.question.question).toContain("parks only its task");
+    expect(form.question.question).toContain("Start unattended mode until 2026-11-06 06:00 (at most 7 days) for project web?");
     expect(mapAnswer(form, "Start autonomy", null)).toEqual({ kind: "grant", choice: "start", words: null });
     expect(mapAnswer(form, "No", null).kind).toBe("declined");
     expect(mapAnswer(form, "sure, go", null).kind).toBe("none");
@@ -157,6 +166,90 @@ describe("the chat question binds exactly the terms", () => {
     const b = autonomyRef(canonicalTerms(["web", "api"], NOW + 8 * HOUR));
     const c = autonomyRef(canonicalTerms(["web"], NOW + 9 * HOUR));
     expect(new Set([a, b, c]).size).toBe(3);
+  });
+});
+
+describe("renewing a grant", () => {
+  const DAY = 24 * HOUR;
+
+  test("the renew item names the grant's own terms and reads back; it is not an autonomy item", () => {
+    const row = grant(["web", "api"], NOW + 8 * HOUR);
+    const ref = autonomyRenewRef(row);
+    expect(ref).toBe("autonomy-renew:api,web@2026-11-06T06:00");
+    expect(parseAutonomyRenewRef(ref)).toEqual(canonicalTerms(["api", "web"], NOW + 8 * HOUR));
+    expect(parseAutonomyRef(ref)).toBeNull();
+    expect(parseAutonomyRenewRef(autonomyRef(canonicalTerms(["web"], NOW + 8 * HOUR)))).toBeNull();
+    expect(parseRef(ref)).toBe(ref);
+    expect(refusal(() => parseRef("autonomy-renew:web"))).toBe("bad_args");
+  });
+
+  test("its question names the span from the answer, Renew grants and No declines, free text grants nothing", () => {
+    const row = grant(["web"], NOW + 16 * HOUR);
+    tx(db, () => expireAutonomy(db, NOW + 17 * HOUR));
+    const ref = autonomyRenewRef(row);
+    const form = chatForm(db, ref, MERGE_DEFAULTS, NOW + 17 * HOUR);
+    expect(form.action).toBe("autonomy-renew");
+    expect(bindingRef(form.question.question)).toBe(ref);
+    expect(form.question.question).toContain("Renew unattended mode for project web for 16 hours from your answer, on the terms of u1 (until 2026-11-06 14:00)?");
+    expect(form.question.question).toContain("parks only its task");
+    expect(form.question.options.map((o) => o.label)).toEqual(["Renew", "No"]);
+    expect(mapAnswer(form, "Renew", null)).toEqual({ kind: "grant", choice: "renew", words: null });
+    expect(mapAnswer(form, "No", null).kind).toBe("declined");
+    expect(mapAnswer(form, "yes renew", null).kind).toBe("none");
+  });
+
+  test("assumption: the question reads the same before and after the grant expires, so an answer across the expiry still binds", () => {
+    const row = grant(["web"], NOW + 16 * HOUR);
+    const ref = autonomyRenewRef(row);
+    const before = chatForm(db, ref, MERGE_DEFAULTS, NOW + 15 * HOUR).question;
+    tx(db, () => expireAutonomy(db, NOW + 17 * HOUR));
+    expect(chatForm(db, ref, MERGE_DEFAULTS, NOW + 17 * HOUR).question).toEqual(before);
+  });
+
+  test("assumption: only the latest grant, expired or live, is renewed; one ended by back or a newer grant is not", () => {
+    const first = grant(["web"], NOW + 8 * HOUR);
+    expect(renewableAutonomy(db, parseAutonomyRenewRef(autonomyRenewRef(first))!).id).toBe("u1");
+    tx(db, () => endAutonomy(db, NOW + HOUR));
+    expect(refusal(() => renewableAutonomy(db, parseAutonomyRenewRef(autonomyRenewRef(first))!))).toBe("not_ready");
+    const second = grant(["web"], NOW + 9 * HOUR, NOW + 2 * HOUR);
+    grant(["web"], NOW + 10 * HOUR, NOW + 3 * HOUR);
+    expect(refusal(() => renewableAutonomy(db, parseAutonomyRenewRef(autonomyRenewRef(second))!))).toBe("not_found");
+    expect(refusal(() => chatForm(db, autonomyRenewRef(second), MERGE_DEFAULTS, NOW + 3 * HOUR))).toBe("not_found");
+  });
+
+  test("assumption: the span is what the user asked for, though the end was cut to its minute", () => {
+    const row = grant(["web"], NOW + 40_000 + 2 * HOUR, NOW + 40_000);
+    expect(grantSpan(row)).toBe(2 * HOUR);
+  });
+
+  test("spanLabel names days, hours and minutes", () => {
+    expect(spanLabel(16 * HOUR)).toBe("16 hours");
+    expect(spanLabel(7 * DAY)).toBe("7 days");
+    expect(spanLabel(DAY + 12 * HOUR)).toBe("1 day 12 hours");
+    expect(spanLabel(HOUR + 60_000)).toBe("1 hour 1 minute");
+  });
+
+  test("the briefing offers it once the grant expired, for a day; a grant over a day gets a reminder its last day; never earlier", () => {
+    grant(["web"], NOW + 16 * HOUR);
+    expect(renewLine(db, NOW + 15 * HOUR, SEES_ALL, DAY)).toBeNull();
+    const ended = renewLine(db, NOW + 17 * HOUR, SEES_ALL, DAY);
+    expect(ended).toContain("Unattended mode u1 ended at 2026-11-06 14:00. To renew it for 16 hours on the same projects, ask the user: flowryn chat-question autonomy-renew:web@2026-11-06T14:00");
+    expect(renewLine(db, NOW + 16 * HOUR + DAY + 60_000, SEES_ALL, DAY)).toBeNull();
+    expect(renewLine(db, NOW + 16 * HOUR + DAY + 60_000, SEES_ALL, Number.POSITIVE_INFINITY)).toBe(ended!);
+    const long = grant(["web"], NOW + 3 * DAY, NOW + 17 * HOUR);
+    expect(renewLine(db, NOW + 17 * HOUR + HOUR, SEES_ALL, DAY)).toBeNull();
+    const reminder = renewLine(db, NOW + 3 * DAY - 20 * HOUR, SEES_ALL, DAY);
+    expect(reminder).toContain(`Unattended mode ${long.id} ends at`);
+    expect(reminder).toContain(`flowryn chat-question ${autonomyRenewRef(long)}`);
+  });
+
+  test("a scoped leader that cannot see every project of the grant is not offered it; nor after back", () => {
+    grant(["web", "api"], NOW + 8 * HOUR);
+    const scoped = { ...SEES_ALL, restricted: true, project: (id: string) => id === "web" };
+    expect(renewLine(db, NOW + 9 * HOUR, scoped, DAY)).toBeNull();
+    expect(renewLine(db, NOW + 9 * HOUR, SEES_ALL, DAY)).not.toBeNull();
+    tx(db, () => endAutonomy(db, NOW + HOUR));
+    expect(renewLine(db, NOW + 9 * HOUR, SEES_ALL, DAY)).toBeNull();
   });
 });
 
@@ -409,6 +502,14 @@ describe("the morning report", () => {
     expect(seen[0]).toContain("projects web, +1 other project, until");
     expect(seen[0]).not.toContain("api");
     expect(seen[0]).not.toContain("the user's words");
+  });
+
+  test("assumption: an expired grant's report lists what it did first, then the renew offer last", () => {
+    grant(["web"], NOW + 8 * HOUR);
+    tx(db, () => expireAutonomy(db, NOW + 9 * HOUR));
+    const lines = autonomyLines(db, { since: NOW - 1, until: NOW + 9 * HOUR, now: NOW + 9 * HOUR, lens: SEES_ALL });
+    expect(lines.at(-2)).toBe("Parked: none.");
+    expect(lines.at(-1)).toContain("To renew it for 8 hours on the same projects, ask the user: flowryn chat-question autonomy-renew:web@2026-11-06T06:00");
   });
 
   test("nothing at all when no grant was live in the window", () => {

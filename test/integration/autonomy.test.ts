@@ -200,7 +200,7 @@ describe("unattended mode", () => {
       const wrongCode = await e.call("autonomy.begin", { projects: "web", until: "+2h" });
       const challenge = (wrongCode.data as { challenge: string }).challenge;
       expect((await e.call("autonomy.confirm", { challenge, code: "ZZZZ", actor: "x" })).error).toMatchObject({ code: "challenge_failed" });
-      expect((await e.call("autonomy.begin", { projects: "web", until: "+17h" })).error).toMatchObject({ code: "bad_args" });
+      expect((await e.call("autonomy.begin", { projects: "web", until: "+7d1m" })).error).toMatchObject({ code: "bad_args" });
       expect(rows(e, "SELECT 1 FROM autonomy_grants")).toHaveLength(0);
     },
     { timeout: 60_000 },
@@ -231,6 +231,59 @@ describe("unattended mode", () => {
       expect(row).toMatchObject({ channel: "claude-chat", grant_id: grant, words: "back at 8" });
       // The grant is used once; a second use, or the same command again, starts nothing.
       expect((await leader.runBash(`flowryn grant use ${grant} --json`, { approve: false })).code).toBe(2);
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a 7-day grant is asked as one; renew re-grants the same projects for the same span only on the user's Renew, never on the leader's own call or a No",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: false, extraConfig: CONFIG });
+      const e = env;
+      const leader: FakeClaudeLeader = await e.claude();
+      await leader.start();
+      const week = await e.fleet.json(["away", "--autonomous", "--projects", "web", "--until", "+7d"], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      const weekRef = /flowryn chat-question (autonomy:\S+)/.exec(String((week.reply.error as { help: string }).help))?.[1];
+      const weekQ = JSON.parse(((await e.fleet.json(["chat-question", weekRef!], { env: { FLOWRYN_TOKEN: e.leaderToken() } })).reply.data as { question: string }).question);
+      expect(weekQ.question).toContain("(at most 7 days) for project web?");
+
+      await grantFromTerminal(e, { projects: "web", until: "+2h" });
+      const ref = `autonomy-renew:web@${rows<{ expires_at: number }>(e, "SELECT expires_at FROM autonomy_grants WHERE id = 'u1'").map((r) => {
+        const d = new Date(r.expires_at);
+        const p = (n: number) => String(n).padStart(2, "0");
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+      })[0]}`;
+      // The leader's own call renews nothing: it needs the user's answer.
+      const self = await e.fleet.json(["away", "--autonomous", "--renew", ref], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      expect(self.code).toBe(2);
+      expect(self.reply.error).toMatchObject({ code: "approval_required" });
+      expect(String((self.reply.error as { help: string }).help)).toContain(`flowryn chat-question ${ref}`);
+      // Nor does the user's own socket call without the chat answer.
+      expect((await e.call("away", { autonomous: true, renew: ref })).error).toMatchObject({ code: "approval_required" });
+
+      const asked = await e.fleet.json(["chat-question", ref], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      const q = JSON.parse((asked.reply.data as { question: string }).question);
+      expect(q.question).toContain("Renew unattended mode for project web for 2 hours from your answer, on the terms of u1");
+      const declined = await leader.ask([q], { answers: { [q.question]: "No" } });
+      expect(declined.contexts.join("\n")).toContain("nothing is granted");
+      expect(rows(e, "SELECT 1 FROM autonomy_grants")).toHaveLength(1);
+
+      const answered = await leader.ask([q], { answers: { [q.question]: "Renew" } });
+      const grant = /Grant (c\d+)/.exec(answered.contexts.join("\n"))?.[1];
+      expect(grant).toBeDefined();
+      const used = await leader.runBash(`flowryn grant use ${grant} --json`, { approve: false });
+      expect(used.code).toBe(0);
+      expect(JSON.parse(used.stdout).data).toMatchObject({ autonomy: "u2", projects: "web", channel: "claude-chat", ran: "away" });
+      const [u1, u2] = rows<{ id: string; started_at: number; expires_at: number; end_reason: string | null; grant_id: string | null }>(e, "SELECT id, started_at, expires_at, end_reason, grant_id FROM autonomy_grants ORDER BY id");
+      expect(u1).toMatchObject({ id: "u1", end_reason: "superseded" });
+      expect(u2).toMatchObject({ id: "u2", end_reason: null, grant_id: grant });
+      expect(Math.abs(u2!.expires_at - u2!.started_at - 2 * 3_600_000)).toBeLessThan(60_000);
+      const started = rows<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'autonomy.started' ORDER BY seq").map((r) => JSON.parse(r.payload));
+      expect(started.at(-1)).toMatchObject({ autonomy: "u2", renews: "u1", superseded: "u1" });
+      // u1 is no longer the latest grant: its renew item names u2 now if u2 ends in the same minute, else nothing.
+      const again = await e.fleet.json(["chat-question", ref], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      if (again.reply.error) expect(again.reply.error).toMatchObject({ code: "not_found" });
+      else expect((again.reply.data as { question: string }).question).toContain("on the terms of u2");
     },
     { timeout: 60_000 },
   );
