@@ -390,7 +390,7 @@ function notifyCommandChecks(config: FlowrynConfig): Check[] {
  */
 export function checkoutChecks(db: Db): Check[] {
   const checks: Check[] = [];
-  const projects = db.query("SELECT id, path FROM projects ORDER BY id").all() as { id: string; path: string }[];
+  const projects = db.query("SELECT id, path FROM projects WHERE removed_at IS NULL ORDER BY id").all() as { id: string; path: string }[];
   const missing = new Set<string>();
   for (const p of projects) {
     if (existsSync(join(p.path, ".git"))) continue;

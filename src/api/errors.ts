@@ -102,6 +102,8 @@ export const ERROR_CODES = {
   pr_closed: EXIT.policy,
   pr_draft: EXIT.policy,
   primary_checkout_tangle: EXIT.policy,
+  // flowryn project rm: the project still has live runs, queued tasks, open phases, decisions, batches or watches
+  project_busy: EXIT.policy,
   protocol_mismatch: EXIT.protocol,
   qa_page_invalid: EXIT.validation,
   // a review gate whose own questions are still open

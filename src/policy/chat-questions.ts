@@ -4,7 +4,7 @@ import type { Db } from "../db/db.ts";
 import { captainAnswerable, getDecision, optionCostsOf, recommendedChoices } from "../lifecycle/decisions.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
-import { getProject } from "../lifecycle/projects.ts";
+import { requireActiveProject } from "../lifecycle/projects.ts";
 import { parseAutonomyRef, parseAwayRef, stampOf } from "./autonomy.ts";
 import { findRun, getRunWithPolicy, taskTitle } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
@@ -286,7 +286,7 @@ export const AUTONOMY_SUMMARY =
 function autonomyForm(db: Db, ref: string): ChatForm {
   const terms = parseAutonomyRef(ref);
   if (!terms) throw new FlowrynError("bad_args", `${sanitizeLine(ref, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`);
-  for (const id of terms.projects) if (!getProject(db, id)) throw new FlowrynError("not_found", `no project ${id}`, "flowryn project list");
+  for (const id of terms.projects) requireActiveProject(db, id);
   const until = stampOf(terms.until).replace("T", " ");
   const head = `autonomy ${ref.slice("autonomy:".length)}`;
   return {

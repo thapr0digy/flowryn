@@ -1,4 +1,5 @@
 import { PROJECT_VERBS } from "../lifecycle/projects.ts";
+import { PROJECT_RM_VERBS } from "../lifecycle/project-rm.ts";
 import { TODO_VERBS } from "../lifecycle/todos.ts";
 import { WORKER_VERBS } from "../lifecycle/worker.ts";
 import { HOOK_VERBS } from "../lifecycle/hooks.ts";
@@ -48,6 +49,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...WORKER_VERBS,
   ...TODO_VERBS,
   ...PROJECT_VERBS,
+  ...PROJECT_RM_VERBS,
   ...HOOK_VERBS,
   ...CONTRACT_VERBS,
   ...LEASE_VERBS,

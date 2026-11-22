@@ -16,7 +16,7 @@ import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { createStandaloneDecision, DEADLINE_VIA, VALIDATOR_VIA, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
-import { getProject } from "./projects.ts";
+import { getProject, requireActiveProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, runBase } from "./runs.ts";
 import type { ShowText } from "./show-text.ts";
 import { createSteer } from "./steers.ts";
@@ -213,7 +213,7 @@ const decisionAdd: VerbSpec = {
     const question = stringArg(args, "question");
     if (!key || !question) throw new FlowrynError("bad_args", "decision add needs --key and --question");
     const project = stringArg(args, "project");
-    if (project && !getProject(ctx.db, project)) throw new FlowrynError("not_found", `no project ${project}`);
+    if (project) requireActiveProject(ctx.db, project);
     const blocks = (args.blocks as string[] | undefined) ?? [];
     const unknown = blocks.filter((b) => !blockTargetExists(ctx, b));
     if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
