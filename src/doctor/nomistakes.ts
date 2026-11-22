@@ -5,6 +5,7 @@ import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { stateFiles } from "../config/paths.ts";
 import { upkeepConfig } from "../config/upkeep.ts";
 import { openDb } from "../db/db.ts";
+import { NO_ATTRIBUTION } from "../harness/claude/adapter.ts";
 import { gitRunner } from "../policy/git.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import type { Check } from "./doctor.ts";
@@ -16,7 +17,8 @@ import type { Check } from "./doctor.ts";
  * sends the ship back to merge instead). The effective value is the repo's
  * `.no-mistakes.yaml` on the default branch over `$NM_HOME/config.yaml`
  * (default `~/.no-mistakes/config.yaml`) over no-mistakes' own default.
- * Read-only: it never edits either file.
+ * It also checks that no-mistakes' claude agent hides PR attribution
+ * (`attributionCheck`). Read-only: it never edits either file.
  */
 
 /** no-mistakes' default `auto_fix.ci` (its config sample, v1.84.0), when neither file sets it. */
@@ -107,6 +109,85 @@ export async function autoFixChecks(nudgeConflicts: boolean, projects: readonly 
   return checks;
 }
 
+/**
+ * The Claude flags no-mistakes' claude agent needs so the PR bodies it writes
+ * carry no "Generated with Claude Code" line (docs/notes/2026-11-08-never-commit-claude-ks.md).
+ * no-mistakes runs `claude -p` with only the operator's own settings, never
+ * Flowryn's worker settings, so its PR step writes Claude Code's default PR
+ * attribution unless told otherwise. A --settings flag outranks every other
+ * settings source, so this holds whatever the user's or a project's settings say.
+ */
+export const NM_CLAUDE_SETTINGS_ARGS = ["--settings", JSON.stringify({ attribution: NO_ATTRIBUTION })] as const;
+
+const ATTRIBUTION_FIX = `add \`agent_args_override: { claude: ["--settings", '${NM_CLAUDE_SETTINGS_ARGS[1]}'] }\` (or append those two items to an existing claude list)`;
+
+/** The last `--settings` value in an agent's extra args, in either `--settings v` or `--settings=v` form. */
+function settingsArg(args: readonly string[]): string | null {
+  let value: string | null = null;
+  args.forEach((arg, i) => {
+    if (arg === "--settings" && i + 1 < args.length) value = args[i + 1]!;
+    else if (arg.startsWith("--settings=")) value = arg.slice("--settings=".length);
+  });
+  return value;
+}
+
+/** Whether a Claude settings object hides both commit and PR attribution. */
+function hidesAttribution(settings: unknown): boolean {
+  const attribution = settings !== null && typeof settings === "object" ? (settings as Record<string, unknown>).attribution : undefined;
+  if (attribution === null || typeof attribution !== "object") return false;
+  const { commit, pr } = attribution as Record<string, unknown>;
+  return commit === "" && pr === "";
+}
+
+/**
+ * Doctor's word on no-mistakes' PR attribution, from its global config's text
+ * (null when the file is absent): ok only when `agent_args_override.claude`
+ * passes `--settings` (inline JSON or an absolute file) hiding commit and PR
+ * attribution. `agent_args_override` is global-only, so no repo layer applies.
+ */
+export function attributionCheck(where: string, text: string | null, readFile: (path: string) => string = (path) => readFileSync(path, "utf8")): Check {
+  const check = "no-mistakes PR attribution";
+  const warn = (why: string): Check => ({
+    check,
+    status: "warn",
+    detail: `${why}, so its PR step writes "Generated with Claude Code" into PR bodies and merge refuses them (ai_attribution); ${ATTRIBUTION_FIX} in ${where}`,
+  });
+  if (text === null) return warn(`${where} does not exist`);
+  let doc: unknown;
+  try {
+    doc = Bun.YAML.parse(text);
+  } catch (error) {
+    return warn(`${where} does not parse as YAML (${(error as Error).message.split("\n")[0]})`);
+  }
+  const overrides = doc !== null && typeof doc === "object" ? (doc as Record<string, unknown>).agent_args_override : undefined;
+  const claudeArgs = overrides !== null && typeof overrides === "object" ? (overrides as Record<string, unknown>).claude : undefined;
+  const args = Array.isArray(claudeArgs) && claudeArgs.every((arg) => typeof arg === "string") ? (claudeArgs as string[]) : [];
+  const value = settingsArg(args);
+  if (value === null) return warn("no-mistakes' claude agent gets no --settings");
+  let settings: unknown;
+  try {
+    if (value.trimStart().startsWith("{")) settings = JSON.parse(value);
+    else if (value.startsWith("/")) settings = JSON.parse(readFile(value));
+    else return warn(`the claude --settings path ${JSON.stringify(value)} is not absolute (no-mistakes runs claude in its run worktree)`);
+  } catch (error) {
+    return warn(`the claude --settings value cannot be read as JSON (${(error as Error).message.split("\n")[0]})`);
+  }
+  if (!hidesAttribution(settings)) return warn("the claude --settings value does not set attribution.commit and attribution.pr to \"\"");
+  return { check, status: "ok", detail: `${where} passes claude --settings hiding commit and PR attribution` };
+}
+
+/** One attribution check when any project delivers through no-mistakes; none otherwise. */
+export function attributionChecks(projects: readonly NmProject[], globalPath: string): Check[] {
+  if (projects.length === 0) return [];
+  let text: string | null;
+  try {
+    text = existsSync(globalPath) ? readFileSync(globalPath, "utf8") : null;
+  } catch (error) {
+    return [{ check: "no-mistakes PR attribution", status: "warn", detail: `${globalPath} cannot be read (${(error as Error).message}); ${ATTRIBUTION_FIX}` }];
+  }
+  return [attributionCheck(globalPath, text)];
+}
+
 /** The projects that deliver through no-mistakes, from the database read-only; none when it does not exist or cannot say. */
 function nmProjects(config: FlowrynConfig): NmProject[] {
   const { db: dbPath } = stateFiles(config.state_dir);
@@ -121,15 +202,18 @@ function nmProjects(config: FlowrynConfig): NmProject[] {
   }
 }
 
-/** The doctor's entry: the config's switch, the database's projects, this machine's git. */
-export async function nmAutoFixChecks(config: FlowrynConfig, env: NodeJS.ProcessEnv): Promise<Check[]> {
+/** The doctor's entry: PR attribution, then auto_fix.ci by the config's switch, from the database's projects and this machine's git. */
+export async function nmChecks(config: FlowrynConfig, env: NodeJS.ProcessEnv): Promise<Check[]> {
+  const projects = nmProjects(config);
+  const globalPath = globalConfigPath(env);
+  const checks = attributionChecks(projects, globalPath);
   let nudge: boolean;
   try {
     nudge = upkeepConfig(config).nudge_conflicts;
   } catch {
-    return [];
+    return checks;
   }
   const gitPath = resolveTool(config, "git");
-  if (!nudge || !gitPath) return [];
-  return autoFixChecks(nudge, nmProjects(config), globalConfigPath(env), gitRunner(gitPath, 10_000));
+  if (!nudge || !gitPath) return checks;
+  return [...checks, ...(await autoFixChecks(nudge, projects, globalPath, gitRunner(gitPath, 10_000)))];
 }
