@@ -33,6 +33,7 @@ import { landScout } from "./landing.ts";
 import { requireApprovedDraft } from "./draft.ts";
 import { startAutoMerge, startAutoVerify } from "../verify/auto-merge.ts";
 import { deliveredToQueue } from "../verify/landing-queue.ts";
+import { FREED_AT_DELIVERY, releaseLeases } from "../sched/pools.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -555,7 +556,9 @@ const deliver: VerbSpec = {
         // The watcher's pass kicks the auto-merger, whose pass takes it into the line.
         ctx.delivery.watch(run.id);
         // A batch project's branch gets its light check, then lands in a batch (src/verify/landing-batch.ts).
+        // Its worker slot is free from here: the scheduler retires the idle worker, and a send-back starts a fresh one.
         const landing = landingBatched(ctx.config(), run.project_id, run.delivery_mode) ? "batch" : "queue";
+        if (landing === "batch") releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: false }, FREED_AT_DELIVERY, now);
         return { data: { ...data, landing, ...(verify ? { auto_verify: verify.id } : {}) }, hints: ["end your turn"] };
       }
       // A yolo delivery on a project that auto-merges is verified and merged by the daemon; any other is verified by it (src/verify/auto-merge.ts).
