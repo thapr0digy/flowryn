@@ -5,7 +5,7 @@ import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
-import { DEADLINE_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
+import { DEADLINE_VIA, LEADER_AWAY_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
 import { awayMergeLines, evidenceGateLines, validatorRoundLines } from "./validator-report.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
@@ -135,11 +135,11 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
   const decided = (
     db
       .query(
-        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_via, d.answered_at, d.created_at, r.state AS run_state
+        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_via, d.answered_at, d.created_at, d.reserved_class, r.state AS run_state
          FROM decisions d LEFT JOIN runs r ON r.id = d.run_id
          WHERE (d.answered_by = 'leader' OR (d.answered_by = 'policy' AND d.answered_via IN ('${DEADLINE_VIA}', '${VALIDATOR_VIA}'))) AND d.answered_at > ?1 AND d.answered_at <= ?2 ORDER BY d.answered_at`,
       )
-      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_via: string | null; answered_at: number; created_at: number | null; run_state: RunState | null }[]
+      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_via: string | null; answered_at: number; created_at: number | null; reserved_class: string | null; run_state: RunState | null }[]
   ).filter((d) => lens.task(d.task_id));
   // The review-gate validator's rounds (src/attention/validator-report.ts) count as decided for you too.
   // Sensitive merges during an away you started (docs/notes/2026-11-08-merge-sensitive-prs-rr.md), first: each with its undo.
@@ -148,13 +148,18 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
   if (decided.length + rounds.length === 0) return [];
   const lines = [`${heading} (${decided.length + rounds.length}):`];
   for (const d of decided.slice(0, MAX_DECISION_LINES)) {
+    const undo = d.run_state !== null && !isTerminal(d.run_state) ? `undo: flowryn decide ${d.id} <choice> --by captain` : "run over, no undo";
+    if (d.answered_via === LEADER_AWAY_VIA) {
+      // A reserved question the leader answered under the user's autonomy grant (docs/notes/2026-11-23-while-the-user-67.md): theirs to review.
+      lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (reserved${d.reserved_class ? `: ${sanitizeLine(d.reserved_class, 30)}` : ""}; the leader decided while you were away; ${undo}): ${sanitizeLine(d.rationale ?? "", 160)}`);
+      continue;
+    }
     if (d.answered_by === "leader") {
       lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
       continue;
     }
     // A deadline default (docs/notes/2026-10-30-deadline-defaults-for-gg.md): undone like a rule's answer, while the run is live.
     const waited = waitedLabel(d.answered_at - (d.created_at ?? d.answered_at));
-    const undo = d.run_state !== null && !isTerminal(d.run_state) ? `undo: flowryn decide ${d.id} <choice> --by captain` : "run over, no undo";
     const how = d.answered_via === VALIDATOR_VIA ? "taken by the validator as recommended" : "deadline";
     lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (${how} after ${waited}; ${undo})`);
   }

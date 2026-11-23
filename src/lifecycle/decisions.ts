@@ -135,14 +135,22 @@ export const DEADLINE_VIA = "deadline";
 /** answered_via of a review-gate question the validator took as the worker recommended (src/attention/gate-validator.ts): a policy answer the user may undo. */
 export const VALIDATOR_VIA = "validator";
 
+/**
+ * answered_via of a reserved question the leader answered under a live autonomy grant
+ * (docs/notes/2026-11-23-while-the-user-67.md): the leader's answer, which the user may undo.
+ */
+export const LEADER_AWAY_VIA = "leader-away";
+
 /** A rule's answer the user may still undo (decide --by captain on an answered_by policy decision). */
-export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by">): boolean {
-  // A deadline default (DEADLINE_VIA) is a policy answer too, undone the same way; so is unattended mode's take of the worker's recommendation.
-  return d.state === "answered" && (d.answered_by === "policy" || d.answered_by === "worker");
+export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by" | "answered_via">): boolean {
+  if (d.state !== "answered") return false;
+  // A deadline default (DEADLINE_VIA) is a policy answer too, undone the same way; so is unattended mode's take of
+  // the worker's recommendation, and the leader's answer to a reserved question while the user was away.
+  return d.answered_by === "policy" || d.answered_by === "worker" || (d.answered_by === "leader" && d.answered_via === LEADER_AWAY_VIA);
 }
 
 /** The user may answer it: open, or a rule's answer to undo. */
-export function captainAnswerable(d: Pick<DecisionRow, "state" | "answered_by">): boolean {
+export function captainAnswerable(d: Pick<DecisionRow, "state" | "answered_by" | "answered_via">): boolean {
   return d.state === "open" || isRuleAnswer(d);
 }
 

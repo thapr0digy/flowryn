@@ -286,7 +286,7 @@ function discardForm(db: Db, task: string): ChatForm {
 
 /** What unattended mode does, as the chat question tells the user before they answer. */
 export const AUTONOMY_SUMMARY =
-  "While it lasts the daemon passes review gates of tasks dispatched with a full brief whose pinned page and spec are unchanged, merges verified pull requests (sensitive ones included) and takes the worker's recommendation on ordinary questions. A question about a destructive, irreversible, security, credential or outward step parks only its task for you. It never waives a red check or force-pushes; flowryn back ends it.";
+  "While it lasts the daemon passes review gates of tasks dispatched with a full brief whose pinned page and spec are unchanged, merges verified pull requests (sensitive ones included) and takes the worker's recommendation on ordinary questions. A question about a destructive, irreversible, security, credential or outward step parks only its task for you, unless your leader decides it after a second look, recording why; your return brief lists each to review or undo. It never waives a red check or force-pushes; flowryn back ends it.";
 
 function projectsLabel(terms: AutonomyTerms): string {
   return `${terms.projects.length === 1 ? "project" : "projects"} ${terms.projects.join(", ")}`;
