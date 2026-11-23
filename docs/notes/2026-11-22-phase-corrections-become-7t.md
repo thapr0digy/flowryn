@@ -82,7 +82,7 @@ A read verb for the leader, a reader or your terminal (project-scoped). It lists
 
 ## The dry run on this week's data
 
-This was run on 2026-11-22, on a copy of the live `flowryn.db`; the live database was only read. This week's steers predate the `by` marker. So on the copy, 111 steers whose openings are not Flowryn's own templates were marked `by: leader` (auto-merge, merge queue, stage, review-passed, idle, conflict and landing lines were left out). Then the real code ran.
+This was run on 2026-11-22, on a copy of the live `flowryn.db`; the live database was only read. It ran before lessons had the `--correction` mark, so every project lesson in the week counted. This week's steers predate the `by` marker. So on the copy, 111 steers whose openings are not Flowryn's own templates were marked `by: leader` (auto-merge, merge queue, stage, review-passed, idle, conflict and landing lines were left out). Then the real code ran.
 
 **The weekly pass** filed three scouts:
 

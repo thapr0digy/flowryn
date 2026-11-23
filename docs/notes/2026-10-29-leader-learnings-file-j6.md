@@ -21,10 +21,11 @@ Knowledge about the code still belongs in the project's AGENTS.md, through a shi
 
 ## Verbs
 
-- `flowryn learn "<lesson>" [--project <id>] [--until <date>] [--replaces l<N>]` (or the lesson on stdin with `--body-file -`). Leader and your terminal; workers are refused. The lesson is one line after the usual sanitising, 1 to 240 characters: longer is refused (`bad_args`), never cut. Its scope is the project's (`--project`, which must be in the caller's scope), else the replaced lesson's, else the caller's (your terminal: the default scope). The reply names the lesson (`l<N>`), what happened and, when the cap set any aside, which (`set_aside`).
+- `flowryn learn "<lesson>" [--project <id>] [--until <date>] [--replaces l<N>] [--correction]` (or the lesson on stdin with `--body-file -`). Leader and your terminal; workers are refused. The lesson is one line after the usual sanitising, 1 to 240 characters: longer is refused (`bad_args`), never cut. Its scope is the project's (`--project`, which must be in the caller's scope), else the replaced lesson's, else the caller's (your terminal: the default scope). The reply names the lesson (`l<N>`), what happened and, when the cap set any aside, which (`set_aside`).
   - The same words (case, spacing and trailing punctuation aside) as an active lesson of the scope **confirm** it (`reinforced`): it moves to the top, keeping a still-future end date unless a new one is given. The same words as a set-aside one bring it back (`revived`).
   - `--until` takes `YYYY-MM-DD`, `today`, `tomorrow` or `+Nd`; a past date is refused. The lesson is set aside (`expired`) once that day has passed.
   - `--replaces l<N>` sets the old one aside (`replaced`, pointing at the new one). The old lesson must be active and in the same scope.
+  - `--correction` marks a lesson that records the user correcting the leader (column `correction`, migration 68). Only marked lessons feed the weekly corrections scout: docs/notes/2026-11-22-phase-corrections-become-7t.md.
 - `flowryn learnings [--archived] [--project <id>]`: the caller's scope's active lessons, newest-confirmed first, or the set-aside ones with the reason. Your terminal sees every scope, with a scope column. Leader, reader and your terminal.
 - `flowryn unlearn l<N>`: set one aside (`unlearned`). Repeating it is harmless (`already: true`).
 
