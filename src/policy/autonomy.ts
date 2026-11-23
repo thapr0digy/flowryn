@@ -248,7 +248,7 @@ export function autonomyForRun(db: Db, run: { project_id: string; started_at: nu
  */
 export function autonomyForDecision(db: Db, d: { run_id: string | null }, now: number): AutonomyRow | null {
   if (d.run_id === null) return null;
-  const run = db.query("SELECT project_id, started_at FROM runs WHERE id = ?1").get(d.run_id) as { project_id: string; started_at: number } | null;
+  const run = db.query("SELECT tp.project_id, r.started_at FROM runs r JOIN task_policy tp ON tp.task_id = r.task_id WHERE r.id = ?1").get(d.run_id) as { project_id: string; started_at: number } | null;
   return run ? autonomyForRun(db, run, now) : null;
 }
 
