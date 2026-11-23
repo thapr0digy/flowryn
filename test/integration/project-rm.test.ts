@@ -55,8 +55,12 @@ describe("project rm", () => {
       expect(listed.data.projects.map((p) => p.id).toSorted()).toEqual(["busy", "web"]);
 
       // Two later passes (web has no origin, so each pass logs its skip) name gone no more.
-      const from = log().length;
-      await waitUntil(() => log().slice(from).split("upkeep: sync web:").length > 3, 15_000, "two more upkeep passes");
+      // A pass syncs busy, gone, web in order, so one already under way when rm ran ends at its
+      // next "sync web" line; the window opens after it.
+      const rmAt = log().length;
+      await waitUntil(() => log().indexOf("upkeep: sync web:", rmAt) >= 0, 15_000, "the pass under way to end");
+      const from = log().indexOf("upkeep: sync web:", rmAt) + 1;
+      await waitUntil(() => log().slice(from).split("upkeep: sync web:").length > 2, 15_000, "two more upkeep passes");
       expect(log().slice(from)).not.toContain("sync gone");
       expect(log().slice(from)).toContain("upkeep: sync busy: skipped (fetch_failed");
     },
