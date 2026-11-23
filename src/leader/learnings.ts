@@ -30,6 +30,8 @@ export interface LearningRow {
   archived_at: number | null;
   archive_reason: ArchiveReason | null;
   replaced_by: number | null;
+  /** 1 when the lesson records the user correcting the leader: a correction for the weekly corrections scout. */
+  correction: number;
 }
 
 export type LearnAction = "added" | "reinforced" | "revived";
@@ -42,6 +44,8 @@ export interface LearnInput {
   until: string | null;
   /** The lesson this one replaces, set aside as replaced. */
   replaces: LearningRow | null;
+  /** The lesson records the user correcting the leader. A replacement of such a lesson stays one. */
+  correction: boolean;
   max: number;
   now: number;
   source: "cli" | "hook";
@@ -119,6 +123,7 @@ export function learn(db: Db, input: LearnInput): LearnResult {
   const same = db
     .query("SELECT * FROM learnings WHERE scope = ?1 AND norm = ?2 ORDER BY archived_at IS NOT NULL, reinforced_at DESC, id DESC LIMIT 1")
     .get(input.scope, norm) as LearningRow | null;
+  const correction = input.correction || input.replaces?.correction === 1 ? 1 : 0;
   let id: number;
   let action: LearnAction;
   if (same) {
@@ -127,18 +132,19 @@ export function learn(db: Db, input: LearnInput): LearnResult {
     // A confirmation keeps a still-future end date unless it names a new one; a passed one is dropped.
     const until = input.until ?? (same.until !== null && same.until >= localDate(new Date(input.now)) ? same.until : null);
     db.query(
-      "UPDATE learnings SET text = ?2, project = COALESCE(?3, project), until = ?4, reinforced_at = ?5, archived_at = NULL, archive_reason = NULL, replaced_by = NULL WHERE id = ?1",
-    ).run(id, text, input.project, until, input.now);
+      "UPDATE learnings SET text = ?2, project = COALESCE(?3, project), until = ?4, reinforced_at = ?5, correction = MAX(correction, ?6), archived_at = NULL, archive_reason = NULL, replaced_by = NULL WHERE id = ?1",
+    ).run(id, text, input.project, until, input.now, correction);
   } else {
     action = "added";
     const inserted = db
-      .query("INSERT INTO learnings (scope, project, text, norm, created_at, reinforced_at, until) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6) RETURNING id")
-      .get(input.scope, input.project, text, norm, input.now, input.until) as { id: number };
+      .query("INSERT INTO learnings (scope, project, text, norm, created_at, reinforced_at, until, correction) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7) RETURNING id")
+      .get(input.scope, input.project, text, norm, input.now, input.until, correction) as { id: number };
     id = inserted.id;
   }
   const stored = getLesson(db, id)!;
   const payload: Record<string, unknown> = { lesson: lessonId(id), scope: input.scope, project: stored.project, text };
   if (stored.until) payload.until = stored.until;
+  if (stored.correction === 1) payload.correction = true;
   appendEvent(db, { source: input.source, kind: `learning.${action}`, payload, ts: input.now });
   if (input.replaces && input.replaces.id !== id && input.replaces.archived_at === null) archive(db, input.replaces, "replaced", input.now, input.source, id);
   const setAside = enforceCap(db, input.scope, input.max, input.now, input.source);

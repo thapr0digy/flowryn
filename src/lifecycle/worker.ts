@@ -16,6 +16,9 @@ import { fileClass, findingPath, matchRules, readRuleFacts, type RuleFacts, type
 import { classifyAsk, type AskVerdict } from "../policy/nomistakes-classes.ts";
 import { nmRecordJson } from "../attention/real-actions.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
+import { correctionsPlanOf, fileChecks } from "../leader/corrections.ts";
+import { CORRECT_SKILL_NAME } from "../skills/correct.ts";
+import { skillPath } from "../skills/stages.ts";
 import { reportProblems } from "./brief.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
@@ -614,12 +617,18 @@ const deliver: VerbSpec = {
         warnings.push(`entry ${entry.key}: ${error.message}`);
       }
     }
+    // The weekly corrections scout's `## Checks to ship` become ships of its project (src/leader/corrections.ts).
+    const corrections = correctionsPlanOf(ctx.db, run.task_id);
+    const checks = corrections
+      ? fileChecks(ctx.db, { project: getProject(ctx.db, run.project_id)!, scoutTask: run.task_id, runId: run.id, plan: corrections, report: delivered.text, skillPath: skillPath(ctx.config().state_dir, CORRECT_SKILL_NAME), now })
+      : null;
+    const checksNote = checks ? `; ${checks.ships.length} check${checks.ships.length === 1 ? "" : "s"} filed as ships${checks.plan ? ` (${checks.plan})` : ""}${checks.refused.length > 0 ? `, ${checks.refused.length} refused` : ""}` : "";
     openItem(ctx.db, {
       kind: "report_ready",
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id} --full${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}`,
+      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id} --full${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}${checksNote}`,
       now,
     });
     // A scout's workflow ends in no gate: the verified report lands it, and the daemon cleans up (design section 8).
@@ -627,7 +636,7 @@ const deliver: VerbSpec = {
     if (parsed.length > 0) {
       appendEvent(ctx.db, { source: "cli", kind: "report.decisions", runId: run.id, taskId: run.task_id, payload: { opened, warnings }, ts: now });
     }
-    return { data: { run: run.id, state: "landed", report: delivered.artifact, decisions: opened }, hints: ["end your turn"] };
+    return { data: { run: run.id, state: "landed", report: delivered.artifact, decisions: opened, ...(checks ? { checks: checks.ships, refused: checks.refused } : {}) }, hints: ["end your turn"] };
   },
   async settle(ctx, result) {
     // A PR is watched; a landed report's worktree is cleaned up by the same watcher pass.

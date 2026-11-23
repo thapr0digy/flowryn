@@ -10,7 +10,7 @@ import { resolveAccount, type Account } from "../config/accounts.ts";
 import { herdrConfig, plannedWorktree, workersConfig } from "../config/workers.ts";
 import { accountSignIn } from "../harness/sign-in.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
-import { freezeWorkflow, projectReviewModel, workflowFor, type WorkflowDef } from "../config/workflows.ts";
+import { freezeWorkflow, phaseKind, projectReviewModel, workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import { checkPins, EFFORT_CHOICES, NO_PINS, overPins, pinsOf, resolveModelChoice, type ModelPins } from "../config/model-choice.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
@@ -574,8 +574,9 @@ export const dispatchVerb: VerbSpec = {
     const config = ctx.config();
     if (plan.mode === "task") {
       const phase = phaseOfTask(ctx.db, plan.taskId)!;
-      const workflow = workflowFor(config, stringArg(args, "workflow") ?? phase.workflow, "ship");
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", account: plan.account, pins: plan.pins, version: plan.version, base: plan.base, baseBranch: plan.baseBranch, stackedOn: plan.stackedOn, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
+      const kind = phaseKind(phase.workflow);
+      const workflow = workflowFor(config, stringArg(args, "workflow") ?? phase.workflow, kind);
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind, account: plan.account, pins: plan.pins, version: plan.version, base: plan.base, baseBranch: plan.baseBranch, stackedOn: plan.stackedOn, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
       return { data: { task: plan.taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, ...choiceOf(ctx.db, runId), workflow: workflow.id, ...(plan.stackedOn ? { stacked_on: plan.stackedOn, base: plan.baseBranch } : {}), state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
     }

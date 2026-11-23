@@ -4,6 +4,8 @@ import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { VERSION } from "../version.ts";
 import { leaderSettings } from "./claude/settings.ts";
 import { SKILL_NAME, skillMarkdown } from "./skill.ts";
+import { CORRECT_SKILL_NAME } from "../skills/correct.ts";
+import { skillMarkdown as workerSkillMarkdown, STAGE_SKILLS } from "../skills/stages.ts";
 import { TOOL_MAP } from "../policy/toolkit.ts";
 import type { StaticLayers } from "../policy/static.ts";
 // Embedded by `bun build --compile` (a $bunfs path there); the source path in development.
@@ -11,7 +13,7 @@ import leaderExtensionAsset from "./pi/flowryn-leader.ts" with { type: "file" };
 
 /**
  * The leader files (design section 15): the Claude settings file, the flowryn
- * skill (as a Claude plugin and as a Pi skill), the Pi leader extension, a
+ * skill and the correct skill (as a Claude plugin and as Pi skills), the Pi leader extension, a
  * `flowryn` command on PATH, and the appended system prompt (cutover C3: the
  * terse style block plus your own `preferences.md` and the toolkit's tool map, concatenated into
  * `system-prompt.md`), all under `<home>/leader/`. `flowryn lead` rewrites
@@ -26,6 +28,8 @@ export interface LeaderFiles {
   claudePlugin: string;
   piExtension: string;
   skillDir: string;
+  /** The correct skill's directory (src/skills/correct.ts), a second Pi --skill. */
+  correctSkillDir: string;
   /** The style block file, or null when [style] terse = false. */
   style: string | null;
   /** The file the harness appends to its system prompt: the style block, your preferences and the tool map. */
@@ -89,6 +93,14 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
   );
   writeIfChanged(join(claudePlugin, "skills", SKILL_NAME, "SKILL.md"), skill);
 
+  // The correct skill: the same text the workers get, so a leader that sees a correction repeat turns it into a check.
+  const correct = workerSkillMarkdown(STAGE_SKILLS.find((s) => s.name === CORRECT_SKILL_NAME)!);
+  const correctSkillDir = join(dir, "skills", CORRECT_SKILL_NAME);
+  ensureDir(correctSkillDir, 0o700);
+  writeIfChanged(join(correctSkillDir, "SKILL.md"), correct);
+  ensureDir(join(claudePlugin, "skills", CORRECT_SKILL_NAME), 0o700);
+  writeIfChanged(join(claudePlugin, "skills", CORRECT_SKILL_NAME, "SKILL.md"), correct);
+
   const piExtension = join(dir, "flowryn-leader.ts");
   writeIfChanged(piExtension, await leaderExtensionSource());
 
@@ -107,5 +119,5 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
   const parts = [input.style, preferences, TOOL_MAP].filter((p): p is string => typeof p === "string" && p.length > 0);
   writeIfChanged(appendPath, parts.join("\n\n") + "\n");
 
-  return { dir, claudeSettings, claudePlugin, piExtension, skillDir, style, appendPrompt: appendPath, binDir, bin };
+  return { dir, claudeSettings, claudePlugin, piExtension, skillDir, correctSkillDir, style, appendPrompt: appendPath, binDir, bin };
 }

@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { VERSION } from "../version.ts";
+import { CORRECT_BODY, CORRECT_DESCRIPTION, CORRECT_SKILL_NAME } from "./correct.ts";
 import { DESIGN_GAP_CHECK, DESIGN_GAP_CHECK_FILE } from "./design-gap-check.ts";
 import { DESIGN_TEMPLATE, DESIGN_TEMPLATE_FILE, DESIGN_TLDR_WORDS_MAX, DESIGN_VISIBLE_WORDS_MAX } from "./design-template.ts";
 import { QA_METHOD, QA_METHOD_FILE, QA_VIEWPORTS } from "./qa-method.ts";
@@ -153,6 +154,8 @@ export const STAGE_SKILLS: readonly StageSkill[] = [
     description: "Flowryn draft stage (notes projects): write one Markdown or text file, render it as the Lavish review page, and deliver it locally exactly as approved. Use when your Flowryn stage is draft.",
     body: DRAFT_BODY,
   },
+  // The corrections workflow's stage (src/leader/corrections.ts), and the know-how of the ships it files.
+  { name: CORRECT_SKILL_NAME, description: CORRECT_DESCRIPTION, body: CORRECT_BODY },
 ];
 
 export function skillMarkdown(skill: StageSkill): string {

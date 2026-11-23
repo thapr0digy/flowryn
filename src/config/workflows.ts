@@ -86,6 +86,8 @@ export const DEFAULT_WORKFLOWS: Record<string, WorkflowDef> = {
   },
   fix: { id: "fix", stages: [stage("build"), stage("ship", { pools: ["validation"], gate: "merge" })] },
   scout: { id: "scout", stages: [stage("investigate")] },
+  // The weekly corrections scout (docs/notes/2026-11-22-phase-corrections-become-7t.md): a scout whose stage carries the correct skill.
+  corrections: { id: "corrections", stages: [stage("investigate", { skill: "correct" })] },
   // A notes project's ships (docs/notes/2026-10-30-notes-projects-non-8d.md): one file, shown as the review
   // page, then committed and delivered locally; no validation slot, since there is nothing to test.
   draft: {
@@ -367,6 +369,16 @@ export function workflowFor(config: FlowrynConfig, id: string, kind: "ship" | "s
   if (kind === "ship" && last.gate !== "merge") throw new FlowrynError("bad_args", `workflow ${id} does not end in the merge gate, so it cannot ship`);
   if (kind === "scout" && last.gate === "merge") throw new FlowrynError("bad_args", `workflow ${id} ends in a merge; a scout delivers a report`);
   return wf;
+}
+
+/**
+ * What a plan phase of this workflow is: a scout when a built-in workflow ends in no merge gate
+ * (workflowFor's rule), else a ship. Plans are filed without the config, so a [workflows] table's
+ * own scout workflow is filed as a ship, and its phase is refused when it starts, as before.
+ */
+export function phaseKind(workflowId: string | null): "ship" | "scout" {
+  const builtIn = workflowId === null ? undefined : DEFAULT_WORKFLOWS[workflowId];
+  return builtIn && builtIn.stages[builtIn.stages.length - 1]!.gate !== "merge" ? "scout" : "ship";
 }
 
 export function defaultAutonomy(config: FlowrynConfig): AutonomyMode {
