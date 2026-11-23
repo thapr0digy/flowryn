@@ -30,7 +30,7 @@ A **design gate** (stage skill `flowryn-design`) passes when all of these hold:
 
 - The gap check's verdict is `ready` or `ready with the fixes below`.
 - The gap check's first check, "Simplest secure option", records exactly `none` (anything else, such as "none needed, but a new Redis service", holds). That check names every new piece of infrastructure, key, credential, service, setting or cross-repo change, so any finding there means the design may add infrastructure, and the review stays the user's. `design-gap-check.md` now says so.
-- One independent validator round says pass. This is the gate validator (`src/attention/gate-validator.ts`): a fresh, read-only, capped model call over the brief, the pinned spec, the page and the branch's diff, with no access to the worker's conversation. The round is recorded in `gate_validations` with `basis = 'evidence'`. A `changes` verdict sends the design back with its findings, as under away. No verdict, or eligibility lost while it ran, leaves the gate to the user with an item, and no further evidence round runs on that stage.
+- One independent validator round says pass. This is the gate validator (`src/attention/gate-validator.ts`): a fresh, read-only, capped model call over the brief, the pinned spec, the page and the branch's diff, with no access to the worker's conversation. The round is recorded in `gate_validations` with `basis = 'evidence'`. A `changes` verdict sends the design back with its findings, as under away. No verdict, or eligibility lost while it ran, leaves the gate to the user with an item, and no further evidence round runs on that stage. A round the daemon cut off (a restart while it ran) judged nothing, so the next tick starts one fresh round; a second cut-off round hands the stage to the user. Every round counts against `validator_rounds`.
 
 Both kinds also need:
 
@@ -39,7 +39,7 @@ Both kinds also need:
 - the page (and spec) are unchanged since they were pinned;
 - the branch has not moved since the review opened (`gates.pass_head`);
 - the user has never reopened an evidence pass of this task's stage;
-- no earlier evidence round of the stage was held, failed or advised;
+- no earlier evidence round of the stage was held, failed or advised (a round the daemon cut off counts only from the second);
 - fewer than `[decisions] validator_rounds` evidence rounds have run on the stage.
 
 The pass waits, rather than holds, while unattended mode covers the run (its own pass owns the gate), while a validation runs, and while the gate's questions are open for the user.

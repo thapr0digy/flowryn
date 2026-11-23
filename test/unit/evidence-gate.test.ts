@@ -5,7 +5,7 @@ import { composeReturnBrief } from "../../src/attention/briefing.ts";
 import { decisionsConfig } from "../../src/attention/decisions-policy.ts";
 import { designEvidence, evidenceRefusal, probeProblems, qaEvidence } from "../../src/attention/evidence-gate.ts";
 import { evidencePass, readProbes } from "../../src/attention/evidence-pass.ts";
-import { settledValidators, type GateFacts, type ValidatorDeps } from "../../src/attention/gate-validator.ts";
+import { settledValidators, validatorPass, type GateFacts, type ValidatorDeps } from "../../src/attention/gate-validator.ts";
 import { loadConfig, parseConfig } from "../../src/config/config.ts";
 import { getMeta, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
@@ -343,6 +343,34 @@ describe("the pass on a design gate", () => {
     expect(again).toMatchObject({ rounds: [], held: ["g1"] });
     expect(gate().state).toBe("open");
     expect(events("gate.evidence_held")[0]!.why).toMatch(/earlier evidence round left this stage to the user/);
+  });
+
+  test("a round the daemon cut off is rerun once; a second cut-off hands the stage to the user", async () => {
+    openGate("design", designPage());
+    const roomy = (over: Partial<ValidatorDeps> = {}) => {
+      const base = deps(over);
+      return { ...base, decisions: () => ({ ...base.decisions(), validator_rounds: 5 }) };
+    };
+    const cutOff = (id: string) => tx(db, () => db.query("INSERT INTO gate_validations (id, gate_id, run_id, task_id, stage, away_since, head, state, waited_ms, started_at, basis) VALUES (?1, 'g1', ?2, ?3, 'design', 0, ?4, 'running', 0, ?5, 'evidence')").run(id, runId, taskId, HEAD, now));
+    cutOff("j90");
+    await validatorPass(roomy());
+    expect(db.query("SELECT state, reason FROM gate_validations WHERE id = 'j90'").get()).toEqual({ state: "failed", reason: "the daemon stopped while it ran" });
+    cutOff("j91");
+    await validatorPass(roomy());
+    expect(await evidencePass(roomy({ call: claude(PASS) }))).toMatchObject({ rounds: [], held: ["g1"] });
+    expect(events("gate.evidence_held")[0]!.why).toMatch(/earlier evidence round left this stage to the user/);
+  });
+
+  test("one cut-off round is rerun and its fresh pass passes the gate", async () => {
+    openGate("design", designPage());
+    tx(db, () => db.query("INSERT INTO gate_validations (id, gate_id, run_id, task_id, stage, away_since, head, state, waited_ms, started_at, basis) VALUES ('j90', 'g1', ?1, ?2, 'design', 0, ?3, 'running', 0, ?4, 'evidence')").run(runId, taskId, HEAD, now));
+    await validatorPass(deps());
+    const out = await evidencePass(deps({ call: claude(PASS) }));
+    expect(out.held).toEqual([]);
+    expect(out.rounds).toHaveLength(1);
+    await settledValidators();
+    expect(gate().state).toBe("passed");
+    expect(channel()).toBe("evidence");
   });
 
   test("a review gate of a stage with no evidence rule is left to the user without a word", async () => {

@@ -252,11 +252,18 @@ function roundsUsed(db: Db, taskId: string, stage: string, awaySince: number, ba
   return (db.query("SELECT COUNT(*) AS n FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND basis = ?4 AND id IS NOT ?5").get(taskId, stage, awaySince, basis, except) as { n: number }).n;
 }
 
-/** The round states that hand a stage to the user: an evidence round that gave no verdict or could not act hands it over too. */
-const HANDED_OVER: Record<RoundBasis, string> = { away: "('held')", evidence: "('held', 'failed', 'advised')" };
+/** Why a round the daemon stopped mid-call failed: it judged nothing. */
+const CUT_OFF = "the daemon stopped while it ran";
 
+/**
+ * A round of this task's stage handed it to the user: one held, or for the evidence basis one that
+ * failed or was advised. An evidence round the daemon cut off judged nothing, so only a second one does.
+ */
 function heldUnderAway(db: Db, taskId: string, stage: string, awaySince: number, basis: RoundBasis, except: string | null): boolean {
-  return db.query(`SELECT 1 FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND basis = ?4 AND state IN ${HANDED_OVER[basis]} AND id IS NOT ?5`).get(taskId, stage, awaySince, basis, except) !== null;
+  const ended = db.query("SELECT state, reason FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND basis = ?4 AND state IN ('held', 'failed', 'advised') AND id IS NOT ?5").all(taskId, stage, awaySince, basis, except) as { state: string; reason: string | null }[];
+  if (basis === "away") return ended.some((r) => r.state === "held");
+  const cutOff = ended.filter((r) => r.state === "failed" && r.reason === CUT_OFF).length;
+  return cutOff >= 2 || ended.length > cutOff;
 }
 
 function reopenedUnderAway(db: Db, runId: string, stage: string, awaySince: number): boolean {
@@ -315,8 +322,8 @@ export function pickValidations(db: Db, input: { cfg: DecisionsConfig; now: numb
   const { cfg, now } = input;
   for (const row of db.query("SELECT * FROM gate_validations WHERE state = 'running'").all() as ValidationRow[]) {
     if (input.inFlight.has(row.id)) continue;
-    finishValidation(db, row, { state: "failed", reason: "the daemon stopped while it ran", verdict: null, costUsd: row.cost_usd, now });
-    if (row.stage === MERGE_STAGE) openMergeFailedItem(db, row, "the daemon stopped while it ran", now);
+    finishValidation(db, row, { state: "failed", reason: CUT_OFF, verdict: null, costUsd: row.cost_usd, now });
+    if (row.stage === MERGE_STAGE) openMergeFailedItem(db, row, CUT_OFF, now);
   }
   if (cfg.default_gates.length === 0) return [];
   const away = userStartedAway(db, now);
