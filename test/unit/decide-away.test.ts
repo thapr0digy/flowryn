@@ -49,7 +49,7 @@ function run(id: string, taskId: string, project: string): void {
   db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, created_at) VALUES (?1, ?2, 'ship', 'direct-PR', 0, 0, 'feature', 0)").run(taskId, project);
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
-     VALUES (?1, ?2, 'claude', '2.1.281', 'building', 'busy', 'feature', 'build', '/tmp/wt', 'fm/x', 'abc123', 'h', ?3, 0)`,
+     VALUES (?1, ?2, 'claude', '2.1.281', 'running', 'busy', 'feature', 'build', '/tmp/wt', 'fm/x', 'abc123', 'h', ?3, 0)`,
   ).run(id, taskId, Date.now() + 1000);
 }
 
@@ -115,7 +115,7 @@ describe("the rule: a live grant covering the question's run", () => {
   test("assumption: the daemon's autonomy pass still parks a reserved question itself", () => {
     grant(["web"]);
     const d = reserved();
-    expect(autonomyVerdict(d, { state: "building", sensitive: 0 }, cfg, { noCi: null }).action).toBe("park");
+    expect(autonomyVerdict(d, { state: "running", sensitive: 0 }, cfg, { noCi: null }).action).toBe("park");
   });
 });
 
