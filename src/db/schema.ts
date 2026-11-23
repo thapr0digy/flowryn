@@ -1068,6 +1068,27 @@ const LESSON_CORRECTION_SQL = /* sql */ `
 ALTER TABLE learnings ADD COLUMN correction INTEGER NOT NULL DEFAULT 0;
 `;
 
+/**
+ * Migration 69 (docs/notes/2026-11-23-phase-gates-pass-8f.md): a review gate may pass on objective
+ * evidence (`[projects.<id>] gate_pass = "evidence"`), so `approvals` takes the channel `evidence`;
+ * and a validator round records why it ran (`basis`): under an away the user started, or as the
+ * evidence gate's independent reviewer.
+ */
+const EVIDENCE_GATES_SQL = /* sql */ `
+ALTER TABLE gate_validations ADD COLUMN basis TEXT NOT NULL DEFAULT 'away' CHECK (basis IN ('away','evidence'));
+CREATE TABLE approvals_v69 (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','page','yolo','autonomous','validator','away-validator','evidence')),
+  actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
+  allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed_at INTEGER);
+INSERT INTO approvals_v69 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+  SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
+DROP TABLE approvals;
+ALTER TABLE approvals_v69 RENAME TO approvals;
+CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1366,6 +1387,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 66, name: "flaky-tests", sql: FLAKY_TESTS_SQL },
   { version: 67, name: "project-removed", sql: PROJECT_REMOVED_SQL },
   { version: 68, name: "lesson-correction", sql: LESSON_CORRECTION_SQL },
+  { version: 69, name: "evidence-gates", sql: EVIDENCE_GATES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

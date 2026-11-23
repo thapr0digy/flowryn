@@ -274,6 +274,35 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
 
 const GAPS_HOW = `run the gap check in ${DESIGN_GAP_CHECK_FILE} (beside the flowryn-design skill)`;
 
+/** The gaps part's words, its summary aside, on one line. */
+function gapsText(part: string): string {
+  return textOf(part.replace(/<summary\b[\s\S]*?<\/summary>/i, " ")).replace(/\s+/g, " ");
+}
+
+/** The verdict line's verdict, lower case, or null. */
+function gapVerdict(text: string): string | null {
+  const verdicts = DESIGN_GAP_VERDICTS.toSorted((a, b) => b.length - a.length);
+  return new RegExp(`\\bVerdict:\\s*(${verdicts.join("|")})\\b`, "i").exec(text)?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * What a design page's gap check says, for the evidence gate (src/attention/evidence-gate.ts):
+ * its verdict, and what its first check, "Simplest secure option", records (the words between
+ * that name and the next check's, as the checks table lays them out); null where not found.
+ */
+export function gapCheckOf(html: string): { verdict: string | null; simplest: string | null } {
+  const gaps = findFolded(html, DESIGN_GAPS_SECTION);
+  if (!gaps || gaps.end === null) return { verdict: null, simplest: null };
+  const text = gapsText(html.slice(gaps.start, gaps.end));
+  const [first, second] = DESIGN_GAP_CHECKS;
+  const at = text.toLowerCase().indexOf(first.name.toLowerCase());
+  if (at === -1) return { verdict: gapVerdict(text), simplest: null };
+  const rest = text.slice(at + first.name.length);
+  const end = rest.toLowerCase().indexOf(second.name.toLowerCase());
+  const cell = (end === -1 ? rest : rest.slice(0, end)).replace(/^[\s|:.\-–—]+/, "").replace(/(?<=\S)[\s|]+\d*[\s|]*$/, "").trim();
+  return { verdict: gapVerdict(text), simplest: cell };
+}
+
 /** What is wrong with the folded gaps part: missing, unfolded, out of place, without a verdict, or skipping a check. */
 function gapsProblems(html: string, last: Part, detail: { start: number } | null): string[] {
   const gaps = findFolded(html, DESIGN_GAPS_SECTION);
@@ -284,10 +313,9 @@ function gapsProblems(html: string, last: Part, detail: { start: number } | null
   if (gaps.end === null) return [...problems, "the gaps part's <details> is never closed: end it with </details>"];
   const part = html.slice(gaps.start, gaps.end);
   if (part.includes("{{GAPS}}")) return problems;
-  const text = textOf(part.replace(/<summary\b[\s\S]*?<\/summary>/i, " ")).replace(/\s+/g, " ");
+  const text = gapsText(part);
   if (!/\p{L}/u.test(text)) return [...problems, `the gaps part is empty; ${GAPS_HOW} and record it, every check included ("none" when clean)`];
-  const verdicts = DESIGN_GAP_VERDICTS.toSorted((a, b) => b.length - a.length);
-  const verdict = new RegExp(`\\bVerdict:\\s*(${verdicts.join("|")})\\b`, "i").exec(text)?.[1]?.toLowerCase();
+  const verdict = gapVerdict(text);
   if (!verdict) problems.push(`the gaps part needs its verdict line: ${DESIGN_GAP_VERDICTS.map((v) => `"Verdict: ${v}"`).join(", ")}`);
   else if (verdict === DESIGN_GAP_REVISE_VERDICT) problems.push(`the gap check says the design ${DESIGN_GAP_REVISE_VERDICT}: revise the page and spec, check again, then run stage done`);
   const lower = text.toLowerCase();
