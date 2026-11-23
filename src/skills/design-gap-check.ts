@@ -16,7 +16,7 @@ export const DESIGN_GAP_CHECK_FILE = "design-gap-check.md";
  * "Simplest secure option" runs first: an overcomplicated design wastes every later check.
  */
 export const DESIGN_GAP_CHECKS = [
-  { name: "Simplest secure option", ask: "Is there a simpler design that is still security conscious? Name every new piece of infrastructure, key, credential, service, setting or cross-repo change the design adds, and for each say why a simpler secure path (e.g. trust-on-first-use with pinned keys, reusing an existing table or flow) is not enough. If it is enough, the finding is 'simplify'." },
+  { name: "Simplest secure option", ask: "Is there a simpler design that is still security conscious? Name every new piece of infrastructure, key, credential, service, setting or cross-repo change the design adds, and for each say why a simpler secure path (e.g. trust-on-first-use with pinned keys, reusing an existing table or flow) is not enough. If it is enough, the finding is 'simplify'. Write 'none' only when the design adds none of these: any finding here keeps the review the user's on a project whose gates pass on evidence." },
   { name: "Source fidelity", ask: "Does each screen or step show what the task and spec promise? Anything promised but missing, or shown but never asked for?" },
   { name: "Decisions honoured", ask: "Does it match every user decision so far (placement, naming, approvals, scope), including ones carried in the task file?" },
   { name: "Code truth", ask: "Is each capability it relies on real (open the code)? Does it ignore something that already exists? Does help text or a reference card omit supported syntax or options?" },

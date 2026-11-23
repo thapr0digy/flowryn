@@ -240,8 +240,11 @@ interface ChangesPrepared {
   revival: { gate: string; account: Account; start: { version: string; base: string } } | null;
 }
 
+/** The channels whose gate pass the user may reopen: the validator's, and the evidence gate's (docs/notes/2026-11-23-phase-gates-pass-8f.md). */
+const REOPENABLE_CHANNELS: readonly string[] = ["validator", "evidence"];
+
 /**
- * The review gate of `stage` the validator passed (src/attention/gate-validator.ts), that the user
+ * The review gate of `stage` the validator (or the evidence gate) passed (src/attention/gate-validator.ts), that the user
  * may reopen now: the run is live, has not delivered, has no review gate open, and that pass is
  * the stage's latest. Throws naming why not. Pure over the database.
  */
@@ -252,7 +255,7 @@ export function reopenableValidatorPass(db: Db, run: RunWithPolicy, stage: strin
   const latest = db.query("SELECT * FROM gates WHERE run_id = ?1 AND kind = 'review' AND stage = ?2 ORDER BY opened_at DESC, rowid DESC LIMIT 1").get(run.id, stage) as GateRow | null;
   if (!latest) throw new FlowrynError("not_found", `${run.task_id} has no ${stage} review`);
   const channel = latest.approval_id ? (db.query("SELECT channel FROM approvals WHERE id = ?1").get(latest.approval_id) as { channel: string } | null)?.channel : null;
-  if (latest.state !== "passed" || channel !== "validator") throw new FlowrynError("not_ready", `the ${stage} review ${latest.id} of ${run.task_id} was not passed by the validator; only the validator's pass is reopened this way`);
+  if (latest.state !== "passed" || !REOPENABLE_CHANNELS.includes(channel ?? "")) throw new FlowrynError("not_ready", `the ${stage} review ${latest.id} of ${run.task_id} was not passed by the validator or on evidence; only those passes are reopened this way`);
   return latest;
 }
 
@@ -264,12 +267,18 @@ export function reopenableValidatorPass(db: Db, run: RunWithPolicy, stage: strin
  * pools go, and a worker that is gone is resumed with the words. Not an approval: it only sends
  * work back, as `gate changes` does.
  */
+/** Who passed a reopenable gate, in words. */
+function gatePasser(db: Db, gate: GateRow): string {
+  const channel = gate.approval_id ? (db.query("SELECT channel FROM approvals WHERE id = ?1").get(gate.approval_id) as { channel: string } | null)?.channel : null;
+  return channel === "evidence" ? "the evidence gate" : "the validator";
+}
+
 const gateReopen: VerbSpec = {
   name: "gate reopen",
-  summary: "Undo a review the validator passed while you were away: send the run back to that stage with your words",
+  summary: "Undo a review the validator or the evidence gate passed: send the run back to that stage with your words",
   positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: {
-    gate: { type: "string", help: "the stage of the review the validator passed (design, qa); required", placeholder: "stage", complete: "stage" },
+    gate: { type: "string", help: "the stage of the review the validator or the evidence gate passed (design, qa); required", placeholder: "stage", complete: "stage" },
     "body-file": { type: "string", help: "what to change, from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -290,8 +299,9 @@ const gateReopen: VerbSpec = {
     resolveRunItems(ctx.db, run.id, ["validator_failed", "validator_held", "validator_advice"], `gate.reopened ${gate.id}`, now);
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `gate.reopened ${gate.id}`, now);
     run.pending_launch = workerReturnLaunch(ctx.db, run) ?? run.pending_launch;
-    requestStage(ctx.db, run, pos.def, index, `The user reopened the ${stage} review the validator passed (${gate.id}): ${words} Back to stage ${stage}; when it is ready, submit it for review again.`, now);
-    openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: run.id, line: `The user reopened the ${stage} review of ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) that the validator passed; the worker got their words`, now });
+    const passer = gatePasser(ctx.db, gate);
+    requestStage(ctx.db, run, pos.def, index, `The user reopened the ${stage} review ${passer} passed (${gate.id}): ${words} Back to stage ${stage}; when it is ready, submit it for review again.`, now);
+    openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: run.id, line: `The user reopened the ${stage} review of ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) that ${passer} passed; the worker got their words`, now });
     return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "reopened", to: stage }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {

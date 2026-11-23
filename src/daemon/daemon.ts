@@ -89,6 +89,7 @@ import { HarnessVersionPoller } from "../contracts/version-poll.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { stopValidators, validatorPass } from "../attention/gate-validator.ts";
+import { evidencePass } from "../attention/evidence-pass.ts";
 import { awayMergePass } from "../attention/away-merge.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
 import { verifyConfig } from "../verify/config.ts";
@@ -918,6 +919,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           },
         };
         await validatorPass(validatorDeps);
+        // Review gates of gate_pass = "evidence" projects (docs/notes/2026-11-23-phase-gates-pass-8f.md): passed on objective evidence.
+        const evidence = await evidencePass(validatorDeps);
+        if (evidence.passed.length + evidence.held.length > 0) log(`evidence: ${evidence.passed.length} gate(s) passed, ${evidence.held.length} held for you`);
         // Sensitive merges during an away you started (docs/notes/2026-11-08-merge-sensitive-prs-rr.md): the same validator, one round per head.
         await awayMergePass(validatorDeps);
         validatorFailing = false;

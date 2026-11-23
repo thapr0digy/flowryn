@@ -6,7 +6,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
 import { DEADLINE_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
-import { awayMergeLines, validatorRoundLines } from "./validator-report.ts";
+import { awayMergeLines, evidenceGateLines, validatorRoundLines } from "./validator-report.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { isTerminal, taskTitle, type RunState } from "../lifecycle/runs.ts";
@@ -143,7 +143,8 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
   ).filter((d) => lens.task(d.task_id));
   // The review-gate validator's rounds (src/attention/validator-report.ts) count as decided for you too.
   // Sensitive merges during an away you started (docs/notes/2026-11-08-merge-sensitive-prs-rr.md), first: each with its undo.
-  const rounds = [...awayMergeLines(db, since, until, lens), ...validatorRoundLines(db, since, until, lens)];
+  // Review gates passed on evidence, or held for you (docs/notes/2026-11-23-phase-gates-pass-8f.md), each with its page and send-back.
+  const rounds = [...awayMergeLines(db, since, until, lens), ...evidenceGateLines(db, since, until, lens), ...validatorRoundLines(db, since, until, lens)];
   if (decided.length + rounds.length === 0) return [];
   const lines = [`${heading} (${decided.length + rounds.length}):`];
   for (const d of decided.slice(0, MAX_DECISION_LINES)) {
@@ -159,7 +160,7 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
   }
   if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
   lines.push(...rounds.slice(0, MAX_DECISION_LINES));
-  if (rounds.length > MAX_DECISION_LINES) lines.push(`+${rounds.length - MAX_DECISION_LINES} more validator rounds: flowryn show j<N>`);
+  if (rounds.length > MAX_DECISION_LINES) lines.push(`+${rounds.length - MAX_DECISION_LINES} more: flowryn show j<N> or flowryn show <task>`);
   return lines;
 }
 

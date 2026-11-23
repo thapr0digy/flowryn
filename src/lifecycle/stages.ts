@@ -708,7 +708,7 @@ function reviewFilePage(review: string, reportDir: string): string | null {
   }
 }
 
-const QA_SKILL = "flowryn-visual-qa";
+export const QA_SKILL = "flowryn-visual-qa";
 
 /**
  * A QA stage's review page must open with its filled plain-language card
@@ -760,7 +760,7 @@ function checkQaChecklist(reportDir: string): void {
   if (problems.length > 0) throw new FlowrynError("qa_page_invalid", problems.join("; "), hint);
 }
 
-const DESIGN_SKILL = "flowryn-design";
+export const DESIGN_SKILL = "flowryn-design";
 
 /**
  * A design stage's review page must follow the design outline, budget and

@@ -74,7 +74,10 @@ export interface VerifyConfig {
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
 // scope and account are read by src/config/accounts.ts, max_workers and review_model by src/config/workflows.ts, release by src/lifecycle/release.ts.
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "light_verify", "scope", "account", "max_workers", "review_model", "release"]);
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "light_verify", "gate_pass", "scope", "account", "max_workers", "review_model", "release"]);
+
+/** `gate_pass`'s one value: the daemon passes a design or QA review gate on objective evidence. */
+export const GATE_PASS_EVIDENCE = "evidence";
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
@@ -196,6 +199,7 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   for (const key of Object.keys(raw)) if (!KNOWN.has(key)) throw new FlowrynError("config_invalid", `${where} ${key} is not a known setting (${[...KNOWN].join(", ")})`);
   if (raw.auto_merge !== undefined && typeof raw.auto_merge !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_merge must be true or false`);
   if (raw.auto_verify !== undefined && typeof raw.auto_verify !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_verify must be true or false`);
+  if (raw.gate_pass !== undefined && raw.gate_pass !== GATE_PASS_EVIDENCE) throw new FlowrynError("config_invalid", `${where} gate_pass must be "${GATE_PASS_EVIDENCE}" (or unset: every review gate waits for you)`);
   if (raw.landing !== undefined && !LANDING_MODES.includes(raw.landing as LandingMode)) throw new FlowrynError("config_invalid", `${where} landing must be "queue", "batch" or "manual"`);
   if (raw.light_verify !== undefined && raw.landing !== "batch") throw new FlowrynError("config_invalid", `${where} light_verify is the light check of landing = "batch"; set landing = "batch" or remove it`);
   if (raw.landing_train_depth !== undefined) checkTrainDepth(raw.landing_train_depth, where);
@@ -256,6 +260,21 @@ export function lightVerifyConfig(config: VerifyConfig): VerifyConfig | null {
 export function autoVerifyEnabled(config: FlowrynConfig, projectId: string): boolean {
   if (!verifyConfig(config, projectId)) return false;
   return projectTable(config, projectId).auto_verify !== false;
+}
+
+/**
+ * `[projects.<id>] gate_pass = "evidence"` (docs/notes/2026-11-23-phase-gates-pass-8f.md): the
+ * daemon passes the project's design and QA review gates on objective evidence
+ * (src/attention/evidence-gate.ts); unset, every review gate waits for a human channel. Never
+ * throws: a malformed project table counts as unset, as verifyConfig refuses it where config is checked.
+ */
+export function gatePassOnEvidence(config: FlowrynConfig, projectId: string): boolean {
+  try {
+    verifyConfig(config, projectId);
+    return projectTable(config, projectId).gate_pass === GATE_PASS_EVIDENCE;
+  } catch {
+    return false;
+  }
 }
 
 /** `[projects.<id>] auto_merge` as written: true, false, or null when unset. Throws config_invalid like verifyConfig. */
