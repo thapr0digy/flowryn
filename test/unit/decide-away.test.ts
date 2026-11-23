@@ -10,8 +10,9 @@ import { parseConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { answerDecision, overrideRuleAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { captainAnswerable, getDecision, isRuleAnswer, LEADER_AWAY_VIA, type DecisionRow } from "../../src/lifecycle/decisions.ts";
-import { autonomyForDecision, awayProjects, canonicalTerms, endAutonomy, startAutonomy } from "../../src/policy/autonomy.ts";
-import { AUTONOMY_SUMMARY } from "../../src/policy/chat-questions.ts";
+import { autonomyForDecision, autonomyRef, awayProjects, canonicalTerms, endAutonomy, startAutonomy } from "../../src/policy/autonomy.ts";
+import { chatForm } from "../../src/policy/chat-questions.ts";
+import { MERGE_DEFAULTS } from "../../src/config/merge.ts";
 import { SEES_ALL } from "../../src/leader/scope.ts";
 
 /**
@@ -195,7 +196,9 @@ describe("what the leader and the user are told", () => {
     expect(awayProjects(db, NOW + HOUR, { project: (p) => p !== "web" })).toEqual([]);
   });
 
-  test("the autonomy consent sentence says the leader may decide what the daemon parks", () => {
-    expect(AUTONOMY_SUMMARY).toContain("parks only its task for you, unless your leader decides it after a second look, recording why");
+  test("the autonomy chat question tells the user the leader may decide parked questions and the brief lists each to undo", () => {
+    const question = chatForm(db, autonomyRef(canonicalTerms(["web"], NOW + 8 * HOUR)), MERGE_DEFAULTS).question.question;
+    expect(question).toContain("unless your leader decides it after a second look, recording why");
+    expect(question).toContain("your return brief lists each to review or undo");
   });
 });
