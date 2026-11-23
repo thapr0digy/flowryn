@@ -16,7 +16,7 @@ default_classes = ["ci-wait"]    # opt-in kinds; default [] (off)
 
 `default_classes` takes only these kinds:
 
-- `ci-wait`: the CI-wait watchdog's question (src/lifecycle/ci-wait.ts). Its recommendation is `merge-main` or `keep-waiting`. A deadline answer never takes `keep-waiting` (because it changes nothing) or `accept-without-ci` (skipping CI is the user's call).
+- `ci-wait`: the CI-wait watchdog's question (src/lifecycle/ci-wait.ts). Its recommendation is `merge-main`, `keep-waiting`, or `accept-without-ci` (when main and the branch both say `no_ci: true`). A deadline answer never takes `keep-waiting` (because it changes nothing) or `accept-without-ci` (skipping CI is the user's call).
 - `nomistakes`: an `ask --nomistakes` that no `[decisions] nomistakes_rules` rule settled, for a reason a rule could have covered: no rule matched, the rules disagreed, or the rule's answer is not one of the options. The worker's own `--recommend` is taken.
 
 The floor is in code (`DEADLINE_FLOOR`, src/attention/decisions-policy.ts). All six keyword classes (`merge`, `destructive`, `irreversible`, `security`, `credential`, `outward`) are refused in `default_classes` with `config_invalid`. The daemon will not start with them, and a SIGHUP reload is rejected. The brief named four classes. Irreversible and outward are just as risky, and nothing eligible needs them.
