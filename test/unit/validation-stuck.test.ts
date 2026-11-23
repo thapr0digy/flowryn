@@ -214,7 +214,7 @@ function waitingOnCi(activeFor: string, lastActivity: string, id = "01NM"): stri
 
 /** The CI-wait question the delivery watcher opens for pipeline run `nmRun`. */
 function askCiWait(nmRun = "01NM", at = now): string {
-  return tx(db, () => openCiWait(db, getRunWithPolicy(db, "r1")!, "p", { nmRun, minutes: 60, pr: "", defaultBranch: "main" }, { lacksNoCi: false, hasMain: false }, 60, at));
+  return tx(db, () => openCiWait(db, getRunWithPolicy(db, "r1")!, "p", { nmRun, minutes: 60, pr: "", defaultBranch: "main" }, { lacksNoCi: false, hasMain: false, mainNoCi: false }, 60, at));
 }
 
 function answer(id: string, choice: string, at = now): void {

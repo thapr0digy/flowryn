@@ -91,6 +91,7 @@ A correction made twice becomes a check (the correct skill; docs/notes/2026-11-2
 | `ERROR_CODES` in alphabetical order | test/unit/basics.test.ts | - |
 | Migrations run 1..N | test/unit/db.test.ts | - |
 | No version change mixed with other files | test/unit/release.test.ts | - |
+| A no_ci project's CI wait recommends accept-without-ci | test/unit/ci-wait.test.ts | fails at 2f31e53, passes at HEAD |
 | Frozen docs gain no heading; notes files well formed | test/unit/docs-notes.test.ts | - |
 | Toolkit rules (gh-axi, sqlite-axi, ...) | the hook, src/policy/toolkit.ts; test/integration/toolkit.test.ts | - |
 | Leader skill under 6,000 characters | test/unit/prompts-that-keep.test.ts | - |
