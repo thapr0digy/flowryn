@@ -10,11 +10,12 @@ import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { findAttempt, matchAttempt } from "../policy/approvals.ts";
+import { autonomyForDecision } from "../policy/autonomy.ts";
 import { COUNTERSIGN_ORIGIN } from "../policy/countersign.ts";
 import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { createStandaloneDecision, DEADLINE_VIA, VALIDATOR_VIA, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
+import { createStandaloneDecision, DEADLINE_VIA, VALIDATOR_VIA, DECISION_OPTION, getDecision, isRuleAnswer, LEADER_AWAY_VIA, type DecisionRow } from "./decisions.ts";
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject, requireActiveProject } from "./projects.ts";
@@ -69,12 +70,17 @@ function blockTargetExists(ctx: HandlerCtx, id: string): boolean {
  * every answer at once (gate-questions.ts).
  */
 
-export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader" | "policy" | "worker"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
+export function answerDecision(
+  ctx: { db: Db; now(): number },
+  d: DecisionRow,
+  a: { choice: string; words: string | null; by: "captain" | "leader" | "policy" | "worker"; via: string; /** The autonomy grant a leader-away answer was taken under. */ autonomy?: string },
+): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
   const now = ctx.now();
   ctx.db
-    .query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = ?5, rationale = ?6 WHERE id = ?1")
-    .run(d.id, a.choice, a.via, now, a.by, a.words);
-  appendEvent(ctx.db, { source: "cli", kind: "decision.answered", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, choice: a.choice, by: a.by, via: a.via, ...(d.gate_id ? { gate: d.gate_id } : {}) }, ts: now });
+    .query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = ?5, rationale = ?6, autonomy_id = COALESCE(?7, autonomy_id) WHERE id = ?1")
+    .run(d.id, a.choice, a.via, now, a.by, a.words, a.autonomy ?? null);
+  const away = a.autonomy ? { reserved: d.reserved_class ?? "reserved", autonomy: a.autonomy } : {};
+  appendEvent(ctx.db, { source: "cli", kind: "decision.answered", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, choice: a.choice, by: a.by, via: a.via, ...(d.gate_id ? { gate: d.gate_id } : {}), ...away }, ts: now });
   resolveDecisionItems(ctx.db, d.id, `decision.answered ${d.id}`, now);
   if (d.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: d.task_id, positional: [d.task_id], now });
   if (d.run_id === null) recordIntent(ctx.db, { file: "backlog", verb: "done", taskId: d.task_id, positional: [d.task_id], now });
@@ -121,7 +127,9 @@ export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRo
       ? "what you did on the deadline default's answer is"
       : d.answered_via === "autonomous" || d.answered_via === VALIDATOR_VIA
         ? "what you did on your own recommendation is"
-        : "the rule's fix is";
+        : d.answered_via === LEADER_AWAY_VIA
+          ? "what you did on the leader's answer is"
+          : "the rule's fix is";
   const text = `The user changed the answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}") from ${before} to ${a.choice}.${a.words ? ` ${a.words}` : ""} Act on ${a.choice} instead: if ${committed} already committed, undo it with git revert (new commits, never a rewrite), then respond to the gate or run the pipeline again.`;
   return { steer: createSteer(ctx.db, run, text, now, d.id).id, run: run.id, dependents: [], held: false };
 }
@@ -242,7 +250,7 @@ const decisionAdd: VerbSpec = {
 
 const decide: VerbSpec = {
   name: "decide",
-  summary: "Answer a decision: the leader with --rationale; a reserved one only with the user's word (--by captain)",
+  summary: "Answer a decision: the leader with --rationale; a reserved one with the user's word (--by captain), or by the leader under a live autonomy grant",
   positionals: [
     { name: "decision", required: true, help: "decision id, such as k3 or q2", complete: "decision" },
     { name: "choice", required: true, help: "one of its options (a multi choice: \"a, b\"; a review question also takes \"other\" with the user's words), or the answer when it has none" },
@@ -298,11 +306,14 @@ const decide: VerbSpec = {
     let via: string;
     if (asCaptain) via = captainChannel(ctx, d, id, args);
     else {
-      if (d.reserved_reason) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
+      // A reserved question is the user's, except while their autonomy grant covers it: then the leader answers it, with its reason, for the user to review on return.
+      const away = d.reserved_reason ? autonomyForDecision(ctx.db, d, ctx.now()) : null;
+      if (d.reserved_reason && !away) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
       if (!rationale) throw new FlowrynError("bad_args", "a leader answer needs --rationale <why>");
-      via = "leader";
-      const done = answerDecision(ctx, d, { choice, words: words ? `${rationale}\n${words}` : rationale, by: "leader", via });
-      return reply(ctx, d, choice, "leader", done);
+      const done = answerDecision(ctx, d, { choice, words: words ? `${rationale}\n${words}` : rationale, by: "leader", via: away ? LEADER_AWAY_VIA : "leader", ...(away ? { autonomy: away.id } : {}) });
+      const out = reply(ctx, d, choice, "leader", done);
+      if (away) out.hints.push(`answered for the user under ${away.id}: their return brief lists it, and they may undo it: flowryn decide ${id} <choice> --by captain`);
+      return out;
     }
     // A human may pass their words as --rationale (the natural flag to reach for) instead of
     // --body-file/--words; --rationale is used only as a fallback, so it is never silently dropped

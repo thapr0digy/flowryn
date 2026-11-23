@@ -1,5 +1,6 @@
 import type { Db } from "../db/db.ts";
 import type { ScopeLens } from "../leader/scope.ts";
+import { LEADER_AWAY_VIA } from "../lifecycle/decisions.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
 import { autonomyLine, autonomyRenewRef, grantSpan, latestAutonomy, projectsOf, RENEW_NOTICE_MS, spanLabel, stampOf, type AutonomyRow } from "../policy/autonomy.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
@@ -108,8 +109,9 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
     .map((e) => {
       const p = payload(e);
       const what = typeof p.decision === "string" ? p.decision : typeof p.gate === "string" ? p.gate : "?";
-      const d = typeof p.decision === "string" ? (db.query("SELECT state FROM decisions WHERE id = ?1").get(p.decision) as { state: string } | null) : null;
-      const next = typeof p.decision === "string" ? (d?.state === "open" ? `; answer: flowryn decide ${p.decision} <choice> --by captain` : "; answered since") : `; pass or send back: flowryn approve ${e.task_id ?? "<task>"} --gate <stage>`;
+      const d = typeof p.decision === "string" ? (db.query("SELECT state, answer, answered_via FROM decisions WHERE id = ?1").get(p.decision) as { state: string; answer: string | null; answered_via: string | null } | null) : null;
+      const answered = d?.answered_via === LEADER_AWAY_VIA ? `; the leader answered ${sanitizeLine(d.answer ?? "?", 60)} while you were away (Decided for you)` : "; answered since";
+      const next = typeof p.decision === "string" ? (d?.state === "open" ? `; answer: flowryn decide ${p.decision} <choice> --by captain` : answered) : `; pass or send back: flowryn approve ${e.task_id ?? "<task>"} --gate <stage>`;
       return `- ${named(db, e.task_id)} on ${sanitizeLine(what, 12)}: ${sanitizeLine(String(p.why ?? "?"), 160)}${next}`;
     });
   return [

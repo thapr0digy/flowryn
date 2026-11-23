@@ -224,6 +224,12 @@ export function autonomyFor(db: Db, projectId: string, now: number): AutonomyRow
   return live && projectsOf(live).includes(projectId) ? live : null;
 }
 
+/** The live grant's projects this lens may see, or none: whose reserved questions the leader decides now. */
+export function awayProjects(db: Db, now: number, lens: Pick<ScopeLens, "project">): string[] {
+  const live = liveAutonomy(db, now);
+  return live ? projectsOf(live).filter((p) => lens.project(p)) : [];
+}
+
 /** Was this run started under the autonomy migration? Older runs finish as they began. */
 export function startedUnderAutonomy(db: Db, startedAt: number): boolean {
   const row = db.query("SELECT applied_at FROM schema_migrations WHERE name = 'autonomy'").get() as { applied_at: number | null } | null;
@@ -233,6 +239,17 @@ export function startedUnderAutonomy(db: Db, startedAt: number): boolean {
 /** The grant in force now that covers this run: its project is named and the run started after the migration. */
 export function autonomyForRun(db: Db, run: { project_id: string; started_at: number }, now: number): AutonomyRow | null {
   return startedUnderAutonomy(db, run.started_at) ? autonomyFor(db, run.project_id, now) : null;
+}
+
+/**
+ * The grant under which the leader may answer this reserved question (docs/notes/2026-11-23-while-the-user-67.md):
+ * the one in force now covering the question's run. Only a worker's run-scoped question qualifies; a standalone
+ * decision (k<N>, opened by the leader itself) never does. Call inside the answering transaction.
+ */
+export function autonomyForDecision(db: Db, d: { run_id: string | null }, now: number): AutonomyRow | null {
+  if (d.run_id === null) return null;
+  const run = db.query("SELECT tp.project_id, r.started_at FROM runs r JOIN task_policy tp ON tp.task_id = r.task_id WHERE r.id = ?1").get(d.run_id) as { project_id: string; started_at: number } | null;
+  return run ? autonomyForRun(db, run, now) : null;
 }
 
 function nextId(db: Db): string {

@@ -1,5 +1,5 @@
 import { autonomyLines } from "../attention/autonomy-report.ts";
-import { getAutonomy, latestAutonomy, projectsShown } from "../policy/autonomy.ts";
+import { autonomyForDecision, getAutonomy, latestAutonomy, projectsShown } from "../policy/autonomy.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
@@ -122,7 +122,11 @@ const answer: VerbSpec = {
     // answer stays a plain alias for a run-scoped question; a standalone decision carries no run to
     // steer, and the leader's rationale rule (decide --rationale) must not be skippable through it.
     if (!human && d.run_id === null) throw new FlowrynError("bad_args", `a standalone decision needs: flowryn decide ${id} ${choice} --rationale <why>`, `flowryn decide ${id} ${choice} --rationale <why>`);
-    if (!human && d.reserved_reason) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
+    if (!human && d.reserved_reason) {
+      // Under a live autonomy grant the leader answers it through decide, which records its reason.
+      const help = autonomyForDecision(ctx.db, d, ctx.now()) ? `under the autonomy grant, answer with your reason: flowryn decide ${id} <choice> --rationale -` : `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`;
+      throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, help);
+    }
     const done = answerDecision(ctx, d, { choice, words: note, by: human ? "captain" : "leader", via: human ? captainChannel(ctx, d, id, args) : "leader" });
     return { data: { decision: id, answer: choice, steer: done.steer ?? "-", run: done.run ?? "-" } };
   },
