@@ -146,7 +146,6 @@ export function questionBatch(db: Db, session: string, batchMs: number, view: It
   return { items, more: rows.length - items.length, dueAt: rows[0]!.opened_at + batchMs };
 }
 
-/** What a question push hands the model: a header and one line per question, like the digest. */
 /**
  * Under a live autonomy grant the reserved questions of its projects are the leader's to decide too
  * (docs/notes/2026-11-23-while-the-user-67.md): the line after the header that says so, or none.
@@ -156,6 +155,7 @@ export function awayQuestionsLine(projects: readonly string[]): string | null {
   return `The user is away under unattended mode for ${projects.join(", ")}: decide those projects' reserved questions too, after a second look, with flowryn decide <id> <choice> --rationale -; leave only what needs the user's own hands.`;
 }
 
+/** What a question push hands the model: a header (and the away line) and one line per question, like the digest. */
 export function questionsText(items: Pick<RankedItem, "id" | "lane" | "line">[], more = 0, awayProjects: readonly string[] = []): string {
   const away = awayQuestionsLine(awayProjects);
   const lines = [QUESTIONS_HEADER, ...(away ? [away] : []), ...items.map((i) => itemLine(i))];

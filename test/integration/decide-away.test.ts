@@ -113,8 +113,14 @@ describe("the leader decides reserved questions while the user is away with auto
       // The answer reached the worker as a steer, as any leader answer does.
       await waitUntil(() => rows(e, "SELECT 1 FROM messages WHERE id = ?1 AND run_id = ?2 AND acked_at IS NOT NULL", steer, run).length === 1, 30_000, "the worker to acknowledge the answer");
 
-      // Back: the brief lists the reserved answer for review.
+      // The answer alias, which takes no reason, still refuses; under the grant it points at decide --rationale.
       const second = await openReserved(e, task, first);
+      const alias = await e.fleet.json(["answer", second, "keep"], leader);
+      expect(alias.code).toBe(2);
+      expect(errorCode(alias)).toBe("reserved_decision");
+      expect(JSON.stringify(alias.reply)).toContain(`flowryn decide ${second} <choice> --rationale -`);
+
+      // Back: the brief lists the reserved answer for review.
       const back = await e.call("back", {});
       expect(back.ok).toBe(true);
       const text = ((back.data as { brief: string[] }).brief ?? []).join("\n");
