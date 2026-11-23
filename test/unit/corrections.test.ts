@@ -72,8 +72,8 @@ function gate(id: string, run: string, kind: string, feedback: string | null, cl
   db.query("INSERT INTO gates (id, run_id, stage, kind, state, feedback, opened_at, closed_at, replaced_by) VALUES (?1, ?2, 'qa', ?3, 'changes', ?4, ?5, ?5, ?6)").run(id, run, kind, feedback, closedAt, replacedBy);
 }
 
-function lesson(project: string | null, text: string, now: number): number {
-  return learn(db, { scope: "default", project, text, until: null, replaces: null, max: 25, now, source: "cli" }).lesson.id;
+function lesson(project: string | null, text: string, now: number, correction = true): number {
+  return learn(db, { scope: "default", project, text, until: null, replaces: null, correction, max: 25, now, source: "cli" }).lesson.id;
 }
 
 /** One correction of each kind in web, plus ones the list must leave out. */
@@ -99,6 +99,7 @@ function seedWeek(): void {
   lesson("web", "User: one table, no section titles.", NOW - 2 * DAY); // confirmed again this week
   lesson("web", "Old lesson", NOW - 20 * DAY);
   lesson(null, "No project", NOW - DAY);
+  lesson("web", "Web deploys from the release branch.", NOW - DAY, false); // a plain fact, not a correction
 }
 
 describe("the week's corrections", () => {
@@ -131,10 +132,21 @@ describe("the week's corrections", () => {
   });
 });
 
+test("a plain fact is no correction until it is learned again as one; a replacement of a correction stays one", () => {
+  const fact = lesson("web", "Api uses pnpm.", NOW - 3 * DAY, false);
+  lesson("web", "Web deploys from the release branch.", NOW - 3 * DAY, false);
+  expect(correctionsOf(db, "web", NOW - CORRECTIONS_WINDOW_MS, NOW)).toEqual([]);
+  expect(correctionsPass(db, listProjects(db), NOW)!.filed).toEqual([]);
+  lesson("web", "Api uses pnpm.", NOW - DAY, true);
+  expect(correctionsOf(db, "web", NOW - CORRECTIONS_WINDOW_MS, NOW).map((r) => r.id)).toEqual([`l${fact}`]);
+  lesson("web", "Api uses pnpm.", NOW - DAY / 2, false);
+  expect(getLesson(db, fact)!.correction).toBe(1);
+});
+
 test("lessons the user unlearned or replaced are not corrections; ones set aside by the cap or expiry still are", () => {
   const unlearned = lesson("web", "User: wrong lesson.", NOW - 3 * DAY);
   const replaced = lesson("web", "User: first wording.", NOW - 3 * DAY);
-  const replacement = learn(db, { scope: "default", project: "web", text: "User: better wording.", until: null, replaces: getLesson(db, replaced), max: 25, now: NOW - 2 * DAY, source: "cli" }).lesson.id;
+  const replacement = learn(db, { scope: "default", project: "web", text: "User: better wording.", until: null, replaces: getLesson(db, replaced), correction: false, max: 25, now: NOW - 2 * DAY, source: "cli" }).lesson.id;
   const capped = lesson("web", "User: capped.", NOW - 3 * DAY);
   tx(db, () => {
     unlearn(db, getLesson(db, unlearned)!, NOW - DAY, "cli");

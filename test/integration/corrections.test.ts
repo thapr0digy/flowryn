@@ -27,7 +27,7 @@ describe("the weekly corrections scout", () => {
     // Manual autonomy: the phases wait, so the test starts the scout itself and the filed ships stay queued.
     expect((await env.json(["project", "set", "web", "--autonomy", "manual"])).code).toBe(0);
     for (const lesson of ["User: labels are single words.", "User: no section titles splitting one table."]) {
-      expect((await env.json(["learn", "--project", "web", lesson])).code).toBe(0);
+      expect((await env.json(["learn", "--project", "web", "--correction", lesson])).code).toBe(0);
     }
     const report = [
       "# Corrections in web",

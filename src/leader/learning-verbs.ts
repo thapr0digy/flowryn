@@ -52,6 +52,7 @@ const learnVerb: VerbSpec = {
     project: { type: "string", help: "the project it is about", placeholder: "id", complete: "project" },
     until: { type: "string", help: "set it aside after this day: YYYY-MM-DD, tomorrow or +Nd", placeholder: "date" },
     replaces: { type: "string", help: "a lesson this one corrects, set aside as replaced", placeholder: "l<N>" },
+    correction: { type: "boolean", help: "it records the user correcting you: the weekly corrections scout reads it" },
     "body-file": { type: "string", help: "the lesson, read from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -72,8 +73,9 @@ const learnVerb: VerbSpec = {
     const scope = lessonScope(ctx.db, config, ctx.caller, stringArg(args, "project") ?? null, replaces);
     if (replaces && replaces.scope !== scope) throw new FlowrynError("bad_args", `${replacesRef} is in scope ${replaces.scope}, not ${scope}`, "a lesson replaces one of its own scope");
     requireInScope(config, ctx.caller, scope, `scope ${scope}`);
-    const result = learn(ctx.db, { scope, project, text, until: untilArg(stringArg(args, "until"), now), replaces, max: learningsConfig(config).max, now, source: "cli" });
+    const result = learn(ctx.db, { scope, project, text, until: untilArg(stringArg(args, "until"), now), replaces, correction: boolArg(args, "correction"), max: learningsConfig(config).max, now, source: "cli" });
     const data: Record<string, unknown> = { lesson: lessonId(result.lesson.id), action: result.action, scope, project: result.lesson.project ?? "-" };
+    if (result.lesson.correction === 1) data.correction = true;
     if (replaces) data.replaced = lessonId(replaces.id);
     if (result.setAside.length > 0) data.set_aside = result.setAside.map((r) => ({ lesson: lessonId(r.id), text: r.text }));
     const hints = result.setAside.length > 0 ? ["the cap set these aside: learn one again if it still matters", "flowryn learnings --archived"] : ["flowryn learnings"];

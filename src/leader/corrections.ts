@@ -13,7 +13,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
  * proposal 9). Once a week the upkeep pass reads, per project, the corrections people made: the
  * user's answers to questions (`answered_by = captain`), the leader's and your own steers, the
  * user's words on review pages, review gates sent back with changes, and the lessons the leader
- * recorded from the user's chat corrections (`flowryn learn`, new or confirmed again). A project
+ * recorded from the user's chat corrections (`flowryn learn --correction`, new or confirmed again). A project
  * with at least CORRECTIONS_MIN of them gets one scout: a one-phase plan of workflow `corrections`
  * whose shared brief is that list. Its stage carries the correct skill. Grouping words into
  * mistake classes is judgement, so a model does that; everything else is plain code: the
@@ -100,7 +100,7 @@ export function correctionsOf(db: Db, project: string, since: number, until: num
   const lessons = db
     .query(
       `SELECT id, text, created_at, reinforced_at FROM learnings
-       WHERE project = ?1 AND (archive_reason IS NULL OR archive_reason NOT IN ('unlearned', 'replaced'))
+       WHERE project = ?1 AND correction = 1 AND (archive_reason IS NULL OR archive_reason NOT IN ('unlearned', 'replaced'))
          AND ((created_at >= ?2 AND created_at < ?3) OR (reinforced_at > created_at AND reinforced_at >= ?2 AND reinforced_at < ?3))`,
     )
     .all(project, since, until) as { id: number; text: string; created_at: number; reinforced_at: number }[];

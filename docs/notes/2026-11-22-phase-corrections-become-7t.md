@@ -10,7 +10,7 @@ Proposal 9 and the rule-to-check half of proposal 3 of plan p104 (scout how-laur
 `src/skills/correct.ts`, one harness-neutral text written in three places:
 
 - among the worker skills (`<state_dir>/skills/correct/SKILL.md`, in the `flowryn-stages` Claude plugin). The corrections workflow's stage names it, and every ship the scout files points at it.
-- in the leader's Claude plugin (`<home>/leader/claude-plugin/skills/correct/`) and as a second Pi `--skill` (`<home>/leader/skills/correct/`). The leader skill's lesson line now sends twice-made corrections to a ship through it.
+- in the leader's Claude plugin (`<home>/leader/claude-plugin/skills/correct/`) and as a second Pi `--skill` (`<home>/leader/skills/correct/`). The leader skill's lesson line now sends repeat corrections to a ship through it, and tells the leader to mark a lesson that records the user correcting it with `--correction`.
 
 What it says:
 
@@ -32,7 +32,9 @@ Flowryn's own table is in AGENTS.md.
 | steer | `m<N>` | `flowryn steer` from the leader or your terminal. The `steer.created` event now carries `by` (leader or human). Flowryn's own steers have none |
 | review page | `g<N>.<seq>` | your messages on a review page (`review_messages`, author user) |
 | sent back | `g<N>` | a review gate closed with changes and your words. Merge-gate changes are failed checks, so they are already enforced. Replaced and promoted gates are left out |
-| lesson | `l<N>` | `learnings` of the project created in the window, or confirmed again there (marked "confirmed again"). Lessons unlearned or replaced are left out; ones set aside by the cap or by expiry still count |
+| lesson | `l<N>` | `learnings` of the project marked as corrections, created in the window or confirmed again there (marked "confirmed again"). Plain facts are left out, as are lessons unlearned or replaced; ones set aside by the cap or by expiry still count |
+
+A lesson is a correction only when marked: `flowryn learn --project <id> --correction --body-file -` (migration 68 adds `learnings.correction`). Other lessons are plain facts ("api uses pnpm") and never count. The same words learned again with `--correction` mark an existing lesson; the mark is never cleared, and a `--replaces` of a marked lesson keeps it. The `learning.*` event and the verb's output carry `correction: true`. Lessons written before migration 68 are unmarked.
 
 Each entry's words are sanitised to one line of at most 600 characters, with secrets redacted. Only the newest 150 are kept, and the list says how many were left out. Lessons with no project and standalone decisions with no task policy belong to no project, so they are not read.
 
@@ -113,11 +115,12 @@ Both cite `ee082dca7^` as the past mistake. It left four classes unfiled, each w
 ## Tests
 
 - `test/unit/corrections.test.ts`:
-  - what the list reads and leaves out (rule answers, Flowryn's steers, merge-gate changes, replaced and promoted gates, unlearned and replaced lessons, other projects, last week);
+  - what the list reads and leaves out (rule answers, Flowryn's steers, merge-gate changes, replaced and promoted gates, plain-fact, unlearned and replaced lessons, other projects, last week);
+  - a plain fact counts only once learned again with `--correction`, the mark is never cleared, and a replacement keeps it;
   - sanitising and redaction;
   - the pass: one approved scout per project with its list as the brief, kind scout in the task policy and the backlog add, one event, not again within a week, an open scout skipped with its reason, one correction too few, removed projects passed over;
   - filing: independent approved ships, each refusal reason, the cap, no section files nothing, only a corrections scout files;
   - parsing, an entry in the skill's format filed by `fileChecks` (round trip), `phaseKind`, the skill's budget, and the steer's `by`.
-- `test/integration/corrections.test.ts`: through a real daemon and the fake harness. `flowryn learn` twice, then the pass. `dispatch --task` starts the phase as a scout of workflow `corrections`, and its task file names the correct skill's `SKILL.md`. The report's valid check becomes a ship, the one-off is refused, and the item says so.
+- `test/integration/corrections.test.ts`: through a real daemon and the fake harness. `flowryn learn --correction` twice, then the pass. `dispatch --task` starts the phase as a scout of workflow `corrections`, and its task file names the correct skill's `SKILL.md`. The report's valid check becomes a ship, the one-off is refused, and the item says so.
 - `test/unit/upkeep.test.ts`: the pass runs on the loop's first pass, then not again within the week.
 - `test/unit/workflows.test.ts`: the built-in `corrections` workflow. `test/integration/leader-cli.test.ts`: the Pi leader's second `--skill`.

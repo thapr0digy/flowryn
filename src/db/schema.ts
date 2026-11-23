@@ -1059,6 +1059,15 @@ ALTER TABLE projects ADD COLUMN removed_at INTEGER;
 ALTER TABLE projects ADD COLUMN removed_reason TEXT;
 `;
 
+/**
+ * Migration 68, corrections become checks (docs/notes/2026-11-22-phase-corrections-become-7t.md):
+ * a lesson that records the user correcting the leader (`flowryn learn --correction`). Only those
+ * count as corrections for the weekly corrections scout; other lessons are plain facts.
+ */
+const LESSON_CORRECTION_SQL = /* sql */ `
+ALTER TABLE learnings ADD COLUMN correction INTEGER NOT NULL DEFAULT 0;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1356,6 +1365,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 65, name: "batch-fix", sql: BATCH_FIX_SQL },
   { version: 66, name: "flaky-tests", sql: FLAKY_TESTS_SQL },
   { version: 67, name: "project-removed", sql: PROJECT_REMOVED_SQL },
+  { version: 68, name: "lesson-correction", sql: LESSON_CORRECTION_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
