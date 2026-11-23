@@ -76,11 +76,13 @@ The briefing's "Decided for you" section, in both the morning briefing and the r
 `test/unit/evidence-gate.test.ts` covers:
 
 - the setting;
-- the probe, QA and design rules, and probe reading (a symlink is refused);
+- the probe, QA and design rules, a probe missing a list, and probe reading (a symlink is refused);
 - each refusal on its own, hold and wait;
 - a QA gate end to end: the verify queued once, the pass on channel `evidence`, the event, the brief's line and the reopen;
+- a QA verify cut off by a restart: the rerun is waited on and its pass passes the gate;
 - the holds: a major finding (once), a failed verify, a dirty probe, a sensitive task, a moved branch;
 - a project without the setting;
-- a design gate end to end through the validator's seam: a pass (`basis = 'evidence'`), changes sending the design back, a design that may add infrastructure held without a round, and a reopened stage held.
+- a design gate end to end through the validator's seam: a pass (`basis = 'evidence'`), changes sending the design back, a design that may add infrastructure held without a round, a round with no verdict ending evidence rounds on the stage, a cut-off round rerun once (a second cut-off hands it over), and a reopened stage held;
+- a review gate of another stage left alone without an event.
 
 No model, git or Herdr is reached.
