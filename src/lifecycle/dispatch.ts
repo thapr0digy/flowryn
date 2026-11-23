@@ -17,18 +17,20 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
+import type { BacklogTask } from "../journal/tasks-axi.ts";
+import { shortDuration } from "../reconcile/waits.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
-import { sanitizeBlock } from "../util/sanitize.ts";
+import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
 import { reserveDecision } from "./decisions.ts";
 import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import { autoChecksOn, autoWaitLine, gateHarness, harnessRefusal, unverifiedVersion, waitsOnAutoCheck } from "./harness-gate.ts";
-import { checkPhaseAccounts, getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
+import { checkPhaseAccounts, getPlan, hasLanded, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn, type PhaseRow, type PlanRow } from "./plans.ts";
 import { inStackedPlan, phaseReadiness, type StackBase } from "./stacks.ts";
 import { DELIVERY_MODES, requireActiveProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { modelView, openRunForTask } from "./runs.ts";
-import { isDropped } from "./drop.ts";
+import { dropRecord, isDropped } from "./drop.ts";
 import { projectRepo } from "./delivery.ts";
 import { blockerLabel, openWatch, parseAfter, setWaiter, watchLabel, watchOfTask, type AfterEvent } from "./watches.ts";
 import { ForgeError } from "../forge/types.ts";
@@ -746,28 +748,62 @@ function queuedLine(db: Db, stacked: boolean, ready: ReturnType<typeof phaseRead
   return stacked && ready.waiting.length === 1 ? `${waits} to deliver its PR${ready.why ? ` (${ready.why})` : ""}` : waits;
 }
 
-/** `flowryn show <plan>`: the plan's phases and where each is; with --full (`bodies`), each phase's body too. */
-export function planView(db: Db, planId: string, bodies = false): Record<string, unknown> | null {
+/** A drop's reason fits on a phase's line only when its first line is this short. */
+const SHORT_REASON = 60;
+
+/** A dropped phase's line: when, and the reason's first line when it is short. */
+function droppedLine(drop: NonNullable<ReturnType<typeof dropRecord>>, now: number): string {
+  const why = sanitizeLine(drop.reason.split("\n")[0] ?? "", SHORT_REASON + 1);
+  return `dropped · ${shortDuration(now - drop.dropped_at)} ago${why && why.length <= SHORT_REASON ? ` · ${why}` : ""}`;
+}
+
+/** Run states that end a phase: it merged, was cleaned up after, or was cancelled. */
+const PHASE_ENDED: ReadonlySet<string> = new Set(["landed", "cleaned", "cancelled"]);
+
+/**
+ * Where one phase of a plan stands, and whether it is over (dropped, landed
+ * or cancelled). A drop wins over any earlier run; a phase Flowryn never ran
+ * is over once it has landed by hasLanded's rule.
+ */
+function phaseAt(db: Db, plan: PlanRow, phase: PhaseRow, backlog: BacklogTask[] | null, now: number): { at: string; over: boolean } {
+  const drop = dropRecord(db, phase.task_id);
+  if (drop) return { at: droppedLine(drop, now), over: true };
+  const run = db.query("SELECT state, stage, stage_state, stacked_on FROM runs WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1").get(phase.task_id) as {
+    state: string;
+    stage: string;
+    stage_state: string;
+    stacked_on: string | null;
+  } | null;
+  if (run) return { at: `${run.state} · ${run.stage} ${run.stage_state}${run.stacked_on ? ` · stacked on ${blockerLabel(db, run.stacked_on)}` : ""}`, over: PHASE_ENDED.has(run.state) };
+  if (hasLanded(db, phase.task_id, backlog)) return { at: "done", over: true };
+  if (plan.state !== "approved") return { at: plan.state, over: false };
+  return { at: queuedLine(db, plan.stack === 1, phaseReadiness(db, phase.task_id, backlog, JSON.parse(phase.blocked_by) as string[])), over: false };
+}
+
+/**
+ * `flowryn show <plan>`: the plan's phases and where each is; with --full
+ * (`bodies`), each phase's body too. An approved plan whose every phase is
+ * over (dropped, landed or cancelled) reads as finished.
+ */
+export function planView(db: Db, planId: string, now: number, bodies = false): Record<string, unknown> | null {
   const plan = getPlan(db, planId);
   if (!plan) return null;
   const backlog = readSnapshot(db, "backlog")?.tasks ?? null;
+  const phases = phasesOf(db, planId).map((p) => ({ p, ...phaseAt(db, plan, p, backlog, now) }));
+  const finished = plan.state === "approved" && phases.length > 0 && phases.every((x) => x.over);
   return {
     plan: plan.id,
     title: plan.title,
     project: plan.project_id,
-    state: plan.state,
+    state: finished ? "finished" : plan.state,
     ...(plan.stack ? { stack: "on" } : {}),
     from: plan.source_task ? `${plan.source_task}${plan.gate_id ? ` (gate ${plan.gate_id})` : ""}` : `filed by ${plan.filed_by}`,
-    phases: phasesOf(db, planId).map((p) => {
-      const run = db.query("SELECT state, stage, stage_state, stacked_on FROM runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT 1").get(p.task_id) as { state: string; stage: string; stage_state: string; stacked_on: string | null } | null;
-      const ready = run ? null : phaseReadiness(db, p.task_id, backlog, JSON.parse(p.blocked_by) as string[]);
-      return {
-        phase: p.phase_no,
-        task: p.task_id,
-        title: p.title,
-        at: run ? `${run.state} · ${run.stage} ${run.stage_state}${run.stacked_on ? ` · stacked on ${blockerLabel(db, run.stacked_on)}` : ""}` : plan.state !== "approved" ? plan.state : queuedLine(db, plan.stack === 1, ready!),
-        ...(bodies ? { body: sanitizeBlock(p.body) } : {}),
-      };
-    }),
+    phases: phases.map(({ p, at }) => ({
+      phase: p.phase_no,
+      task: p.task_id,
+      title: p.title,
+      at,
+      ...(bodies ? { body: sanitizeBlock(p.body) } : {}),
+    })),
   };
 }

@@ -923,7 +923,7 @@ const show: VerbSpec = {
     if (ask) return askView(ctx, ask, text.full);
     const batch = /^lb\d+$/.test(target) ? getBatch(ctx.db, target) : null;
     if (batch) return { data: batchView(ctx.db, batch), hints: batch.state === "held" ? [`flowryn batch drop ${batch.id} ${batch.culprit ?? "<task>"}`, `flowryn batch retry ${batch.id}`] : ["flowryn fleet"] };
-    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, text.full) : null;
+    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, ctx.now, text.full) : null;
     if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
     if (divergence) return { data: { ...divergenceView(divergence), ...grantsField(ctx, { item: divergence.id }) }, hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
@@ -949,7 +949,7 @@ const show: VerbSpec = {
       const phase = phaseOfTask(ctx.db, target);
       if (phase) {
         const base = storedBase(ctx.db, target);
-        return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...(base ? { base } : {}), ...planView(ctx.db, phase.plan_id, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
+        return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...(base ? { base } : {}), ...planView(ctx.db, phase.plan_id, ctx.now, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
       }
       throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
     }

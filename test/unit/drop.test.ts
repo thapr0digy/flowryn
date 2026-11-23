@@ -8,7 +8,7 @@ import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { MIGRATIONS } from "../../src/db/schema.ts";
 import { readSnapshot } from "../../src/journal/snapshot.ts";
 import { applyDrop, DROP_VERBS, planDrop } from "../../src/lifecycle/drop.ts";
-import { createRun } from "../../src/lifecycle/dispatch.ts";
+import { createRun, planView } from "../../src/lifecycle/dispatch.ts";
 import { getPlan, recordPlan, takenIds } from "../../src/lifecycle/plans.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
 import { queueTask } from "../../src/lifecycle/queued.ts";
@@ -42,10 +42,10 @@ function run(taskId: string, state: string, cleanup: string | null = null, id = 
     .run(id, taskId, state, cleanup);
 }
 
-function drop(target: string, unblock = false): ReturnType<typeof planDrop> {
+function drop(target: string, unblock = false, reason = "duplicate"): ReturnType<typeof planDrop> {
   return tx(env.db, () => {
     const planned = planDrop(env.db, target, { unblock });
-    applyDrop(env.db, planned, { reason: "duplicate", by: "leader", now: env.clock.now });
+    applyDrop(env.db, planned, { reason, by: "leader", now: env.clock.now });
     return planned;
   });
 }
@@ -78,6 +78,10 @@ function filePlan(phases: { title: string }[], state: "pending" | "approved"): s
       now: env.clock.now,
     }),
   ).id;
+}
+
+function phasesAt(planId: string): string[] {
+  return (planView(env.db, planId, env.clock.now)!.phases as { at: string }[]).map((p) => p.at);
 }
 
 function phaseIds(planId: string): string[] {
@@ -343,6 +347,54 @@ describe("plans", () => {
     drop("web-ext-q1", true);
     const row = env.db.query("SELECT blocked_by FROM plan_phases WHERE plan_id = ?1").get(planId) as { blocked_by: string };
     expect(JSON.parse(row.blocked_by)).toEqual([]);
+  });
+});
+
+describe("the plan view (flowryn show p<N>)", () => {
+  const DAY = 86_400_000;
+
+  test("a dropped phase reads dropped with its age and short reason, never what it waits for; landed and dropped phases make the plan finished", async () => {
+    setup();
+    const planId = filePlan([{ title: "Ran" }, { title: "Edges" }, { title: "Cutover" }], "approved");
+    await env.journal.drain();
+    const [first, second, third] = phaseIds(planId);
+    run(first!, "cleaned");
+    drop(third!, false, "superseded by p12");
+    await env.journal.drain();
+    drop(second!, false, "superseded by p12");
+    env.clock.now += 14 * DAY;
+    const view = planView(env.db, planId, env.clock.now)!;
+    expect(getPlan(env.db, planId)!.state).toBe("approved");
+    expect(view.state).toBe("finished");
+    expect(phasesAt(planId)).toEqual(["cleaned · build active", "dropped · 14d ago · superseded by p12", "dropped · 14d ago · superseded by p12"]);
+  });
+
+  test("a long or multi-line reason leaves only the first line, when short; a plan with a phase still to run is not finished", async () => {
+    setup();
+    const planId = filePlan([{ title: "Next" }, { title: "Later" }, { title: "Last" }], "approved");
+    await env.journal.drain();
+    const [, second, third] = phaseIds(planId);
+    drop(third!, false, "x".repeat(61));
+    await env.journal.drain();
+    drop(second!, false, "short why\nthe long story");
+    const at = phasesAt(planId);
+    expect(at[0]).toBe("queued, ready");
+    expect(at.slice(1)).toEqual(["dropped · 0s ago · short why", "dropped · 0s ago"]);
+    expect(planView(env.db, planId, env.clock.now)!.state).toBe("approved");
+  });
+
+  test("a cancelled phase is over too; a plan whose phases were all dropped keeps its dropped state", async () => {
+    setup();
+    const cancelled = filePlan([{ title: "Cancelled" }, { title: "Dropped" }], "approved");
+    await env.journal.drain();
+    const [first, second] = phaseIds(cancelled);
+    run(first!, "cancelled");
+    drop(second!, false, "not needed");
+    expect(planView(env.db, cancelled, env.clock.now)!.state).toBe("finished");
+    const all = filePlan([{ title: "Only" }], "approved");
+    await env.journal.drain();
+    drop(all);
+    expect(planView(env.db, all, env.clock.now)!.state).toBe("dropped");
   });
 });
 
