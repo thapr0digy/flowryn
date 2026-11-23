@@ -30,7 +30,7 @@ A reserved question (destructive, irreversible, security, credential, outward, m
 ## What the leader is told
 
 - The worker-questions wake text adds, while a grant is live, a line naming its projects: decide their reserved questions too, after a second look, with `--rationale -`, leaving only what needs the user's own hands (`awayQuestionsLine`, `src/attention/router.ts`).
-- The leader skill's Decisions bullet says the same in short.
+- The leader skill's Decisions bullet says the same in short, and its Never bullet sets grant-covered decisions aside.
 - The autonomy consent sentence (`AUTONOMY_SUMMARY`, shown when you grant or renew) now says a protected question parks only its task "unless your leader decides it after a second look, recording why; your return brief lists each to review or undo". It applies to grants already live. The plain-away summary is unchanged: under a plain away (no grant) reserved questions still wait for you.
 
 ## Tests
