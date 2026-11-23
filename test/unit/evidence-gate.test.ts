@@ -127,6 +127,15 @@ describe("the page and probe rules", () => {
     expect(probeProblems("p.json", "{")).toEqual(["p.json is not JSON"]);
   });
 
+  test("a probe missing a list it must measure is not clean", () => {
+    expect(probeProblems("p.json", "{}")).toEqual(["p.json: pageOverflow missing"]);
+    for (const list of ["overflow", "overlaps", "contrast", "names", "images", "clipped"]) {
+      const partial = JSON.parse(CLEAN_PROBE) as Record<string, unknown>;
+      delete partial[list];
+      expect(probeProblems("p.json", JSON.stringify(partial))).toEqual([`p.json: ${list} missing`]);
+    }
+  });
+
   test("QA: works, no blocker or major, and clean probes; nothing visible needs no probe", () => {
     const probe = [{ name: "probe-a.json", text: CLEAN_PROBE }];
     expect(qaEvidence({ html: qaPage(), probes: probe })).toEqual({ ok: true, evidence: { verdict: "works", probes: 1, nothingVisible: false } });
@@ -142,6 +151,10 @@ describe("the page and probe rules", () => {
     expect(designEvidence(designPage(cleanGapCheck("ready with the fixes below")))).toEqual({ ok: true, gap: "ready with the fixes below" });
     const infra = cleanGapCheck().replace(`<td>${DESIGN_GAP_CHECKS[0].name}</td><td>none</td>`, `<td>${DESIGN_GAP_CHECKS[0].name}</td><td>1</td>`);
     expect(designEvidence(designPage(infra))).toMatchObject({ ok: false, why: expect.stringMatching(/may add infrastructure: .* records 1/) });
+    const caveat = cleanGapCheck().replace(`<td>${DESIGN_GAP_CHECKS[0].name}</td><td>none</td>`, `<td>${DESIGN_GAP_CHECKS[0].name}</td><td>None needed, but a new Redis service</td>`);
+    expect(designEvidence(designPage(caveat))).toMatchObject({ ok: false, why: expect.stringMatching(/records None needed, but a new Redis service/) });
+    const unnumbered = `<p>Verdict: ready</p><table><tr><td>${DESIGN_GAP_CHECKS[0].name}</td><td>1</td></tr><tr><td>${DESIGN_GAP_CHECKS[1].name}</td><td>none</td></tr></table>`;
+    expect(designEvidence(designPage(unnumbered))).toMatchObject({ ok: false, why: expect.stringMatching(/records 1$/) });
     expect(designEvidence(designPage("<p>No verdict here.</p>"))).toMatchObject({ ok: false, why: expect.stringMatching(/verdict is missing/) });
   });
 
@@ -180,7 +193,7 @@ describe("evidenceRefusal: each check alone", () => {
     [{ pendingPlan: true }, /phase plan/],
     [{ gate: { kind: "review", state: "open", stage: "qa", opened_at: 0, page_path: null } }, /no review page/],
     [{ pinned: false }, /changed since it was pinned/],
-    [{ heldUnderAway: true }, /held this stage/],
+    [{ heldUnderAway: true }, /left this stage to the user/],
     [{ reopenedUnderAway: true }, /reopened an evidence pass/],
     [{ roundsUsed: 2 }, /2 evidence rounds used/],
   ];
@@ -238,6 +251,20 @@ describe("the pass on a QA gate", () => {
     const v = verified("failed");
     await evidencePass(deps());
     expect(events("gate.evidence_held")).toEqual([expect.objectContaining({ why: `verify ${v} failed at ${HEAD.slice(0, 8)}` })]);
+  });
+
+  test("a verify cut off by a daemon restart and requeued is waited on, then its passing rerun passes the gate", async () => {
+    openGate("qa", qaPage());
+    await evidencePass(deps());
+    db.query("UPDATE verify_queue SET state = 'started'").run();
+    verified("failed");
+    tx(db, () => db.query("INSERT INTO verify_queue (id, project_id, pr_url, task_id, head_sha, policy_id, worktree, source, state, requested_at, path) SELECT 'rq-again', project_id, pr_url, task_id, head_sha, policy_id, worktree, 'recovered', 'queued', ?1, path FROM verify_queue LIMIT 1").run(now));
+    expect((await evidencePass(deps())).held).toEqual([]);
+    db.query("UPDATE verify_queue SET state = 'started' WHERE id = 'rq-again'").run();
+    now += 10;
+    verified("passed");
+    expect((await evidencePass(deps())).passed).toEqual(["g1"]);
+    expect(events("gate.evidence_held")).toEqual([]);
   });
 
   test("a dirty probe holds it", async () => {
@@ -305,6 +332,26 @@ describe("the pass on a design gate", () => {
     const out = await evidencePass(deps({ call: claude(PASS) }));
     expect(out).toMatchObject({ rounds: [], held: ["g1"] });
     expect(db.query("SELECT COUNT(*) AS n FROM gate_validations").get()).toEqual({ n: 0 });
+  });
+
+  test("a round that gives no verdict hands the stage to the user: no second round starts", async () => {
+    openGate("design", designPage());
+    await evidencePass(deps({ call: claude({ nonsense: true }) }));
+    await settledValidators();
+    expect(db.query("SELECT state FROM gate_validations WHERE id = 'j1'").get()).toEqual({ state: "failed" });
+    const again = await evidencePass(deps({ call: claude(PASS) }));
+    expect(again).toMatchObject({ rounds: [], held: ["g1"] });
+    expect(gate().state).toBe("open");
+    expect(events("gate.evidence_held")[0]!.why).toMatch(/earlier evidence round left this stage to the user/);
+  });
+
+  test("a review gate of a stage with no evidence rule is left to the user without a word", async () => {
+    db.query("UPDATE runs SET stage = 'build' WHERE id = ?1").run(runId);
+    openGate("build", designPage());
+    const out = await evidencePass(deps({ call: claude(PASS) }));
+    expect(out).toEqual({ passed: [], rounds: [], verifies: [], held: [] });
+    expect(events("gate.evidence_held")).toEqual([]);
+    expect(getMeta(db, "evidence_held:g1")).toBeNull();
   });
 
   test("a stage the user reopened stays theirs", async () => {

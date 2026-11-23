@@ -103,7 +103,7 @@ export interface GateFacts {
   pinned: boolean;
   /** Validator rounds of this task's stage under this away (failures included), not counting the one being checked. */
   roundsUsed: number;
-  /** A round of this task's stage under this away ended held: the gate waits for the user, never a re-ask. */
+  /** A round of this task's stage under this away ended held (an evidence round: held, failed or advised): the gate waits for the user, never a re-ask. */
   heldUnderAway: boolean;
   /** The user reopened a validator pass of this run's stage under this away: its next review is theirs. */
   reopenedUnderAway: boolean;
@@ -252,8 +252,11 @@ function roundsUsed(db: Db, taskId: string, stage: string, awaySince: number, ba
   return (db.query("SELECT COUNT(*) AS n FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND basis = ?4 AND id IS NOT ?5").get(taskId, stage, awaySince, basis, except) as { n: number }).n;
 }
 
+/** The round states that hand a stage to the user: an evidence round that gave no verdict or could not act hands it over too. */
+const HANDED_OVER: Record<RoundBasis, string> = { away: "('held')", evidence: "('held', 'failed', 'advised')" };
+
 function heldUnderAway(db: Db, taskId: string, stage: string, awaySince: number, basis: RoundBasis, except: string | null): boolean {
-  return db.query("SELECT 1 FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND basis = ?4 AND state = 'held' AND id IS NOT ?5").get(taskId, stage, awaySince, basis, except) !== null;
+  return db.query(`SELECT 1 FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND basis = ?4 AND state IN ${HANDED_OVER[basis]} AND id IS NOT ?5`).get(taskId, stage, awaySince, basis, except) !== null;
 }
 
 function reopenedUnderAway(db: Db, runId: string, stage: string, awaySince: number): boolean {

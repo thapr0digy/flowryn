@@ -19,8 +19,9 @@ import { appendEvidencePassed, applyValidation, gateFacts, launchValidation, NO_
 /**
  * The evidence gate's daemon pass (docs/notes/2026-11-23-phase-gates-pass-8f.md), on the
  * validator's tick: each open design or QA review gate of a `gate_pass = "evidence"` project is
- * judged on its evidence (src/attention/evidence-gate.ts). A QA gate passes here once the
- * project's verify passed at the gate's head (queued by this pass, source auto); a design gate
+ * judged on its evidence (src/attention/evidence-gate.ts); a review gate of any other stage is left
+ * to the user without a word. A QA gate passes here once the project's verify passed at the
+ * gate's head (queued by this pass, source auto); a design gate
  * starts one independent validator round (basis `evidence`), whose pass is recorded by
  * applyValidation. A gate whose evidence is not green is held once (`gate.evidence_held`, with
  * why) and stays the user's; one that may still turn green waits. Every pass appends
@@ -96,7 +97,7 @@ type Step = { kind: "hold"; why: string } | { kind: "wait" } | { kind: "round" }
 async function readGate(deps: ValidatorDeps, gate: GateRow, run: RunWithPolicy): Promise<{ step: Step; head: string | null }> {
   const { db } = deps;
   const rule = stageRule(db, run, gate);
-  if (rule === null) return { step: { kind: "hold", why: `the ${gate.stage} stage has no evidence rule (design and QA reviews only)` }, head: null };
+  if (rule === null) return { step: { kind: "wait" }, head: null };
   const refusal = evidenceRefusal(gateFacts(db, gate, deps.now(), null, "evidence"), deps.decisions());
   if (refusal) return { step: refusal.wait ? { kind: "wait" } : { kind: "hold", why: refusal.why }, head: null };
   const read = await deps.git(["rev-parse", "HEAD"], run.worktree_path).catch(() => null);
@@ -117,9 +118,9 @@ async function readGate(deps: ValidatorDeps, gate: GateRow, run: RunWithPolicy):
 }
 
 /**
- * A QA gate whose page is green: pass it once the project's verify passed at `head`, hold it when
- * that verify failed or its request was cancelled, else queue the verify (once) and wait. Call
- * inside a transaction.
+ * A QA gate whose page is green: wait while a verify at `head` runs or is queued; then pass it
+ * once the latest one passed, hold it when that failed or its request was cancelled, else queue
+ * the verify (once) and wait. Call inside a transaction.
  */
 function judgeQa(deps: ValidatorDeps, gate: GateRow, run: RunWithPolicy, head: string, evidence: QaEvidence, now: number, out: EvidenceOutcome): void {
   const { db } = deps;
@@ -133,6 +134,8 @@ function judgeQa(deps: ValidatorDeps, gate: GateRow, run: RunWithPolicy, head: s
   if (!steps) return holdGate(db, run, gate, "the project has no verify steps, so its checks cannot be green at this head", now, out);
   const policy = verifyPolicyId(steps);
   const ref = `local:${run.branch}`;
+  if (runningVerifications(db).some((v) => v.pr_url === ref && v.head_sha === head && v.policy_id === policy)) return;
+  if (findQueued(db, ref, head, policy)) return;
   const done = finishedAtHead(db, ref, head, policy);
   if (done && done.state !== "passed") return holdGate(db, run, gate, `verify ${done.id} ${done.state} at ${head.slice(0, 8)}`, now, out);
   if (done) {
@@ -141,8 +144,6 @@ function judgeQa(deps: ValidatorDeps, gate: GateRow, run: RunWithPolicy, head: s
     out.passed.push(gate.id);
     return;
   }
-  if (runningVerifications(db).some((v) => v.pr_url === ref && v.head_sha === head && v.policy_id === policy)) return;
-  if (findQueued(db, ref, head, policy)) return;
   const asked = getMeta(db, verifyKey(gate.id));
   const request = asked ? getRequest(db, asked) : null;
   if (request && request.head_sha === head && request.state === "cancelled") return holdGate(db, run, gate, `verify request ${request.id} was cancelled: ${sanitizeLine(request.detail ?? "-", 120)}`, now, out);

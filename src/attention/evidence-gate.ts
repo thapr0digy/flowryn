@@ -60,19 +60,19 @@ export function probeProblems(name: string, text: string): string[] {
   if (probe === null || typeof probe !== "object" || Array.isArray(probe)) return [`${name} is not a probe result`];
   const p = probe as Record<string, unknown>;
   if (typeof p.error === "string") return [`${name}: the probe failed (${sanitizeLine(p.error, 80)})`];
+  if (!("pageOverflow" in p)) return [`${name}: pageOverflow missing`];
+  for (const list of [...PROBE_DEFECTS, "clipped"]) {
+    if (p[list] === undefined) return [`${name}: ${list} missing`];
+    if (!Array.isArray(p[list])) return [`${name}: ${list} is not a list`];
+  }
   const problems: string[] = [];
-  if (p.pageOverflow !== null && p.pageOverflow !== undefined) problems.push(`${name}: the page scrolls sideways`);
+  if (p.pageOverflow !== null) problems.push(`${name}: the page scrolls sideways`);
   for (const list of PROBE_DEFECTS) {
-    const value = p[list];
-    if (value === undefined) continue;
-    if (!Array.isArray(value)) return [`${name}: ${list} is not a list`];
+    const value = p[list] as unknown[];
     if (value.length > 0) problems.push(`${name}: ${value.length} ${list}`);
   }
-  const clipped = p.clipped;
-  if (Array.isArray(clipped)) {
-    const cut = clipped.filter((c) => !(c !== null && typeof c === "object" && (c as Record<string, unknown>).ellipsis === true)).length;
-    if (cut > 0) problems.push(`${name}: ${cut} clipped without an ellipsis`);
-  }
+  const cut = (p.clipped as unknown[]).filter((c) => !(c !== null && typeof c === "object" && (c as Record<string, unknown>).ellipsis === true)).length;
+  if (cut > 0) problems.push(`${name}: ${cut} clipped without an ellipsis`);
   return problems;
 }
 
@@ -105,7 +105,7 @@ export function designEvidence(html: string): { ok: true; gap: string } | { ok: 
   const ready = DESIGN_GAP_VERDICTS.filter((v) => v !== DESIGN_GAP_REVISE_VERDICT) as readonly string[];
   if (gap.verdict === null || !ready.includes(gap.verdict)) return { ok: false, why: `the gap check's verdict is ${gap.verdict ?? "missing"}` };
   if (gap.simplest === null) return { ok: false, why: "the gap check does not record its Simplest secure option check" };
-  if (!/^none\b/i.test(gap.simplest)) return { ok: false, why: `the design may add infrastructure: its Simplest secure option check records ${sanitizeLine(gap.simplest, 80)}` };
+  if (!/^none\.?$/i.test(gap.simplest)) return { ok: false, why: `the design may add infrastructure: its Simplest secure option check records ${sanitizeLine(gap.simplest, 80)}` };
   return { ok: true, gap: gap.verdict };
 }
 
@@ -121,7 +121,7 @@ export function evidenceRefusal(f: GateFacts, cfg: Pick<DecisionsConfig, "valida
   if (f.pendingPlan) return hold("it carries a phase plan, which only the user approves");
   if (!f.gate.page_path) return hold("no review page");
   if (!f.pinned) return hold("its page or spec changed since it was pinned");
-  if (f.heldUnderAway) return hold("an earlier evidence round held this stage for the user");
+  if (f.heldUnderAway) return hold("an earlier evidence round left this stage to the user");
   if (f.reopenedUnderAway) return hold("the user reopened an evidence pass of this stage: its reviews are theirs");
   if (f.roundsUsed >= cfg.validator_rounds) return hold(`${f.roundsUsed} evidence rounds used on this stage`);
   if (f.autonomyCovered) return wait("unattended mode covers its run");

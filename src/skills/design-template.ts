@@ -299,7 +299,7 @@ export function gapCheckOf(html: string): { verdict: string | null; simplest: st
   if (at === -1) return { verdict: gapVerdict(text), simplest: null };
   const rest = text.slice(at + first.name.length);
   const end = rest.toLowerCase().indexOf(second.name.toLowerCase());
-  const cell = (end === -1 ? rest : rest.slice(0, end)).replace(/^[\s|:.\-–—]+/, "").replace(/[\s|]*\d*[\s|]*$/, "").trim();
+  const cell = (end === -1 ? rest : rest.slice(0, end)).replace(/^[\s|:.\-–—]+/, "").replace(/(?<=\S)[\s|]+\d*[\s|]*$/, "").trim();
   return { verdict: gapVerdict(text), simplest: cell };
 }
 

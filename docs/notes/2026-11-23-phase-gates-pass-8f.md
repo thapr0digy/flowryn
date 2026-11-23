@@ -23,14 +23,14 @@ A **QA gate** (stage skill `flowryn-visual-qa`) passes when all of these hold:
 
 - The card's verdict is `works`.
 - No finding is a `blocker` or a `major` (minors and nits are fine).
-- Every `qa/probe-*.json` in the task's report dir is clean: no error, no sideways page scroll, and empty `overflow`, `overlaps`, `contrast`, `names` and `images` lists, and no `clipped` entry without an ellipsis. `contrastUnknown`, `offToken` and an ellipsis clip are left out on purpose, because the QA method says they need judgement. A page whose card says "Nothing visible." needs no probe; any other page needs at least one.
-- The project's verify passed at the gate's head. The pass queues that verify itself, once, under `local:<branch>` with the run's worktree (source `auto`, event `gate.evidence_verify`), and waits for it. A project with appsec-signal's `ui-check` step behind `when_changed = ["ui/**"]` (proposal 3) runs it here, so "the UI checks are green at that head" is the verify's own record. A project with no verify steps holds.
+- Every `qa/probe-*.json` in the task's report dir is clean: no error, `pageOverflow` and every list below present (a probe missing one holds), no sideways page scroll, and empty `overflow`, `overlaps`, `contrast`, `names` and `images` lists, and no `clipped` entry without an ellipsis. `contrastUnknown`, `offToken` and an ellipsis clip are left out on purpose, because the QA method says they need judgement. A page whose card says "Nothing visible." needs no probe; any other page needs at least one.
+- The project's verify passed at the gate's head. The pass queues that verify itself, once, under `local:<branch>` with the run's worktree (source `auto`, event `gate.evidence_verify`), and waits for it, and for any rerun at that head (a verify cut off by a daemon restart is requeued and judged by its rerun). A project with appsec-signal's `ui-check` step behind `when_changed = ["ui/**"]` (proposal 3) runs it here, so "the UI checks are green at that head" is the verify's own record. A project with no verify steps holds.
 
 A **design gate** (stage skill `flowryn-design`) passes when all of these hold:
 
 - The gap check's verdict is `ready` or `ready with the fixes below`.
-- The gap check's first check, "Simplest secure option", records `none`. That check names every new piece of infrastructure, key, credential, service, setting or cross-repo change, so any finding there means the design may add infrastructure, and the review stays the user's. `design-gap-check.md` now says so.
-- One independent validator round says pass. This is the gate validator (`src/attention/gate-validator.ts`): a fresh, read-only, capped model call over the brief, the pinned spec, the page and the branch's diff, with no access to the worker's conversation. The round is recorded in `gate_validations` with `basis = 'evidence'`. A `changes` verdict sends the design back with its findings, as under away. No verdict, or eligibility lost while it ran, leaves the gate to the user with an item.
+- The gap check's first check, "Simplest secure option", records exactly `none` (anything else, such as "none needed, but a new Redis service", holds). That check names every new piece of infrastructure, key, credential, service, setting or cross-repo change, so any finding there means the design may add infrastructure, and the review stays the user's. `design-gap-check.md` now says so.
+- One independent validator round says pass. This is the gate validator (`src/attention/gate-validator.ts`): a fresh, read-only, capped model call over the brief, the pinned spec, the page and the branch's diff, with no access to the worker's conversation. The round is recorded in `gate_validations` with `basis = 'evidence'`. A `changes` verdict sends the design back with its findings, as under away. No verdict, or eligibility lost while it ran, leaves the gate to the user with an item, and no further evidence round runs on that stage.
 
 Both kinds also need:
 
@@ -39,7 +39,7 @@ Both kinds also need:
 - the page (and spec) are unchanged since they were pinned;
 - the branch has not moved since the review opened (`gates.pass_head`);
 - the user has never reopened an evidence pass of this task's stage;
-- no earlier evidence round of the stage was held;
+- no earlier evidence round of the stage was held, failed or advised;
 - fewer than `[decisions] validator_rounds` evidence rounds have run on the stage.
 
 The pass waits, rather than holds, while unattended mode covers the run (its own pass owns the gate), while a validation runs, and while the gate's questions are open for the user.
@@ -47,6 +47,8 @@ The pass waits, rather than holds, while unattended mode covers the run (its own
 A passed gate is recorded like any other: an approval on the new channel `evidence` (migration 69), consumed by `recordGatePass`, and event `gate.evidence_passed` with its evidence (the verdict, the number of probes and the verify id for QA; the gap verdict and the round for design), the head and the page.
 
 ## When it holds
+
+Only design and QA review gates are judged; a review gate of any other stage is left to the user without an event or a briefing line.
 
 A gate whose evidence is not green is held once: event `gate.evidence_held` with why, and meta `evidence_held:<gate>`. The pass never looks at that gate again, and it waits for the user as before.
 
