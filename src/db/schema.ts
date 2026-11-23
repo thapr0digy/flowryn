@@ -1387,7 +1387,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 66, name: "flaky-tests", sql: FLAKY_TESTS_SQL },
   { version: 67, name: "project-removed", sql: PROJECT_REMOVED_SQL },
   { version: 68, name: "lesson-correction", sql: LESSON_CORRECTION_SQL },
-  { version: 69, name: "evidence-gates", sql: EVIDENCE_GATES_SQL },
+  { version: 69, name: "evidence-gates", sql: EVIDENCE_GATES_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
