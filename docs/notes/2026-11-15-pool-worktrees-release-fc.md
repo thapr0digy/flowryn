@@ -17,7 +17,7 @@ release = ["make pg-test-down"]
   - After the worker, so nothing of the task still uses the services.
   - Before the reap, so the reap also ends anything the release leaves running, and the second lock check catches a git lock it leaves.
   - Before the return, never after: once returned, the next run may already hold the slot, and its services would be the ones stopped. After a git removal the directory is gone.
-- **A verification's worktree** (`src/verify/runner.ts` `removeWorktree`), before git removes it, however the verification ended. A worktree kept for a resume after a daemon restart is not released; it is released when it finally goes.
+- **A verification's checkout** (`src/verify/runner.ts`): a slot's at the end of each use (`endCheckout`), and at the start (`prepareSlot`) only when the previous end did not release it (docs/notes/2026-11-24-verifies-reuse-one-a6.md "The reset rule"), a one-off `v<n>/wt` before git removes it, however the verification ended. A slot kept for a resume after a daemon restart is not released; its next use releases it (docs/notes/2026-11-24-verifies-reuse-one-a6.md).
 - Not when the worktree is already gone (nothing to run in), and not when the cleanup is refused before the worker stops: that worktree stays, with its services.
 
 A cleanup refused after the release (a process that survives the reap, a failed return) keeps the worktree without its services; the next `make test` starts them again, as it does after any `pg-test-down`.
