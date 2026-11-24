@@ -62,7 +62,7 @@ export interface BatchRow {
   verification_id: string | null;
   /** Rebuilds because main moved under it, carried across rebuilds. */
   integrations: number;
-  /** The head a leader's retry already re-verified once. */
+  /** Legacy (before migration 70): the head a leader's retry re-verified once. A retry now rebuilds the batch. */
   retried_head: string | null;
   /** Its open landing_batch_held item. */
   item_id: string | null;
