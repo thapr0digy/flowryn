@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { waitUntil } from "../helpers/harness.ts";
+import { waitForFileShell, waitUntil } from "../helpers/harness.ts";
 import { sh } from "../helpers/scratch-git.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
@@ -56,7 +56,7 @@ function gated(): { steps: string[]; open(): void } {
   const dir = mkdtempSync(join(tmpdir(), "fw-lq-gate-"));
   dirs.push(dir);
   const gate = join(dir, "go");
-  return { steps: [`while [ ! -f ${gate} ]; do sleep 0.1; done; ${STEPS[0]}`], open: () => writeFileSync(gate, "") };
+  return { steps: [`${waitForFileShell(gate)}; ${STEPS[0]}`], open: () => writeFileSync(gate, "") };
 }
 
 function mainLog(e: ShipEnv): string {

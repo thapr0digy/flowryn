@@ -92,6 +92,19 @@ import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
 
+// A pane's harness lives no longer than the fake Herdr that started it: once that test process is gone (killed
+// mid-test, so no teardown ran), it ends with the hooks and tools in its process group (it leads one: detached).
+const startedBy = process.ppid;
+setInterval(() => {
+  if (process.ppid === startedBy) return;
+  try {
+    process.kill(-process.pid, "SIGKILL");
+  } catch {
+    // not a group leader: only this process goes
+  }
+  process.exit(1);
+}, 500).unref();
+
 /** lavish:<file> → lavish-axi's URL for that page under the report directory; lavish@<host:port>:<file> names it on that origin (see the header). */
 function lavishArg(arg: string): string {
   const named = /^lavish(?:@([^/:\s]+:\d+))?:(.+)$/.exec(arg);

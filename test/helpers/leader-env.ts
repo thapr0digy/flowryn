@@ -14,7 +14,7 @@ import { PROTO } from "../../src/version.ts";
 import { FakeClaudeLeader } from "./fake-claude-leader.ts";
 import { FakePiLeader } from "./fake-pi-leader.ts";
 import { FakeHerdr } from "./fake-herdr.ts";
-import { cliJson, makeHome, REPO_ROOT, seedRun, startDaemon, waitUntil, type DaemonProc, type SeededRun, type TestHome } from "./harness.ts";
+import { cliJson, makeHome, REPO_ROOT, seedRun, startDaemon, reapOwned, waitUntil, type DaemonProc, type SeededRun, type TestHome } from "./harness.ts";
 import { loadConfig } from "../../src/config/config.ts";
 import { configStaticLayers } from "../../src/policy/static.ts";
 
@@ -212,9 +212,13 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
     async cleanup() {
       for (const fake of fakes) fake.kill();
       await env.daemon.kill9().catch(() => {});
-      await herdr?.stop().catch(() => {});
-      if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
-      else h.cleanup();
+      try {
+        await reapOwned(h);
+      } finally {
+        await herdr?.stop().catch(() => {});
+        if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
+        else h.cleanup();
+      }
     },
   };
   return env;

@@ -60,6 +60,20 @@ export interface FakeHerdrOptions {
   serverShellPrompt?: string;
 }
 
+/** Signal a harness and its process group (it leads one: spawned detached), or the harness alone if its group is gone. */
+function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      process.kill(child.pid, signal);
+    } catch {
+      // already gone
+    }
+  }
+}
+
 export class FakeHerdr {
   readonly socket: string;
   readonly calls: { method: string; params: Record<string, unknown> }[] = [];
@@ -98,6 +112,9 @@ export class FakeHerdr {
   /** Runs right after a workspace closes, before the reply: a user's focus change while Flowryn closes one. */
   afterClose: ((workspaceId: string) => void) | null = null;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
+  /** Every harness this server spawned and that has not exited, whichever pane holds it now. */
+  private readonly harnesses = new Set<ChildProcess>();
+  private stopped = false;
   private readonly subscribers = new Set<net.Socket>();
   private readonly connections = new Set<net.Socket>();
   private readonly server: net.Server;
@@ -121,7 +138,11 @@ export class FakeHerdr {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    this.heldStarts.splice(0);
     for (const pane of this.panes.values()) this.killChild(pane, "SIGKILL");
+    // A pane started again keeps only its newest harness: an older one still running is ended here too.
+    for (const child of this.harnesses) killGroup(child, "SIGKILL");
     // server.close waits for every open connection, so a client still holding one would stall the stop.
     for (const conn of this.connections) conn.destroy();
     await new Promise<void>((done) => this.server.close(() => done()));
@@ -194,17 +215,8 @@ export class FakeHerdr {
   }
 
   private killChild(pane: FakePane, signal: NodeJS.Signals): void {
-    const pid = this.harnessPid(pane.paneId);
-    if (pid === null) return;
-    try {
-      process.kill(-pid, signal);
-    } catch {
-      try {
-        process.kill(pid, signal);
-      } catch {
-        // already gone
-      }
-    }
+    const child = pane.child;
+    if (child && this.harnessPid(pane.paneId) !== null) killGroup(child, signal);
   }
 
   private accept(conn: net.Socket): void {
@@ -329,6 +341,8 @@ export class FakeHerdr {
   }
 
   private startHarness(pane: FakePane, kind: string, args: string[]): void {
+    // A start that reaches a stopped server would spawn a harness nothing ends.
+    if (this.stopped) return;
     const log = openSync(join(this.options.logDir, `${pane.paneId.replace(":", "-")}-${++pane.starts}.log`), "a");
     const child = spawn("bun", [this.options.harnessScripts?.[kind] ?? FAKE_HARNESS, kind, ...args], {
       cwd: pane.cwd,
@@ -337,6 +351,8 @@ export class FakeHerdr {
       stdio: ["ignore", log, log],
     });
     closeSync(log);
+    this.harnesses.add(child);
+    child.on("exit", () => this.harnesses.delete(child));
     pane.child = child;
     pane.kind = kind;
     pane.args = args;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { waitUntil } from "../helpers/harness.ts";
+import { waitForFileShell, waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, makeRepo, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
@@ -230,7 +230,7 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       const gateDir = mkdtempSync(join(tmpdir(), "fw-verify-go-"));
       dirs.push(gateDir);
       const go = join(gateDir, "go");
-      const steps = [`while [ ! -f ${go} ]; do sleep 0.05; done`, "true"];
+      const steps = [waitForFileShell(go), "true"];
       ship = await makeShipEnv({
         mode: "direct-PR",
         // The verify is started by hand here, so the daemon's own verify of the delivery is off.
