@@ -19,7 +19,7 @@ import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
-import { finishVerification, getVerification, recordSteps, runningVerifications, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
+import { finishVerification, getVerification, interruptedByStop, newestAt, recordSteps, runningVerifications, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
 /**
@@ -537,8 +537,18 @@ async function recreateSlot(deps: RemoveDeps, v: Removed & { head_sha: string })
 }
 
 /**
+ * Whether the slot's previous user may have left services running: it did not end through
+ * endCheckout with its release passing (none recorded, still running, cut off by a stop, or its release failed).
+ */
+function previousMayRun(db: Db, v: Verification): boolean {
+  const previous = newestAt(db, v.worktree_path, v.id);
+  if (!previous || previous.state === "running" || interruptedByStop(previous)) return true;
+  return db.query("SELECT 1 FROM events WHERE kind = 'verify.release_failed' AND json_extract(payload, '$.verification') = ?1 LIMIT 1").get(previous.id) !== null;
+}
+
+/**
  * Make the verification's slot exactly a fresh checkout of its head. A slot of this project:
- * its previous use's services are released (by the commands of the tree that started them), then
+ * when its previous use may have left services running, they are released (by the commands of the tree that started them), then
  * a forced checkout of the head and `git clean -ffdx`; anything else there, or a reset that does
  * not come out clean, is recreated once. Null when the slot is ready and proven clean; else why
  * the verification must not use it.
@@ -547,7 +557,7 @@ async function prepareSlot(deps: VerifyDeps, v: Verification): Promise<string | 
   const slot = v.worktree_path;
   if (!ownPath(deps.root, slot, "wt")) return `${slot} is not a verification checkout (a symlink in its path?)`;
   if (existsSync(slot) && (await checkoutOf(deps.git, slot, v.project_path))) {
-    if (!(await release(deps, v))) return "its release commands failed, so the previous verify's services may still run";
+    if (previousMayRun(deps.db, v) && !(await release(deps, v))) return "its release commands failed, so the previous verify's services may still run";
     const checkedOut = await deps.git(["checkout", "--quiet", "--force", "--detach", v.head_sha], slot);
     if (checkedOut.code === 0) await deps.git(["clean", "-ffdxq"], slot);
     if (checkedOut.code === 0 && (await cleanAt(deps.git, slot, v.head_sha))) return null;

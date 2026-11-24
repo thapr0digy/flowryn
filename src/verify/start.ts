@@ -17,7 +17,7 @@ import { pendingFlakeAt, withRerun } from "./flake.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, isSlotPath, runVerification, slotPath, type VerifyDeps, type VerifyPlan } from "./runner.ts";
-import { insertVerification, interruptedByStop, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
+import { insertVerification, interruptedByStop, newestAt, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
 
 /**
  * Starting verifications (docs/notes/2026-10-22-daemon-run-verify-y3.md): a
@@ -55,8 +55,7 @@ export function freeSlot(db: Db, root: string, projectId: string): string {
 
 /** Whether nothing used the source's slot after it: it is the newest verification there. */
 function lastInSlot(db: Db, v: Verification): boolean {
-  const newest = db.query("SELECT id FROM verifications WHERE worktree_path = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1").get(v.worktree_path) as { id: string } | null;
-  return newest?.id === v.id;
+  return newestAt(db, v.worktree_path)?.id === v.id;
 }
 
 /**

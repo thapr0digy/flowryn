@@ -92,6 +92,14 @@ export function runningVerifications(db: Db): Verification[] {
   return (db.query("SELECT * FROM verifications WHERE state = 'running' ORDER BY started_at").all() as VerificationRow[]).map(parseVerification);
 }
 
+/** The newest verification whose checkout is `path` (a slot's latest user), other than `except`. */
+export function newestAt(db: Db, path: string, except: string | null = null): Verification | null {
+  const row = db
+    .query("SELECT * FROM verifications WHERE worktree_path = ?1 AND (?2 IS NULL OR id <> ?2) ORDER BY started_at DESC, rowid DESC LIMIT 1")
+    .get(path, except) as VerificationRow | null;
+  return row ? parseVerification(row) : null;
+}
+
 /** The newest finished verification of this PR at exactly this head under exactly this verify policy; a legacy row (no policy) never matches. */
 export function finishedAtHead(db: Db, prUrl: string, head: string, policy: string): Verification | null {
   const row = db

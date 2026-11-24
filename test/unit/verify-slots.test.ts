@@ -185,7 +185,7 @@ describe("slot checkouts", () => {
     expect(git(f.repo, ["worktree", "list", "--porcelain"])).not.toContain(v.worktree_path);
   }, 30_000);
 
-  test("assumption: the release runs at the start in the previous tree, and at the end", async () => {
+  test("assumption: after a clean end the release runs only at the end of each use", async () => {
     const f = fixture();
     const out = tempDir();
     const seen = join(out, "seen.log");
@@ -193,8 +193,33 @@ describe("slot checkouts", () => {
     await f.run(f.admit(["true"], f.one));
     await f.run(f.admit(["true"], f.two, 2));
     const slot = realpathSync(slotPath(f.root, "web", 0));
-    // No release before the first use (no slot yet); then the end of the first, the start of the second in the first's tree, the end of the second.
-    expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([`${slot} ${f.one}`, `${slot} ${f.one}`, `${slot} ${f.two}`]);
+    expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([`${slot} ${f.one}`, `${slot} ${f.two}`]);
+  }, 30_000);
+
+  test("a release that needs an ignored file the steps made keeps the slot from one verify to the next", async () => {
+    const f = fixture();
+    const out = tempDir();
+    releasing(f, [script(join(out, "release"), "test -f .env")]);
+    const first = await f.run(f.admit(["echo built > .env"], f.one));
+    const second = await f.run(f.admit(["echo built > .env"], f.two, 2));
+    expect([first.state, second.state]).toEqual(["passed", "passed"]);
+    expect(second.worktree_path).toBe(slotPath(f.root, "web", 0));
+    expect(events(f.db, "verify.release_failed")).toEqual([]);
+    expect(events(f.db, "verify.slot_fallback")).toEqual([]);
+  }, 30_000);
+
+  test("after a failed end release the next use releases at the start, in the previous tree", async () => {
+    const f = fixture();
+    const out = tempDir();
+    const seen = join(out, "seen.log");
+    const failing = join(out, "fail");
+    writeFileSync(failing, "");
+    releasing(f, [script(join(out, "release"), `echo "$(git rev-parse HEAD)" >> ${seen}; test ! -e ${failing}`)]);
+    await f.run(f.admit(["true"], f.one));
+    rmSync(failing);
+    const v = await f.run(f.admit(["true"], f.two, 2));
+    expect(v.worktree_path).toBe(slotPath(f.root, "web", 0));
+    expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([f.one, f.one, f.two]);
   }, 30_000);
 
   test("a release that fails at the start bypasses the slot: the verify runs in its own checkout, with verify.slot_fallback", async () => {
