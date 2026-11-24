@@ -117,6 +117,8 @@ describe("landing batches", () => {
       await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND batch_id IS NOT NULL", first.task).length > 0, 60_000, "the first branch's batch");
       const bad = await ship(e, "bad.txt", "bad");
       const third = await ship(e, "three.txt", "three");
+      // The queue takes a ready branch on its next pass: both must be in line before the first batch lands, or the next forms without one.
+      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id IN (?1, ?2) AND state = 'waiting'", bad.task, third.task).length === 2, 60_000, "both branches in line");
       gate.open();
       await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND state = 'landed'", third.task).length > 0, 240_000, "the third branch to land");
 

@@ -1,5 +1,5 @@
 import type { Db } from "../db/db.ts";
-import { getMeta, setMeta } from "../db/db.ts";
+import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import type { TestCounts } from "./summary.ts";
 
@@ -90,6 +90,27 @@ export function getVerification(db: Db, id: string): Verification | null {
 
 export function runningVerifications(db: Db): Verification[] {
   return (db.query("SELECT * FROM verifications WHERE state = 'running' ORDER BY started_at").all() as VerificationRow[]).map(parseVerification);
+}
+
+/** Whether services a slot's last user started may still run there, or were released (docs/notes/2026-11-24-verifies-reuse-one-a6.md). */
+export type SlotServices = "may_run" | "released";
+
+export interface SlotState {
+  /** The verification that last touched the slot: released and reset it, ran steps there, or released it at its end. */
+  verification: string;
+  services: SlotServices;
+}
+
+/** Record, in its own transaction, that `v` touched its slot and what that left there (a `verify.slot_state` event). */
+export function recordSlotState(db: Db, v: Pick<Verification, "id" | "worktree_path" | "task_id">, services: SlotServices, now: number): void {
+  tx(db, () => appendEvent(db, { source: "daemon", kind: "verify.slot_state", taskId: v.task_id, payload: { slot: v.worktree_path, verification: v.id, services }, ts: now }));
+}
+
+/** The slot's newest recorded state; null when nothing was ever recorded for it. */
+export function slotState(db: Db, slot: string): SlotState | null {
+  return db
+    .query("SELECT json_extract(payload, '$.verification') AS verification, json_extract(payload, '$.services') AS services FROM events WHERE kind = 'verify.slot_state' AND json_extract(payload, '$.slot') = ?1 ORDER BY seq DESC LIMIT 1")
+    .get(slot) as SlotState | null;
 }
 
 /** The newest finished verification of this PR at exactly this head under exactly this verify policy; a legacy row (no policy) never matches. */

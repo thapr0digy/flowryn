@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
@@ -238,7 +238,7 @@ describe("draining the queue", () => {
     expect(["v1", "v2", "v3"].map((id) => getVerification(f.db, id)!.state)).toEqual(["passed", "passed", "passed"]);
   }, 30_000);
 
-  test("assumption: jobs in one repository at once do not collide: each fetches its own PR head from origin, adds its worktree and prunes", async () => {
+  test("assumption: jobs in one repository at once do not collide: each fetches its own PR head from origin, in a slot of its own", async () => {
     const f = fixture(['test "$(git rev-parse HEAD)" = "$(git rev-parse HEAD)" && sleep 0.3']);
     // An origin with one PR head per number that the project's own repository does not have yet.
     const origin = join(tempDir(), "origin.git");
@@ -262,7 +262,9 @@ describe("draining the queue", () => {
     await settled(f.db, ["v1", "v2", "v3", "v4"]);
     // The detail names git's error when a job collides (concurrent worktree adds: src/runtime/repo-lock.ts).
     expect(["v1", "v2", "v3", "v4"].map((id) => [getVerification(f.db, id)!.state, getVerification(f.db, id)!.head_sha, getVerification(f.db, id)!.detail])).toEqual(heads.map((h) => ["passed", h, null]));
-    expect(git(f.repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree ")).length).toBe(1);
+    // Four at once took four slots, which stay for the next ones (docs/notes/2026-11-24-verifies-reuse-one-a6.md).
+    expect(["v1", "v2", "v3", "v4"].map((id) => getVerification(f.db, id)!.worktree_path).toSorted()).toEqual([0, 1, 2, 3].map((k) => join(f.root, "slots", "web", String(k))));
+    expect(git(f.repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree ")).length).toBe(5);
   }, 30_000);
 
   test("nothing starts while a restart is held, the host check fails, or the pool is full; the first request holds those behind it", async () => {
@@ -487,7 +489,8 @@ function leftRunning(f: Fixture, request: ReturnType<typeof insertRequest>): str
   const config = verifyConfig(f.config, "web")!;
   const v = tx(f.db, () => admitRequest(f.db, request, config, CAPS, f.root, f.repo, Date.now()));
   mkdirSync(v.dir, { recursive: true });
-  git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
+  // A slot an earlier one left is reused as it stands.
+  if (!existsSync(v.worktree_path)) git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
   return v.id;
 }
 

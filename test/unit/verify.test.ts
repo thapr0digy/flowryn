@@ -14,8 +14,9 @@ import { gitRunner } from "../../src/policy/git.ts";
 import { checkGate, NOT_STARTED_ANNOTATION, notStartedChecks, type ChoiceResult, type MergeFacts } from "../../src/policy/merge.ts";
 import { verifyConfig, type VerifyItem } from "../../src/verify/config.ts";
 import { normalizeStep, verifyPolicyId } from "../../src/verify/policy.ts";
-import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVerifications, runVerification, stepEnv, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
-import { finishedAtHead, finishedAtHeadUnderOther, finishVerification, getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
+import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVerifications, runVerification, slotPath, stepEnv, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
+import { freeSlot } from "../../src/verify/start.ts";
+import { finishedAtHead, finishedAtHeadUnderOther, finishVerification, getVerification, insertVerification, recordSlotState, type Verification } from "../../src/verify/store.ts";
 import { countsLine, parseBunSummary } from "../../src/verify/summary.ts";
 import { verificationView } from "../../src/verify/verbs.ts";
 import { grantJobLease, liveCounts, liveJobLeases, recordJobProcess } from "../../src/sched/pools.ts";
@@ -221,18 +222,23 @@ function events(db: Db, kind: string): Record<string, unknown>[] {
   return (db.query("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq").all(kind) as { payload: string }[]).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
 }
 
-/** A running row and its slot as the last daemon left them, with a worktree, and the step's identity when one is given. */
+/** A running row and its slot as the last daemon left them, with a slot checkout (as admission gives one), and the step's identity when one is given. */
 function leftRunning(f: Fixture, proc: ProcIdentity | null): Verification {
   const v = tx(f.db, () => {
-    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]), policy_id: verifyPolicyId({ steps: ["sleep 30"], binary: null }), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() });
+    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]), policy_id: verifyPolicyId({ steps: ["sleep 30"], binary: null }), dir: (id) => join(f.root, id), worktree: () => freeSlot(f.db, f.root, "web"), project_path: f.repo, source: "cli", now: Date.now() });
     grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", { validation: 5 }, Date.now());
     if (proc) recordJobProcess(f.db, { kind: "verify", id: row.id, taskId: null }, proc, Date.now());
     return row;
   });
+  recordSlotState(f.db, v, "may_run", Date.now());
   mkdirSync(v.dir, { recursive: true });
   git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
+  // What the step left: a slot that is not kept for a resume is cleaned of it, never removed.
+  writeFileSync(join(v.worktree_path, LEFT), "");
   return v;
 }
+
+const LEFT = "left-by-the-step.txt";
 
 describe("a verification job", () => {
   test(
@@ -365,7 +371,7 @@ describe("a verification job", () => {
   test("a verification a dead daemon left running is recorded as an error at startup, its worktree kept for a resume", async () => {
     const f = fixture();
     const v = tx(f.db, () =>
-      insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["true"]), policy_id: verifyPolicyId({ steps: ["true"], binary: null }), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() }),
+      insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["true"]), policy_id: verifyPolicyId({ steps: ["true"], binary: null }), dir: (id) => join(f.root, id), worktree: () => slotPath(f.root, "web", 0), project_path: f.repo, source: "cli", now: Date.now() }),
     );
     mkdirSync(v.dir, { recursive: true });
     git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
@@ -468,7 +474,7 @@ describe("a verification job", () => {
     f.deps.terminate = async () => ({ ok: true, evidence: "absent", signal: "none" });
     expect(await recoverVerifications(f.deps)).toBe(0);
     expect(liveCounts(f.db)).toEqual({});
-    expect(existsSync(broken.worktree_path)).toBe(false);
+    expect(existsSync(join(broken.worktree_path, LEFT))).toBe(false);
     expect(events(f.db, "pool.released").filter((e) => e.job === broken.id)).toHaveLength(1);
     expect(await recoverVerifications(f.deps)).toBe(0);
     expect(events(f.db, "pool.released")).toHaveLength(2);
@@ -486,7 +492,7 @@ describe("a verification job", () => {
     f.deps.terminate = async () => ({ ok: true, evidence: "process", signal: "SIGTERM" });
     expect(await recoverVerifications(f.deps)).toBe(0);
     expect(liveCounts(f.db)).toEqual({});
-    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(existsSync(join(v.worktree_path, LEFT))).toBe(false);
     expect(events(f.db, "pool.released")).toHaveLength(1);
     expect(events(f.db, "pr.verified")).toHaveLength(1);
   });
@@ -498,7 +504,7 @@ describe("a verification job", () => {
     expect(await recoverVerifications(f.deps)).toBe(0);
     expect(getVerification(f.db, v.id)!.state).toBe("passed");
     expect(liveCounts(f.db)).toEqual({});
-    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(existsSync(join(v.worktree_path, LEFT))).toBe(false);
   });
 
   test.skipIf(process.platform !== "darwin")(

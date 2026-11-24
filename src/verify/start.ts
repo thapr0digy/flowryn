@@ -9,15 +9,15 @@ import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
-import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, poolHolders } from "../sched/pools.ts";
+import { fullPools, grantJobLease, liveCounts, OverCapacity, poolHolders } from "../sched/pools.ts";
 import { hostState } from "../sched/scheduler.ts";
 import { BASE_REF_PREFIX, BATCH_REF_PREFIX, liveBaselineAt, liveBatchAt } from "./batch-store.ts";
 import { lightVerifyConfig, verifyConfig, type VerifyConfig } from "./config.ts";
 import { pendingFlakeAt, withRerun } from "./flake.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
-import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
-import { insertVerification, interruptedByStop, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
+import { initialSteps, isSlotPath, runVerification, slotPath, type VerifyDeps, type VerifyPlan } from "./runner.ts";
+import { insertVerification, interruptedByStop, parseVerification, runningVerifications, slotState, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
 
 /**
  * Starting verifications (docs/notes/2026-10-22-daemon-run-verify-y3.md): a
@@ -35,22 +35,45 @@ export function verifyRoot(config: Pick<FlowrynConfig, "state_dir">): string {
   return join(config.state_dir, "verify");
 }
 
+/** The checkouts of a project's verifications that hold a live verify slot: busy until their cleanup ends. */
+function heldCheckouts(db: Db, projectId: string): Set<string> {
+  const rows = db
+    .query("SELECT v.worktree_path FROM verifications v JOIN job_leases l ON l.kind = 'verify' AND l.job_id = v.id AND l.released_at IS NULL WHERE v.project_id = ?1")
+    .all(projectId) as { worktree_path: string }[];
+  return new Set(rows.map((r) => r.worktree_path));
+}
+
+/**
+ * The project's lowest-numbered slot checkout no live verification holds
+ * (docs/notes/2026-11-24-verifies-reuse-one-a6.md). Read inside the transaction
+ * that grants the verification its slot, so two never get the same one.
+ */
+export function freeSlot(db: Db, root: string, projectId: string): string {
+  const held = heldCheckouts(db, projectId);
+  for (let k = 0; ; k++) if (!held.has(slotPath(root, projectId, k))) return slotPath(root, projectId, k);
+}
+
 /**
  * The interrupted verification a new one of this PR, head and policy resumes
  * (docs/notes/2026-11-07-faster-landing-test-q7.md): the newest one a daemon
- * stop cut off, whose worktree is still there and whose slot is free (nothing
- * of it still runs), with exactly these steps.
+ * stop cut off, in a slot checkout still there that nothing used or cleaned since and no
+ * live verification holds (its own or one just admitted there), with exactly these steps.
  */
-export function resumableFrom(db: Db, prUrl: string, head: string, policy: string, steps: readonly VerifyStep[]): Verification | null {
+export function resumableFrom(db: Db, root: string, prUrl: string, head: string, policy: string, steps: readonly VerifyStep[]): Verification | null {
   const rows = (
     db
       .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state = 'error' ORDER BY started_at DESC, rowid DESC LIMIT 5")
       .all(prUrl, head, policy) as VerificationRow[]
   ).map(parseVerification);
-  const held = new Set(liveJobLeases(db, "verify").map((l) => l.job_id));
-  const source = rows.find((v) => interruptedByStop(v) && !held.has(v.id) && existsSync(v.worktree_path));
+  const source = rows.find((v) => interruptedByStop(v) && !heldCheckouts(db, v.project_id).has(v.worktree_path) && isSlotPath(root, v.worktree_path) && existsSync(v.worktree_path) && leftAsStepsLeftIt(db, v));
   if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name || s.rerun?.command !== steps[i]!.rerun?.command)) return null;
   return source;
+}
+
+/** Whether the slot's newest recorded state is the one `v`'s steps left: nothing, `v` itself included, released or cleaned it since. */
+function leftAsStepsLeftIt(db: Db, v: Verification): boolean {
+  const state = slotState(db, v.worktree_path);
+  return state?.verification === v.id && state.services === "may_run";
 }
 
 /** The new steps with every step that passed or was skipped in `from` kept, its log named as there; null when none did. */
@@ -72,8 +95,10 @@ export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfi
   // A landing batch's flake rerun (src/verify/flake.ts): the failed step runs only its failing tests.
   const flake = request.policy_id === policy ? pendingFlakeAt(db, request.pr_url, request.head_sha) : null;
   const fresh = flake ? withRerun(steps, flake) : steps;
-  const source = resumableFrom(db, request.pr_url, request.head_sha, policy, fresh);
+  const source = resumableFrom(db, root, request.pr_url, request.head_sha, policy, fresh);
   const resumed = source ? resumeSteps(source, fresh) : null;
+  // A resume runs in its source's slot, as that left it; anything else in the lowest free one.
+  const checkout = resumed ? source!.worktree_path : freeSlot(db, root, request.project_id);
   const v = insertVerification(db, {
     project_id: request.project_id,
     pr_url: request.pr_url,
@@ -83,7 +108,7 @@ export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfi
     resumed_from: resumed ? source!.id : null,
     policy_id: policy,
     dir: (id) => join(root, id),
-    worktree: (id) => join(root, id, "wt"),
+    worktree: () => checkout,
     project_path: projectPath,
     source: request.source === "cli" ? "cli" : "daemon",
     now,
