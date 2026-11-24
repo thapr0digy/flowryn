@@ -264,6 +264,20 @@ describe("a verification a stop cut off", () => {
     expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
   }, 30_000);
 
+  test("a slot another PR's verification was just admitted into is never resumed: the same-head verify takes another slot", async () => {
+    const f = fixture();
+    const first = await interrupted(f);
+    const other = tx(f.db, () => {
+      const config = configOf(["true"]);
+      const request = insertRequest(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/2", task_id: null, head_sha: f.head, policy_id: verifyPolicyId(config), pr_number: 2, head_ref: "flowryn/other", worktree: null, source: "auto", path: null, now: Date.now() });
+      return admitRequest(f.db, request, config, CAPS, f.root, f.repo, Date.now());
+    });
+    expect(other.worktree_path).toBe(first.worktree_path);
+    const fresh = admit(f);
+    expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
+    expect(fresh.worktree_path).toBe(slotPath(f.root, "web", 1));
+  }, 30_000);
+
   test("an interrupted one in its own v<n>/wt checkout (before slots) is never resumed", async () => {
     const f = fixture();
     const v = tx(f.db, () => {
