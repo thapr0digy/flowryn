@@ -17,7 +17,7 @@ import { pendingFlakeAt, withRerun } from "./flake.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, isSlotPath, runVerification, slotPath, type VerifyDeps, type VerifyPlan } from "./runner.ts";
-import { insertVerification, interruptedByStop, newestAt, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
+import { insertVerification, interruptedByStop, parseVerification, runningVerifications, slotState, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
 
 /**
  * Starting verifications (docs/notes/2026-10-22-daemon-run-verify-y3.md): a
@@ -53,11 +53,6 @@ export function freeSlot(db: Db, root: string, projectId: string): string {
   for (let k = 0; ; k++) if (!held.has(slotPath(root, projectId, k))) return slotPath(root, projectId, k);
 }
 
-/** Whether nothing used the source's slot after it: it is the newest verification there. */
-function lastInSlot(db: Db, v: Verification): boolean {
-  return newestAt(db, v.worktree_path)?.id === v.id;
-}
-
 /**
  * The interrupted verification a new one of this PR, head and policy resumes
  * (docs/notes/2026-11-07-faster-landing-test-q7.md): the newest one a daemon
@@ -71,7 +66,7 @@ export function resumableFrom(db: Db, root: string, prUrl: string, head: string,
       .all(prUrl, head, policy) as VerificationRow[]
   ).map(parseVerification);
   const held = new Set(liveJobLeases(db, "verify").map((l) => l.job_id));
-  const source = rows.find((v) => interruptedByStop(v) && !held.has(v.id) && isSlotPath(root, v.worktree_path) && existsSync(v.worktree_path) && lastInSlot(db, v));
+  const source = rows.find((v) => interruptedByStop(v) && !held.has(v.id) && isSlotPath(root, v.worktree_path) && existsSync(v.worktree_path) && slotState(db, v.worktree_path)?.verification === v.id);
   if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name || s.rerun?.command !== steps[i]!.rerun?.command)) return null;
   return source;
 }

@@ -10,7 +10,7 @@ import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { insertRequest } from "../../src/verify/queue.ts";
 import { initialSteps, recoverVerifications, runVerification, slotPath, stopVerifications, type VerifyDeps } from "../../src/verify/runner.ts";
 import { admitRequest } from "../../src/verify/start.ts";
-import { getVerification, insertVerification, STOPPED_MID_RUN, type Verification } from "../../src/verify/store.ts";
+import { getVerification, insertVerification, recordSlotState, STOPPED_MID_RUN, type Verification } from "../../src/verify/store.ts";
 
 /**
  * Verify resume (docs/notes/2026-11-07-faster-landing-test-q7.md): a verification a daemon stop
@@ -148,6 +148,7 @@ describe("a verification a stop cut off", () => {
       f.db.query("UPDATE verifications SET steps = ?2 WHERE id = ?1").run(row.id, JSON.stringify(steps));
       return row;
     });
+    recordSlotState(f.db, v, "may_run", Date.now());
     mkdirSync(v.dir, { recursive: true });
     writeFileSync(join(v.dir, v.steps[0]!.log), "first step's output\n");
     git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
@@ -242,6 +243,25 @@ describe("a verification a stop cut off", () => {
     await run(f, fresh);
     expect(getVerification(f.db, fresh.id)!.state).toBe("passed");
     expect(ranCount(f)).toBe(2);
+  }, 30_000);
+
+  test("a slot another verification released and reset since the interrupt, stopped before any step, is never resumed", async () => {
+    const f = fixture();
+    const first = await interrupted(f);
+    const realGit = f.deps.git;
+    f.deps.git = async (args, cwd) => {
+      const result = await realGit(args, cwd);
+      if (args[0] === "clean") stopVerifications();
+      return result;
+    };
+    const other = admit(f, ["true"]);
+    expect(other.worktree_path).toBe(first.worktree_path);
+    await run(f, other);
+    f.deps.git = realGit;
+    expect(getVerification(f.db, other.id)!.steps[0]!.state).toBe("waiting");
+    writeFileSync(f.go, "");
+    const fresh = admit(f);
+    expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
   }, 30_000);
 
   test("an interrupted one in its own v<n>/wt checkout (before slots) is never resumed", async () => {

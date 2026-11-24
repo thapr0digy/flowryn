@@ -16,7 +16,7 @@ import { verifyConfig, type VerifyItem } from "../../src/verify/config.ts";
 import { normalizeStep, verifyPolicyId } from "../../src/verify/policy.ts";
 import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVerifications, runVerification, slotPath, stepEnv, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
 import { freeSlot } from "../../src/verify/start.ts";
-import { finishedAtHead, finishedAtHeadUnderOther, finishVerification, getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
+import { finishedAtHead, finishedAtHeadUnderOther, finishVerification, getVerification, insertVerification, recordSlotState, type Verification } from "../../src/verify/store.ts";
 import { countsLine, parseBunSummary } from "../../src/verify/summary.ts";
 import { verificationView } from "../../src/verify/verbs.ts";
 import { grantJobLease, liveCounts, liveJobLeases, recordJobProcess } from "../../src/sched/pools.ts";
@@ -225,11 +225,12 @@ function events(db: Db, kind: string): Record<string, unknown>[] {
 /** A running row and its slot as the last daemon left them, with a slot checkout (as admission gives one), and the step's identity when one is given. */
 function leftRunning(f: Fixture, proc: ProcIdentity | null): Verification {
   const v = tx(f.db, () => {
-    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]).map((s) => ({ ...s, state: "running" as const })), policy_id: verifyPolicyId({ steps: ["sleep 30"], binary: null }), dir: (id) => join(f.root, id), worktree: () => freeSlot(f.db, f.root, "web"), project_path: f.repo, source: "cli", now: Date.now() });
+    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]), policy_id: verifyPolicyId({ steps: ["sleep 30"], binary: null }), dir: (id) => join(f.root, id), worktree: () => freeSlot(f.db, f.root, "web"), project_path: f.repo, source: "cli", now: Date.now() });
     grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", { validation: 5 }, Date.now());
     if (proc) recordJobProcess(f.db, { kind: "verify", id: row.id, taskId: null }, proc, Date.now());
     return row;
   });
+  recordSlotState(f.db, v, "may_run", Date.now());
   mkdirSync(v.dir, { recursive: true });
   git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
   // What the step left: a slot that is not kept for a resume is cleaned of it, never removed.

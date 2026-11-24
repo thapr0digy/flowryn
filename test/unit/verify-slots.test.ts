@@ -243,20 +243,55 @@ describe("slot checkouts", () => {
     expect(events(f.db, "verify.slot_fallback")).toEqual([]);
   }, 30_000);
 
-  test("a crashed verify that ran no step neither cleans the slot at recovery nor forces a start release", async () => {
+  test("a finished verify that never touched its slot is left alone at recovery: no release, no clean", async () => {
     const f = fixture();
     const out = tempDir();
-    releasing(f, [script(join(out, "release"), "test -f .env")]);
-    const first = await f.run(f.admit(["echo built > .env"], f.one));
-    tx(f.db, () => {
+    const seen = join(out, "seen.log");
+    releasing(f, [script(join(out, "release"), `echo "$(git rev-parse HEAD)" >> ${seen}`)]);
+    const first = await f.run(f.admit(["true"], f.one));
+    const v = tx(f.db, () => {
       const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/2", task_id: null, head_sha: f.two, steps: initialSteps(["true"]), policy_id: verifyPolicyId({ steps: ["true"], binary: null }), dir: (id) => join(f.root, id), worktree: () => first.worktree_path, project_path: f.repo, source: "cli", now: Date.now() });
       grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", CAPS, Date.now());
+      f.db.query("UPDATE verifications SET state = 'error', detail = 'the head is missing', finished_at = 1 WHERE id = ?1").run(row.id);
+      return row;
     });
-    expect(await recoverVerifications(f.deps)).toBe(1);
+    writeFileSync(join(first.worktree_path, "untracked.txt"), "junk\n");
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(getVerification(f.db, v.id)!.state).toBe("error");
+    expect(existsSync(join(first.worktree_path, "untracked.txt"))).toBe(true);
+    expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([f.one]);
+  }, 30_000);
+
+  test("a verify stopped after it released and reset the slot, before any step, clears a failed release: the next one keeps the slot", async () => {
+    const f = fixture();
+    const out = tempDir();
+    const failing = join(out, "fail");
+    writeFileSync(failing, "");
+    releasing(f, [script(join(out, "release"), `test -f .env && test ! -e ${failing}`)]);
+    await f.run(f.admit(["echo built > .env"], f.one));
+    expect(events(f.db, "verify.release_failed")).toHaveLength(1);
+    rmSync(failing);
+    const realGit = f.deps.git;
+    f.deps.git = async (args, cwd) => {
+      const result = await realGit(args, cwd);
+      if (args[0] === "clean") stopVerifications();
+      return result;
+    };
+    const stopped = await f.run(f.admit(["echo built > .env"], f.two, 2));
+    f.deps.git = realGit;
+    expect(stopped).toMatchObject({ state: "error", worktree_path: slotPath(f.root, "web", 0) });
+    expect(stopped.steps.every((s) => s.state === "waiting")).toBe(true);
     const next = await f.run(f.admit([`${SEES_NOTHING} && echo built > .env`], f.two, 3));
-    expect(next).toMatchObject({ state: "passed", worktree_path: first.worktree_path });
-    expect(events(f.db, "verify.release_failed")).toEqual([]);
+    expect(next).toMatchObject({ state: "passed", worktree_path: slotPath(f.root, "web", 0) });
+    expect(events(f.db, "verify.release_failed")).toHaveLength(1);
     expect(events(f.db, "verify.slot_fallback")).toEqual([]);
+  }, 30_000);
+
+  test("a verify records its slot released at the start, may_run before its steps, and released at its end", async () => {
+    const f = fixture();
+    const v = await f.run(f.admit(["true"], f.one));
+    const slot = slotPath(f.root, "web", 0);
+    expect(events(f.db, "verify.slot_state")).toEqual(["released", "may_run", "released"].map((services) => ({ slot, verification: v.id, services })));
   }, 30_000);
 
   test("a release that fails at the start bypasses the slot: the verify runs in its own checkout, with verify.slot_fallback", async () => {
