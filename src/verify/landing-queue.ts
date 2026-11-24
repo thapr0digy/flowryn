@@ -18,9 +18,10 @@ import { createAutoMerge, getAutoMerge, HOLD_RELEASED, setReadyProgress, superse
 import { landingBatched, landingQueued, landingTrainDepth, LOCAL_TURN_WAIT_MS, MAX_INTEGRATIONS, MAX_SKIPPED_TURNS, verifyConfig } from "./config.ts";
 import { mergeInStore } from "./object-merge.ts";
 import { verifyPolicyId } from "./policy.ts";
-import { isBatchFix, LIVE_BATCH_SQL, liveBatch as liveBatchOf, markBatching, projectBatches } from "./batch-store.ts";
+import { LIVE_BATCH_SQL, liveBatch as liveBatchOf, markBatching, projectBatches } from "./batch-store.ts";
 import { batchCell, batchProgress, LandingBatches, type LineOps } from "./landing-batch.ts";
 import type { DeliveryServices } from "../policy/services.ts";
+import type { HostVerdict } from "../sched/host.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
 import { routeVerifyOutcome, SENT_BACK_KIND, sendBackText, sentBackPayload } from "./route.ts";
 import { finishedAtHead, getVerification, interruptedByStop, type Verification } from "./store.ts";
@@ -423,6 +424,8 @@ export interface LandingQueueDeps {
   kickScheduler(): void;
   /** The merge verb's services, with which a green landing batch lands (src/verify/landing-batch.ts). */
   delivery?: DeliveryServices;
+  /** The scheduler's host check: a red landing batch judged while the host is over its load limit is retried. */
+  host?(): Promise<HostVerdict>;
 }
 
 type HeadOutcome = "started" | "blocked" | "left";
@@ -442,7 +445,7 @@ export class LandingQueue implements LandingHooks {
 
   constructor(deps: LandingQueueDeps) {
     this.deps = deps;
-    this.batches = new LandingBatches({ db: deps.db, config: deps.config, git: deps.git, now: deps.now, log: deps.log, kickScheduler: deps.kickScheduler, delivery: deps.delivery }, lineOps(deps));
+    this.batches = new LandingBatches({ db: deps.db, config: deps.config, git: deps.git, now: deps.now, log: deps.log, kickScheduler: deps.kickScheduler, delivery: deps.delivery, host: deps.host }, lineOps(deps));
   }
 
   async pass(): Promise<void> {
@@ -808,9 +811,9 @@ export class LandingQueue implements LandingHooks {
     await this.batches.build(project, eligible);
   }
 
-  /** A batch project's waiting entries a batch may take: every one that is not sensitive and not a batch's fix (it joins its own batch), in line order. */
+  /** A batch project's waiting entries a batch may take: every one that is not sensitive, in line order. */
   private batchable(projectId: string): LandingRow[] {
-    return projectLine(this.deps.db, projectId).filter((r) => r.state === "waiting" && !this.sensitive(r) && !isBatchFix(this.deps.db, r.task_id));
+    return projectLine(this.deps.db, projectId).filter((r) => r.state === "waiting" && !this.sensitive(r));
   }
 
   private sensitive(row: LandingRow): boolean {

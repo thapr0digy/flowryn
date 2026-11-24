@@ -14,7 +14,8 @@ useIntegrationTimeout();
  * workers that deliver --local, and a yolo local-only project with `landing = "batch"` and a light
  * check. Each branch's light check runs on its delivered head; the first branch's batch verifies
  * (held on a gate) while the second is delivered, which waits for the next batch; both land on
- * local main through the merge verb's path and are cleaned up, with no leader turn.
+ * local main through the merge verb's path and are cleaned up, with no leader turn. A red batch
+ * splits until its bad branch is alone, which goes back to its worker while the rest land.
  */
 
 let env: ShipEnv | null = null;
@@ -104,43 +105,42 @@ describe("landing batches", () => {
   );
 
   test(
-    "a red batch is fixed forward: one fix task starts on the batch head, its delivery is verified again, and every branch lands with the fix",
+    "a red batch splits by itself: the good branch lands, the bad one goes back to its worker after main is shown green, and nobody is asked",
     async () => {
-      // The full verify fails until fix.txt exists. Its output is the fix task's brief, so the fake worker's steps ride in it:
-      // the fix worker commits fix.txt on top of the batch head and delivers --local.
-      const step = `if [ -f fix.txt ]; then ${PASS}; else printf 'missing fix.txt\\nFAKE: commit fix.txt fixed\\nFAKE: deliver-local\\n'; exit 1; fi`;
+      // The first batch waits on the gate while the other two are delivered, so they form the next batch together.
+      // bad.txt fails the verify; its output rides in the send-back, so the bad branch's fresh worker sleeps instead of redelivering.
+      const gate = gated();
+      const step = `${gate.step.replace(PASS, "true")}; if [ -f bad.txt ]; then printf 'bad.txt is not allowed\\nFAKE: sleep 120000\\n'; exit 1; fi; ${PASS}`;
       env = await makeShipEnv({ mode: "local-only", yolo: true, extraConfig: `[projects.web]\nverify = ${JSON.stringify([step])}\nlanding = "batch"\n` });
       const e = env;
       const first = await ship(e, "one.txt", "one");
-      await waitUntil(() => query(e, "SELECT 1 FROM landing_batches WHERE fix_task IS NOT NULL").length > 0, 120_000, "the red batch's fix task");
-      const [opened] = query<{ id: string; fix_task: string; fix_base: string }>(e, "SELECT id, fix_task, fix_base FROM landing_batches WHERE fix_task IS NOT NULL");
-      // A branch delivered while the batch is being fixed waits for the next batch.
-      const second = await ship(e, "two.txt", "two");
-      await waitUntil(() => query(e, "SELECT 1 FROM landing_batches WHERE id = ?1 AND state = 'landed'", opened!.id).length > 0, 180_000, "the fixed batch to land");
+      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND batch_id IS NOT NULL", first.task).length > 0, 60_000, "the first branch's batch");
+      const bad = await ship(e, "bad.txt", "bad");
+      const third = await ship(e, "three.txt", "three");
+      gate.open();
+      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND state = 'landed'", third.task).length > 0, 240_000, "the third branch to land");
 
-      // The fix ran on the batch head: its run started there, and its delivery sits directly on it.
-      const [fixRun] = query<{ id: string; base_sha: string }>(e, "SELECT id, base_sha FROM runs WHERE task_id = ?1", opened!.fix_task);
-      expect(fixRun!.base_sha).toBe(opened!.fix_base);
-      const [landed] = query<{ head_sha: string; fix_state: string }>(e, "SELECT head_sha, fix_state FROM landing_batches WHERE id = ?1", opened!.id);
-      expect(landed!.fix_state).toBe("delivered");
-      expect(sh(e.fleet.repo, ["rev-parse", `${landed!.head_sha}^`])).toBe(opened!.fix_base);
-      expect(query<{ task_id: string }>(e, "SELECT task_id FROM landing_queue WHERE batch_id = ?1 ORDER BY batch_pos", opened!.id).map((r) => r.task_id)).toEqual([first.task, opened!.fix_task]);
-      // Two full verifies of the batch: the red one and the one at the fix's head.
-      expect(query(e, "SELECT 1 FROM verifications WHERE pr_url = ?1", `batch:web/${opened!.id}`)).toHaveLength(2);
-
-      // The next batch, on the fixed main, is green at once.
-      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND state = 'landed'", second.task).length > 0, 120_000, "the second branch to land");
-      expect(sh(e.fleet.repo, ["ls-tree", "--name-only", "main"]).split("\n")).toEqual(expect.arrayContaining(["one.txt", "two.txt", "fix.txt"]));
+      // [one] landed; [bad, three] went red and split; [bad] alone went red, main was verified once, and bad went back.
+      const built = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'landing.batch_built' ORDER BY seq").map((r) => (JSON.parse(r.payload) as { members: { task: string }[] }).members.map((m) => m.task));
+      expect(built).toEqual([[first.task], [bad.task, third.task], [bad.task], [third.task]]);
+      expect(query(e, "SELECT 1 FROM events WHERE kind = 'landing.batch_split'")).toHaveLength(1);
+      expect(query(e, "SELECT 1 FROM events WHERE kind = 'landing.batch_baseline'")).toHaveLength(1);
+      expect(query<{ pr_url: string; state: string }>(e, "SELECT pr_url, state FROM verifications WHERE pr_url LIKE 'base:%'").map((v) => v.state)).toEqual(["passed"]);
+      expect(query(e, "SELECT 1 FROM events WHERE kind = 'landing.batch_sent_back' AND task_id = ?1", bad.task)).toHaveLength(1);
+      expect(e.fleet.events(bad.run).filter((k) => k === "verify.sent_back")).toHaveLength(1);
+      expect(query<{ reason: string }>(e, "SELECT reason FROM landing_queue WHERE task_id = ?1", bad.task).map((r) => r.reason)).toEqual(["culprit"]);
       const merges = query<{ task_id: string; state: string }>(e, "SELECT task_id, state FROM merges ORDER BY requested_at, rowid");
       expect(merges.map((m) => [m.task_id, m.state])).toEqual([
         [first.task, "merged"],
-        [opened!.fix_task, "merged"],
-        [second.task, "merged"],
+        [third.task, "merged"],
       ]);
-      expect(query(e, "SELECT 1 FROM events WHERE kind IN ('landing.batch_held','verify.sent_back')")).toHaveLength(0);
-      expect(query(e, "SELECT 1 FROM landing_batches WHERE fix_task IS NOT NULL")).toHaveLength(1);
-      expect(sh(e.fleet.repo, ["for-each-ref", "refs/heads/flowryn/batch/"])).toBe("");
-      for (const run of [first.run, second.run, fixRun!.id]) await e.fleet.waitRun(run, (r) => r.state === "cleaned", "cleanup");
+      const onMain = sh(e.fleet.repo, ["ls-tree", "--name-only", "main"]).split("\n");
+      expect(onMain).toEqual(expect.arrayContaining(["one.txt", "three.txt"]));
+      expect(onMain).not.toContain("bad.txt");
+      // Nothing waited on a person.
+      expect(query(e, "SELECT 1 FROM items WHERE kind IN ('landing_batch_held','auto_merge_held')")).toHaveLength(0);
+      expect(query(e, "SELECT 1 FROM landing_batches WHERE state = 'held'")).toHaveLength(0);
+      for (const { run } of [first, third]) await e.fleet.waitRun(run, (r) => r.state === "cleaned", "cleanup");
     },
     { timeout: 360_000 },
   );

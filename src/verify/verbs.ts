@@ -295,9 +295,9 @@ const batchScope = { kind: "ref", arg: "batch" } as const;
 
 const batchDrop: VerbSpec = {
   name: "batch drop",
-  summary: "Drop one branch from a held landing batch: it goes back to its worker with the failing log, and the rest are verified again",
+  summary: "Drop one branch from a verifying or held landing batch: it goes back to its worker (with the failing log, if its verify failed), and the rest are verified again",
   positionals: [
-    { name: "batch", required: true, help: "the held landing batch (lb<n>)" },
+    { name: "batch", required: true, help: "the verifying or held landing batch (lb<n>)" },
     { name: "task", required: true, help: "the branch's task to drop", complete: "task" },
   ],
   flags: {},
@@ -312,7 +312,7 @@ const batchDrop: VerbSpec = {
 
 const batchRetry: VerbSpec = {
   name: "batch retry",
-  summary: "Retry a held landing batch: a failed verify runs once more at the same head (once per head); a batch held for main moving or a cancelled verify is rebuilt on main",
+  summary: "Retry a held landing batch: it ends and its branches form a new batch on main as it is, verified afresh; as often as needed",
   positionals: [{ name: "batch", required: true, help: "the held landing batch (lb<n>)" }],
   flags: {},
   kind: "mutation",
@@ -320,7 +320,7 @@ const batchRetry: VerbSpec = {
   scope: batchScope,
   apply(ctx, args) {
     const batch = batchesOf(ctx).retry(stringArg(args, "batch")!, "cli");
-    return { data: { batch: batch.id, state: batch.state, head: batch.head_sha.slice(0, 8), request: batch.request_id ?? "-" }, hints: [`flowryn show ${batch.id}`] };
+    return { data: { batch: batch.id, state: batch.state, head: batch.head_sha.slice(0, 8), next: "its branches form a new batch on the next pass" }, hints: [`flowryn show ${batch.id}`] };
   },
 };
 

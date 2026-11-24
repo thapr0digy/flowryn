@@ -1089,6 +1089,18 @@ ALTER TABLE approvals_v69 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 `;
 
+/**
+ * Migration 70, landing batches split on red and retry by themselves
+ * (docs/notes/2026-11-21-landing-batches-one-27.md "Split and retry"): a batch's automatic
+ * retries of a failure that looks environmental and when the next one may start, and its split
+ * stack (JSON {since, halves}: the halves of a red batch still to verify, in line order).
+ */
+const BATCH_SPLIT_SQL = /* sql */ `
+ALTER TABLE landing_batches ADD COLUMN auto_retries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE landing_batches ADD COLUMN retry_at INTEGER;
+ALTER TABLE landing_batches ADD COLUMN split_rest TEXT;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1388,6 +1400,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 67, name: "project-removed", sql: PROJECT_REMOVED_SQL },
   { version: 68, name: "lesson-correction", sql: LESSON_CORRECTION_SQL },
   { version: 69, name: "evidence-gates", sql: EVIDENCE_GATES_SQL, rebuildsReferencedTable: true },
+  { version: 70, name: "batch-split", sql: BATCH_SPLIT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
