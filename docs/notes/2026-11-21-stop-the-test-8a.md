@@ -20,7 +20,7 @@ The guard signals only processes it saw under the test process, and only while t
 ## The fixes the guard found and the task named
 
 - A fleet's or leader env's teardown kills its daemon with SIGKILL, then `reapOwned` ends the process groups the daemon's ledger (`<state_dir>/owned`) still names, through the daemon's own startup recovery (`recoverOwnedProcesses`), by recorded identity.
-- `waitForFileShell(path, { limitS, exitWithParent })` (test/helpers/harness.ts) is the wait-on-file loop: it gives up after 60 s, or as soon as the process that started it is gone. The capacity and landing-queue verify gates use it; the pausing tasks-axi wrapper uses it with `exitWithParent: false`, since a crash test means it to outlive its daemon.
+- `waitForFileShell(path, { exitWithParent })` (test/helpers/harness.ts) is the wait-on-file loop: it gives up after 60 s, or as soon as the process that started it is gone. The capacity and landing-queue verify gates use it; the pausing tasks-axi wrapper uses it with `exitWithParent: false`, since a crash test means it to outlive its daemon.
 - The fake Herdr remembers every harness it spawned, not only each pane's newest, and ends them all at its stop; a start that reaches a stopped server spawns nothing.
 - A fake harness exits, with its process group, once the test process that started it is gone.
 

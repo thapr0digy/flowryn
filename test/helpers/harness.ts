@@ -20,20 +20,19 @@ const MAIN = join(REPO_ROOT, "src/main.ts");
 export const WAIT_FILE_LIMIT_S = 60;
 
 export interface WaitFileOptions {
-  limitS?: number;
   /** Give up as soon as the process that started the shell is gone (default true). A crash test's wrapper that must outlive its daemon passes false. */
   exitWithParent?: boolean;
 }
 
 /**
  * A shell loop that waits for `path` to exist, with a bounded life: it exits 1
- * once `limitS` seconds of polls have passed, or as soon as the process that
+ * once `WAIT_FILE_LIMIT_S` seconds of polls have passed, or as soon as the process that
  * started it is gone (a daemon a teardown force-killed), so a test that ends
  * without writing the file never leaves it spinning. Ends the shell on giving
  * up, so what follows it in the same script runs only once the file is there.
  */
 export function waitForFileShell(path: string, options: WaitFileOptions = {}): string {
-  const polls = Math.ceil((options.limitS ?? WAIT_FILE_LIMIT_S) * 20);
+  const polls = WAIT_FILE_LIMIT_S * 20;
   const parent = options.exitWithParent === false ? "" : "kill -0 $PPID 2>/dev/null || exit 1; ";
   return `fw_polls=0; while [ ! -f ${JSON.stringify(path)} ]; do ${parent}fw_polls=$((fw_polls + 1)); [ $fw_polls -gt ${polls} ] && exit 1; sleep 0.05; done`;
 }
