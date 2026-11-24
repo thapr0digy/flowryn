@@ -187,7 +187,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
     if (!annotationsUnread) tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
     const local = localEvidence(mc, project.id, canonicalPrUrl(ref, mc.github.web_url), pr.headSha, notStarted);
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
-    const loosening = pr.state === "open" ? await readLoosening(mc.db, mc.git, run, project, pr.headSha, true) : undefined;
+    const loosening = pr.state === "open" ? await readLoosening(mc.git, run, project, pr.headSha, true) : undefined;
     return { ...base, head: pr.headSha, pr, checks, remote, ...(commits ? { commits } : {}), ...(local ? { local } : {}), ...(loosening ? { loosening } : {}) };
   }
   const head = (await out(mc.git, run.worktree_path, ["rev-parse", "HEAD"])) ?? "";
@@ -201,7 +201,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
     head !== "" && (batch ? (await ancestor(`refs/heads/${project.default_branch}`, batch.head_sha)) && (await ancestor(head, batch.head_sha)) : await ancestor(`refs/heads/${project.default_branch}`, head));
   const local = batch ? localEvidence(mc, project.id, batchRef(project.id, batch.id), batch.head_sha, []) : localEvidence(mc, project.id, base.ref, head, []);
   const commits = head === "" ? null : await branchCommits(mc.git, project.path, project.default_branch, head);
-  const loosening = await readLoosening(mc.db, mc.git, run, project, head, false);
+  const loosening = await readLoosening(mc.git, run, project, head, false);
   return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, commits, ...(local ? { local } : {}), ...(loosening ? { loosening } : {}) };
 }
 

@@ -10,12 +10,15 @@ import { getVerification } from "./store.ts";
  * views. A rebuild is a new batch, and the old one ends `dissolved`.
  *
  *   verifying → landing → landed
- *       ↘ fixing (a red verify: one fix task on top of the batch) → verifying (at the fix's head)
- *       ↘ held (a second red, a fix that failed or ran late, a timeout: the leader drops a branch or retries)
+ *       ↘ verifying (a failure that looks environmental: retried after a backoff, src/verify/batch-retry.ts)
+ *       ↘ dissolved: split (a red batch of two or more: a new batch of its first half), sent_back or
+ *         held_member (a lone member's red goes back to its worker; a lone machine failure holds that entry)
+ *       ↘ held (main_red: main itself fails; base_moving; verify_cancelled: the leader retries or drops a branch)
  *   landing ↘ held (loosened_gate: a fix loosens a gate) → landing once the leader countersigns it (src/policy/countersign.ts)
  *   any live state ↘ dissolved (rebuilt, emptied, or batch mode off)
+ *   fixing: a batch fixed forward before migration 70 (legacy rows; dissolved on sight)
  *
- * The one place a batch's head moves: its fix's delivery, a fast-forward of the head it started on.
+ * A batch's head never moves: a change of members is a new batch.
  */
 
 export const BATCH_STATES = ["verifying", "fixing", "landing", "held", "landed", "dissolved"] as const;
@@ -59,19 +62,24 @@ export interface BatchRow {
   verification_id: string | null;
   /** Rebuilds because main moved under it, carried across rebuilds. */
   integrations: number;
-  /** The head a leader's retry already re-verified once. */
+  /** Legacy (before migration 70): the head a leader's retry re-verified once. A retry now rebuilds the batch. */
   retried_head: string | null;
   /** Its open landing_batch_held item. */
   item_id: string | null;
-  /** held or fixing: the likely culprit's task, or null. */
+  /** held: the member the hold names (a gate loosening's fix), or null. */
   culprit: string | null;
-  /** The fix task opened for its red verify (one per batch), the head it starts on, where it stands and since when. */
+  /** A legacy batch's fix-forward task (before migration 70), the head it started on, where it stood and since when. */
   fix_task: string | null;
   fix_base: string | null;
   fix_state: FixState | null;
   fix_since: number | null;
   /** Its one flake rerun, JSON (src/verify/flake.ts BatchFlake), or null. */
   flake: string | null;
+  /** Automatic retries of its head so far (src/verify/batch-retry.ts), and when the next may start. */
+  auto_retries: number;
+  retry_at: number | null;
+  /** Its split stack, JSON (src/verify/batch-retry.ts SplitStack): the halves of a red batch still to verify. */
+  split_rest: string | null;
   reason: string | null;
   detail: string | null;
   created_at: number;
@@ -103,17 +111,29 @@ export function liveBatchAt(db: Db, ref: string, head: string): BatchRow | null 
 }
 
 /**
- * The head a batch's fix task starts from, while the batch still wants that fix (its fix open, the
- * batch fixing or held): what the scheduler starts the task on instead of main's tip.
+ * What a lone batch's baseline verify of main is recorded under (src/verify/landing-batch.ts): main's
+ * tip, before a red lone member is sent back, when nothing proves main green since the split began.
  */
-export function fixStartOf(db: Db, taskId: string): { batch: string; base: string } | null {
-  const row = db.query(`SELECT id, fix_base FROM landing_batches WHERE fix_task = ?1 AND fix_state = 'open' AND state IN ('fixing','held')`).get(taskId) as { id: string; fix_base: string } | null;
-  return row ? { batch: row.id, base: row.fix_base } : null;
+export const BASE_REF_PREFIX = "base:";
+export function baseRef(projectId: string, batchId: string): string {
+  return `${BASE_REF_PREFIX}${projectId}/${batchId}`;
 }
 
-/** Whether the task is a landing batch's fix: it lands with its batch, never in a batch of its own. */
-export function isBatchFix(db: Db, taskId: string): boolean {
-  return db.query("SELECT 1 FROM landing_batches WHERE fix_task = ?1").get(taskId) !== null;
+/** A live lone batch by its baseline ref and main's tip: what keeps its baseline request wanted. */
+export function liveBaselineAt(db: Db, ref: string, head: string): BatchRow | null {
+  if (!ref.startsWith(BASE_REF_PREFIX)) return null;
+  const batch = getBatch(db, ref.slice(ref.lastIndexOf("/") + 1));
+  return batch && baseRef(batch.project_id, batch.id) === ref && batch.base_sha === head && batch.state === "verifying" && batchMembers(db, batch.id).length === 1 ? batch : null;
+}
+
+/** The project's newest batch that ended (landed or dissolved): its split stack says what verifies next. */
+export function newestEndedBatch(db: Db, projectId: string): BatchRow | null {
+  return db.query("SELECT * FROM landing_batches WHERE project_id = ?1 AND state IN ('landed','dissolved') ORDER BY CAST(substr(id, 3) AS INTEGER) DESC LIMIT 1").get(projectId) as BatchRow | null;
+}
+
+/** A passed verify of `head` under `policy` that finished at or after `since`, under any ref: evidence the head is green. */
+export function passedAtHead(db: Db, head: string, policy: string, since: number): boolean {
+  return db.query("SELECT 1 FROM verifications WHERE head_sha = ?1 AND policy_id = ?2 AND state = 'passed' AND finished_at >= ?3 LIMIT 1").get(head, policy, since) !== null;
 }
 
 /** Every entry that was ever in the batch, in batch order. */
@@ -148,13 +168,18 @@ export function batchVerify(db: Db, batch: BatchRow): string | null {
   return null;
 }
 
+/** Where a verifying batch stands: its retry's wait (its detail, while `retry_at` is set), else its verify. */
+export function verifyingStage(db: Db, batch: BatchRow): string {
+  if (batch.retry_at !== null) return batch.detail ?? "waiting to retry its verify";
+  return batchVerify(db, batch) ?? "verifying";
+}
+
 /** A batch in a line: "lb3 verifying v41, 3 branches on main 1a2b3c4d", "lb3 held: ...". */
 export function batchLine(db: Db, batch: BatchRow): string {
   const members = batchMembers(db, batch.id);
   const what = `${members.length} branch${members.length === 1 ? "" : "es"} on main ${batch.base_sha.slice(0, 8)}`;
   if (batch.state === "held") return `${batch.id} held, ${what}: ${batch.detail ?? batch.reason ?? "-"}`;
-  if (batch.state === "fixing") return `${batch.id} fixing (${batch.fix_task ?? "-"}), ${what}: ${batch.detail ?? "-"}`;
   if (batch.state === "landing") return `${batch.id} landing, ${what}${batch.detail ? `: ${batch.detail}` : ""}`;
-  if (batch.state === "verifying") return `${batch.id} ${batchVerify(db, batch) ?? "verifying"}, ${what}`;
+  if (batch.state === "verifying") return `${batch.id} ${verifyingStage(db, batch)}, ${what}`;
   return `${batch.id} ${batch.state}${batch.reason ? ` (${batch.reason})` : ""}${batch.detail ? `: ${batch.detail}` : ""}`;
 }

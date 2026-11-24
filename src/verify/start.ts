@@ -11,7 +11,7 @@ import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
 import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, poolHolders } from "../sched/pools.ts";
 import { hostState } from "../sched/scheduler.ts";
-import { BATCH_REF_PREFIX, liveBatchAt } from "./batch-store.ts";
+import { BASE_REF_PREFIX, BATCH_REF_PREFIX, liveBaselineAt, liveBatchAt } from "./batch-store.ts";
 import { lightVerifyConfig, verifyConfig, type VerifyConfig } from "./config.ts";
 import { pendingFlakeAt, withRerun } from "./flake.ts";
 import { verifyPolicyId } from "./policy.ts";
@@ -238,6 +238,11 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     // A landing batch's head (src/verify/landing-batch.ts): in the object store, wanted while its batch is live at that head.
     if (request.pr_url.startsWith(BATCH_REF_PREFIX)) {
       if (!liveBatchAt(deps.db, request.pr_url, request.head_sha)) return { cancel: `the landing batch ${request.pr_url.slice(BATCH_REF_PREFIX.length)} no longer tests ${request.head_sha.slice(0, 8)}` };
+      return { start: config, projectPath, base: null };
+    }
+    // A lone landing batch's baseline: main's tip, wanted while that batch waits on it before sending its member back.
+    if (request.pr_url.startsWith(BASE_REF_PREFIX)) {
+      if (!liveBaselineAt(deps.db, request.pr_url, request.head_sha)) return { cancel: `no lone landing batch waits on main ${request.head_sha.slice(0, 8)} for ${request.pr_url.slice(BASE_REF_PREFIX.length)}` };
       return { start: config, projectPath, base: null };
     }
     // A batch project's light check: the entry's delivered head alone, with light_verify, while the entry waits at it.

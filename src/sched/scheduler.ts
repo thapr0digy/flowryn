@@ -17,7 +17,6 @@ import { activeAutoAttempt, autoChecksOn, gateHarness, unverifiedVersion, type H
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import type { PhaseRow } from "../lifecycle/plans.ts";
 import { phaseReadiness } from "../lifecycle/stacks.ts";
-import { fixStartOf } from "../verify/batch-store.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { activateStage, neededPools, positionOf, projectLimit, type StagePos } from "../lifecycle/stages.ts";
@@ -697,10 +696,8 @@ export class Scheduler {
     let started = 0;
     for (const phase of phases) {
       const project = getProject(db, phase.project_id);
-      // A landing batch's fix starts by itself on any project: the batch it fixes holds the project's landings.
-      const fix = fixStartOf(db, phase.task_id);
       // A removed project (flowryn project rm) starts nothing; rm refuses while a phase is open, so this only closes a race.
-      if (!project || project.removed_at != null || (project.autonomy !== "plan" && !fix)) continue;
+      if (!project || project.removed_at != null || project.autonomy !== "plan") continue;
       const task = backlog?.find((t) => t.id === phase.task_id);
       // Not in the backlog yet (its add is still pending), held, parked or already started by hand: wait.
       if (!task || task.state !== "queued" || task.hold) continue;
@@ -729,9 +726,7 @@ export class Scheduler {
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, phase.kind);
-        const checked = await checkStart(this.deps.startDeps, project, account, ready.stack?.branch ?? storedBase(db, phase.task_id));
-        // A batch's fix starts on the batch head (its local flowryn/batch/<id> branch), not main's tip.
-        const start = fix ? { ...checked, base: fix.base } : checked;
+        const start = await checkStart(this.deps.startDeps, project, account, ready.stack?.branch ?? storedBase(db, phase.task_id));
         if (ready.stack && start.base !== ready.stack.head) {
           // Pushed since its delivery: wait for that task to deliver again.
           this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} waits: ${ready.stack.branch} moved past ${ready.stack.task}'s delivered head`);

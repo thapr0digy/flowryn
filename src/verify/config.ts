@@ -74,7 +74,7 @@ export interface VerifyConfig {
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
 // scope and account are read by src/config/accounts.ts, max_workers and review_model by src/config/workflows.ts, release by src/lifecycle/release.ts.
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "light_verify", "gate_pass", "scope", "account", "max_workers", "review_model", "release"]);
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "light_verify", "batch_max", "gate_pass", "scope", "account", "max_workers", "review_model", "release"]);
 
 /** `gate_pass`'s one value: the daemon passes a design or QA review gate on objective evidence. */
 export const GATE_PASS_EVIDENCE = "evidence";
@@ -203,6 +203,10 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   if (raw.landing !== undefined && !LANDING_MODES.includes(raw.landing as LandingMode)) throw new FlowrynError("config_invalid", `${where} landing must be "queue", "batch" or "manual"`);
   if (raw.light_verify !== undefined && raw.landing !== "batch") throw new FlowrynError("config_invalid", `${where} light_verify is the light check of landing = "batch"; set landing = "batch" or remove it`);
   if (raw.landing_train_depth !== undefined) checkTrainDepth(raw.landing_train_depth, where);
+  if (raw.batch_max !== undefined) {
+    if (raw.landing !== "batch") throw new FlowrynError("config_invalid", `${where} batch_max is the batch size of landing = "batch"; set landing = "batch" or remove it`);
+    checkBatchMax(raw.batch_max, where);
+  }
   parseRelease(raw.release, where);
   if (raw.verify === undefined) {
     // Without verify steps the merge gate passes a PR that has no checks: auto-merge would land anything.
@@ -376,5 +380,26 @@ export function landingBatched(config: FlowrynConfig, projectId: string, deliver
 /** Times one landing entry (or batch) is rebuilt on a base that moved under it before it is held. */
 export const MAX_INTEGRATIONS = 3;
 
-/** The most branches one landing batch takes: a red batch holds them all, so it stays small. */
+/** The most branches one landing batch takes, and `batch_max`'s default and upper bound. */
 export const MAX_BATCH = 8;
+
+function checkBatchMax(value: unknown, where: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_BATCH) {
+    throw new FlowrynError("config_invalid", `${where} batch_max must be an integer from 1 (one branch per verify) to ${MAX_BATCH}`);
+  }
+  return value;
+}
+
+/**
+ * `[projects.<id>] batch_max` (docs/notes/2026-11-21-landing-batches-one-27.md): the most branches
+ * one landing batch of the project takes, MAX_BATCH when unset. Never throws: an invalid table was
+ * refused by the daemon, and no batch forms on it.
+ */
+export function batchMax(config: FlowrynConfig, projectId: string): number {
+  try {
+    const raw = projectTable(config, projectId).batch_max;
+    return raw === undefined ? MAX_BATCH : checkBatchMax(raw, `[projects.${projectId}]`);
+  } catch {
+    return MAX_BATCH;
+  }
+}
