@@ -19,8 +19,8 @@ import type { Verification, VerifyStep } from "./store.ts";
  * full verify failed at a step with a `rerun_failed` command is verified once more at the same
  * head, with that step running only the packages or test files that failed, FLAKE_PASSES times in
  * a row. Green, the batch lands, a `verify.flake` event and a flaky_tests row per test record what
- * flaked, and one fix task is filed for the tests that have none. Red, the batch is fixed forward
- * as any red batch is. Plain code: a log parser, a weekly rule and the plan-filing path; no model.
+ * flaked, and one fix task is filed for the tests that have none. Red, the batch is split
+ * as any red batch is (src/verify/batch-retry.ts). Plain code: a log parser, a weekly rule and the plan-filing path; no model.
  *
  * - Only Go (`--- FAIL: TestX` / `FAIL <package>`) and bun (`<file>:` / `(fail) name`) output is
  *   read. A log that names no failure, a build failure, an unhandled error, more than
@@ -187,7 +187,7 @@ export function rerunStep(v: Verification): VerifyStep | null {
 
 /**
  * The rerun a red verify of a batch earns, or why it earns none (null: the step has no
- * rerun_failed command, so it is fixed forward as before, with nothing to record).
+ * rerun_failed command, so it is split as before, with nothing to record).
  */
 export function flakeCandidate(db: Db, config: VerifyConfig, v: Verification, step: VerifyStep, now: number): { flake: BatchFlake } | { refused: string; tests: string[] } | null {
   const index = v.steps.indexOf(step);

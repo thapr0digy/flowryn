@@ -13,11 +13,13 @@ import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { answerDecision } from "../../src/lifecycle/decision-verbs.ts";
 import { countersignOf } from "../../src/policy/countersign.ts";
 import { gitRunner } from "../../src/policy/git.ts";
+import type { HostVerdict } from "../../src/sched/host.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
-import { batchMembers, batchRef, fixBranch, fixStartOf, getBatch, isBatchFix, liveBatch, type BatchRow } from "../../src/verify/batch-store.ts";
+import { batchMembers, batchRef, getBatch, liveBatch, type BatchRow } from "../../src/verify/batch-store.ts";
+import { MAX_AUTO_RETRIES, RETRY_BACKOFF_MS } from "../../src/verify/batch-retry.ts";
 import { pendingIntents } from "../../src/journal/journal.ts";
-import { landingBatched, landingMode, landingQueued, landingTrainDepth, lightVerifyConfig, verifyConfig } from "../../src/verify/config.ts";
-import { batchView, FIX_DEADLINE_MS, landingBoardLines } from "../../src/verify/landing-batch.ts";
+import { batchMax, landingBatched, landingMode, landingQueued, landingTrainDepth, lightVerifyConfig, MAX_BATCH, verifyConfig } from "../../src/verify/config.ts";
+import { batchView, landingBoardLines } from "../../src/verify/landing-batch.ts";
 import { landingCell, landingProgress, LandingQueue, liveLanding, type LandingRow } from "../../src/verify/landing-queue.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { findQueued, getRequest, markStarted } from "../../src/verify/queue.ts";
@@ -97,12 +99,12 @@ function ship(n: number, files: Record<string, string>, opts: { sensitive?: bool
 }
 
 const cleanups: string[] = [];
-function queue(cfg = config()): LandingQueue {
+function queue(cfg = config(), host?: () => Promise<HostVerdict>): LandingQueue {
   const delivery = inertDelivery({ git, cleanup: async (runId) => {
     cleanups.push(runId);
     return { outcome: "cleaned" } as never;
   } });
-  return new LandingQueue({ db, config: () => cfg, git, netGit: git, now: () => now, log: () => {}, kickScheduler: () => {}, delivery });
+  return new LandingQueue({ db, config: () => cfg, git, netGit: git, now: () => now, log: () => {}, kickScheduler: () => {}, delivery, ...(host ? { host } : {}) });
 }
 
 function row(s: Ship): LandingRow {
@@ -170,6 +172,29 @@ describe("config", () => {
     // The light check has its own policy; the full verify's is unchanged by it.
     expect(lightPolicy()).not.toBe(fullPolicy(config("", true)));
     expect(fullPolicy(config("", true))).toBe(fullPolicy(config()));
+  });
+
+  test("batch_max: an integer from 1 to 8, only with landing = \"batch\"; 8 when unset; shown in the effective config", () => {
+    expect(batchMax(config(), "web")).toBe(MAX_BATCH);
+    expect(batchMax(config("batch_max = 3\n"), "web")).toBe(3);
+    expect(verifyConfig(config("batch_max = 1\n"), "web")).not.toBeNull();
+    for (const bad of ["0", "9", "2.5", '"4"']) expect(() => verifyConfig(config(`batch_max = ${bad}\n`), "web")).toThrow(/batch_max must be an integer from 1 \(one branch per verify\) to 8/);
+    expect(() => verifyConfig(parseConfig(`[projects.web]\nverify = ["x"]\nbatch_max = 2\n`, dir), "web")).toThrow(/batch_max is the batch size of landing = "batch"/);
+    // An invalid table never throws here: the daemon refused it already.
+    expect(batchMax(config("batch_max = 99\n"), "web")).toBe(MAX_BATCH);
+    expect(effectiveConfig(config("batch_max = 2\n"), {}, { web: "local-only" })).toMatchObject({ sections: { projects: { web: { landing: "batch", batch_max: 2 } } } });
+  });
+
+  test("batch_max = 1 builds batches of one branch, in line order", async () => {
+    const s1 = ship(1, { "one.txt": "one\n" });
+    const s2 = ship(2, { "two.txt": "two\n" });
+    const cfg = config("batch_max = 1\n");
+    const lq = queue(cfg);
+    await lq.pass();
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s1.task]);
+    verifyBatch("passed", [], cfg);
+    await lq.pass();
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s2.task]);
   });
 
   test("batch on a project that delivers PRs is refused where the project's mode is known: the effective config and project set", () => {
@@ -345,389 +370,314 @@ describe("conflicts and clashes", () => {
   });
 });
 
-describe("a red batch", () => {
-  test("held with the likely culprit and one leader item; drop sends that branch back and a new batch of the rest is verified; retry once per head", async () => {
-    const s1 = ship(1, { "pkg/store/store.go": "package store\n" });
-    const s2 = ship(2, { "pkg/web/web.go": "package web\n" });
-    const s3 = ship(3, { "README.md": "hi\n" });
-    const lq = queue();
-    await lq.pass();
-    const b = batchOf();
-    const v = verifyBatch("failed", failedStep("bun test", "--- FAIL: TestSave (0.00s)\n    store_test.go:12: wrong\nFAIL\texample.com/app/pkg/store\t0.01s\n"));
-    await lq.pass();
-    // A failing step opens the batch's fix first; no delivery within the deadline holds it for the leader.
-    const fixing = getBatch(db, b.id)!;
-    expect(fixing).toMatchObject({ state: "fixing", reason: "verify_failed", culprit: s1.task, verification_id: v.id, fix_state: "open" });
-    now += FIX_DEADLINE_MS + 1;
-    await lq.pass();
+describe("split on red (docs/notes/2026-11-21-landing-batches-one-27.md \"Split and retry\")", () => {
+  const BAD_LOG = "--- FAIL: TestBudget (0.00s)\n    budget_test.go:9: over budget\nFAIL\texample.com/app/pkg/budget\t0.01s\n";
+  const basePolicy = () => fullPolicy();
+  const queuedBaseline = () => db.query("SELECT * FROM verify_queue WHERE pr_url LIKE 'base:%' AND state = 'queued'").get() as { pr_url: string; head_sha: string } | null;
 
-    const held = getBatch(db, b.id)!;
-    expect(held).toMatchObject({ state: "held", reason: "verify_failed", culprit: s1.task, verification_id: v.id });
-    expect(held.detail).toContain(`likely ${s1.task}`);
-    expect(held.detail).toContain(`its fix ${fixing.fix_task} was not delivered within 60 min`);
-    const items = db.query("SELECT kind, line, task_id FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { kind: string; line: string; task_id: string | null }[];
-    expect(items).toHaveLength(1);
-    expect(items[0]!.line).toContain(`flowryn batch drop ${b.id} ${s1.task} | flowryn batch retry ${b.id}`);
-    expect(items[0]!.task_id).toBe(s1.task);
-    expect(batchView(db, held)).toMatchObject({ batch: b.id, state: "held", culprit: s1.task });
-    expect(landingProgress(db, row(s2))).toContain(`landing batch ${b.id}: 2 of 3, held:`);
-    // Held: nothing lands, a pass leaves it be.
-    await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("held");
-
-    // retry: once at this head. The fix, never started, is no longer wanted: dropped from the backlog.
-    tx(db, () => lq.batches.retry(b.id));
-    expect(getBatch(db, b.id)).toMatchObject({ state: "verifying", retried_head: b.head_sha, fix_state: "ended" });
-    expect(db.query("SELECT task_id, dropped_by FROM drops").all()).toEqual([{ task_id: fixing.fix_task, dropped_by: "daemon" }]);
-    expect(db.query("SELECT state FROM items WHERE kind = 'landing_batch_held'").get()).toEqual({ state: "resolved" });
-    await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("verifying");
-    verifyBatch("failed", failedStep("bun test", "FAIL\texample.com/app/pkg/store\t0.01s\n"));
-    await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("held");
-    expect(() => tx(db, () => lq.batches.retry(b.id))).toThrow(/already retried/);
-    expect(() => tx(db, () => lq.batches.drop(b.id, "t9"))).toThrow(/t9 is not in landing batch/);
-
-    tx(db, () => lq.batches.drop(b.id, s1.task));
-    expect(row(s1)).toMatchObject({ state: "left", reason: "dropped" });
-    expect(runState(s1)).toBe("running");
-    expect(note(s1)).toContain(`Your leader dropped your branch from landing batch ${b.id}`);
-    expect(note(s1)).toContain("It was named the likely culprit");
-
-    await lq.pass();
-    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "rebuilt" });
-    const next = batchOf();
-    expect(batchMembers(db, next.id).map((r) => r.task_id)).toEqual([s2.task, s3.task]);
-    expect(db.query("SELECT state FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all()).toEqual([]);
-    verifyBatch("passed");
-    await lq.pass();
-    expect([runState(s2), runState(s3)]).toEqual(["landed", "landed"]);
-    expect(sh(primary, ["ls-tree", "-r", "--name-only", "main"]).split("\n")).not.toContain("pkg/store/store.go");
-  });
-
-  test("a verify timeout runs once more before it holds", async () => {
-    ship(1, { "one.txt": "one\n" });
-    const lq = queue();
-    await lq.pass();
-    const b = batchOf();
-    verifyBatch("failed", timedOut());
-    await lq.pass();
-    const rerun = getBatch(db, b.id)!;
-    expect(rerun.state).toBe("verifying");
-    expect(getRequest(db, rerun.request_id!)).toMatchObject({ state: "queued", head_sha: b.head_sha });
-    expect(events("verify.auto_rerun")).toHaveLength(1);
-    verifyBatch("failed", timedOut());
-    await lq.pass();
-    expect(getBatch(db, b.id)).toMatchObject({ state: "held", reason: "verify_failed" });
-    expect(mainTip()).not.toBe(b.head_sha);
-  });
-});
-
-describe("fix forward", () => {
-  const STORE_LOG = "--- FAIL: TestSave (0.00s)\n    store_test.go:12: wrong\nFAIL\texample.com/app/pkg/store\t0.01s\n";
-
-  /** Two routine branches in one batch, its verify red at a failing step, and the pass that judges it. */
-  async function redBatch(): Promise<{ lq: LandingQueue; b: BatchRow; s1: Ship; s2: Ship; v: Verification }> {
-    const s1 = ship(1, { "pkg/store/store.go": "package store\n" });
-    const s2 = ship(2, { "pkg/web/web.go": "package web\n" });
-    const lq = queue();
-    await lq.pass();
-    const b = batchOf();
-    const v = verifyBatch("failed", failedStep("bun test", STORE_LOG));
-    await lq.pass();
-    return { lq, b, s1, s2, v };
+  /**
+   * Play the verify runner until the line is empty: each batch head fails when it holds a branch in
+   * `bad`, and each baseline of main fails when `mainRed`. Returns the members of each batch verified, in order.
+   */
+  async function bisect(lq: LandingQueue, bad: Set<string>, opts: { mainRed?: boolean } = {}): Promise<string[][]> {
+    const verified: string[][] = [];
+    for (let i = 0; i < 40; i++) {
+      const base = queuedBaseline();
+      if (base) runVerify(base.pr_url, base.head_sha, basePolicy(), opts.mainRed ? "failed" : "passed", opts.mainRed ? failedStep("bun test", "FAIL\texample.com/app/pkg/main\t0.01s\n") : []);
+      else {
+        const b = liveBatch(db, "web");
+        if (b && b.state !== "verifying") break;
+        if (b && findQueued(db, batchRef("web", b.id), b.head_sha, fullPolicy())) {
+          const members = batchMembers(db, b.id).map((r) => r.task_id);
+          verified.push(members);
+          verifyBatch(members.some((t) => bad.has(t)) ? "failed" : "passed", members.some((t) => bad.has(t)) ? failedStep("bun test", BAD_LOG) : []);
+        } else if (!b && !db.query("SELECT 1 FROM landing_queue WHERE project_id = 'web' AND state = 'waiting'").get()) break;
+      }
+      await lq.pass();
+    }
+    return verified;
   }
 
-  /** The fix worker's part: a run of the fix task on its own branch from flowryn/batch/<id>, delivered with one commit. */
-  const deliverFix = (b: BatchRow, files: Record<string, string> = { "pkg/store/fix.go": "package store\n" }) => ship(9, files, { task: getBatch(db, b.id)!.fix_task!, from: fixBranch(b.id) });
+  const ships = (n: number) => Array.from({ length: n }, (_, i) => ship(i + 1, { [`f${i + 1}.txt`]: `${i + 1}\n` }));
+  const openHeld = () => db.query("SELECT kind, task_id FROM items WHERE kind IN ('landing_batch_held','auto_merge_held') AND state = 'open'").all() as { kind: string; task_id: string }[];
 
-  test("a red batch opens one fix task through the plan-phase path, starting at the batch head; its delivery is verified again and lands every member and the fix", async () => {
-    const { lq, b, s1, s2, v } = await redBatch();
-
-    const fixing = getBatch(db, b.id)!;
-    expect(fixing).toMatchObject({ state: "fixing", reason: "verify_failed", culprit: s1.task, verification_id: v.id, fix_state: "open", fix_base: b.head_sha, fix_since: now });
-    const task = fixing.fix_task!;
-    // The plan-phase start path: an approved one-phase plan, its task a queued ship with auto set, its backlog add an intent.
-    expect(db.query("SELECT state, filed_by FROM plans").all()).toEqual([{ state: "approved", filed_by: `daemon (landing batch ${b.id})` }]);
-    expect(db.query("SELECT kind, auto, sensitive, yolo, workflow FROM task_policy WHERE task_id = ?1").get(task)).toEqual({ kind: "ship", auto: 1, sensitive: 0, yolo: 1, workflow: "fix" });
-    const adds = pendingIntents(db, "backlog").filter((i) => i.task_id === task);
-    expect(adds.map((i) => i.verb)).toEqual(["add"]);
-    // It starts on the local branch flowryn/batch/<id> at the batch head, which is what the scheduler starts it from.
-    expect(sh(primary, ["rev-parse", `refs/heads/${fixBranch(b.id)}`])).toBe(b.head_sha);
-    expect(fixStartOf(db, task)).toEqual({ batch: b.id, base: b.head_sha });
-    expect(isBatchFix(db, task)).toBe(true);
-    // Its brief: the failing step and its tail as data, each member with its files, the likely culprit.
-    const brief = (db.query("SELECT body FROM plan_phases WHERE task_id = ?1").get(task) as { body: string }).body;
-    expect(brief).toContain(`verify ${v.id} failed at \`bun test\` (exit 1)`);
-    expect(brief).toContain(`Likely culprit: likely ${s1.task}`);
-    expect(brief).toContain(`- ${s1.task} (${s1.branch}, delivered at ${s1.head.slice(0, 8)}): pkg/store/store.go`);
-    expect(brief).toContain(`- ${s2.task} (${s2.branch}, delivered at ${s2.head.slice(0, 8)}): pkg/web/web.go`);
-    expect(brief).toContain("```\n--- FAIL: TestSave (0.00s)\n    store_test.go:12: wrong");
-    expect(brief).toContain("Never rebase, reset or amend");
-    expect(landingProgress(db, row(s2))).toContain(`landing batch ${b.id}: 2 of 2, fixing: ${task}`);
-    expect(batchView(db, fixing)).toMatchObject({ state: "fixing", fix: { task, state: "open" } });
-    // No item for the leader yet: the fix is under way. A second pass opens no second fix.
-    expect(db.query("SELECT 1 FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all()).toEqual([]);
+  test("one bad branch of eight: seven verifies, the green halves land on the way, the bad one goes back with its step and log, nobody is asked", async () => {
+    const all = ships(8);
+    const lq = queue();
     await lq.pass();
-    expect(db.query("SELECT COUNT(*) AS n FROM plans").get()).toEqual({ n: 1 });
-    expect(events("landing.batch_fix_opened")).toEqual([expect.objectContaining({ batch: b.id, task, base: b.head_sha, branch: fixBranch(b.id), step: "bun test", culprit: s1.task })]);
+    const verified = await bisect(lq, new Set(["t6"]));
 
-    // The fix is delivered on top of the batch head: it joins as the last member and is the batch's new head.
-    const fix = deliverFix(b);
-    expect(parents(fix.head)).toEqual([b.head_sha]);
-    await lq.pass();
-    const again = getBatch(db, b.id)!;
-    expect(again).toMatchObject({ state: "verifying", head_sha: fix.head, fix_state: "delivered" });
-    expect(batchMembers(db, b.id).map((r) => [r.task_id, r.batch_pos])).toEqual([
-      [s1.task, 1],
-      [s2.task, 2],
-      [task, 3],
-    ]);
-    expect(getRequest(db, again.request_id!)).toMatchObject({ state: "queued", head_sha: fix.head, pr_url: batchRef("web", b.id) });
-    // Once the fix's run started on its own branch, flowryn/batch/<id> is not needed.
-    expect(sh(primary, ["for-each-ref", `refs/heads/${fixBranch(b.id)}`])).toBe("");
-
-    verifyBatch("passed");
-    await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("landed");
-    expect(mainTip()).toBe(fix.head);
-    expect([runState(s1), runState(s2), getRunWithPolicy(db, fix.run)!.state]).toEqual(["landed", "landed", "landed"]);
-    expect((db.query("SELECT task_id FROM merges ORDER BY requested_at, rowid").all() as { task_id: string }[]).map((m) => m.task_id)).toEqual([s1.task, s2.task, task]);
-    // Nothing before the fix was rewritten: both members' merge commits are on main's first-parent line under it.
-    expect(sh(primary, ["rev-list", "--first-parent", `${b.base_sha}..main`]).split("\n")).toEqual([fix.head, b.head_sha, s1.head]);
-    expect(parents(b.head_sha)).toEqual([s1.head, s2.head]);
+    expect(verified).toEqual([["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"], ["t1", "t2", "t3", "t4"], ["t5", "t6", "t7", "t8"], ["t5", "t6"], ["t5"], ["t6"], ["t7", "t8"]]);
+    expect(all.map((s) => runState(s))).toEqual(["landed", "landed", "landed", "landed", "landed", "running", "landed", "landed"]);
+    expect(row(all[5]!)).toMatchObject({ state: "left", reason: "culprit" });
+    expect(note(all[5]!)).toContain("Landing batch: the daemon's flowryn verify");
+    expect(note(all[5]!)).toContain("again with your branch alone merged onto main");
+    expect(note(all[5]!)).toContain("budget_test.go:9: over budget");
+    expect(events("landing.batch_split")).toHaveLength(3);
+    expect(events("landing.batch_split")[0]).toMatchObject({ cause: "red", first: ["t1", "t2", "t3", "t4"], rest: ["t5", "t6", "t7", "t8"] });
+    expect(events("landing.batch_sent_back")).toEqual([expect.objectContaining({ landing: row(all[5]!).id, step: "bun test" })]);
+    expect(events("verify.sent_back")).toEqual([expect.objectContaining({ landing: row(all[5]!).id, step: "bun test" })]);
+    // main had a green verify at its tip since the split began (t5's batch): no baseline was needed.
+    expect(events("landing.batch_baseline")).toEqual([]);
+    expect(openHeld()).toEqual([]);
+    // Each landed branch has its own merge record; the bad one's code never reached main.
+    expect((db.query("SELECT task_id FROM merges ORDER BY requested_at, rowid").all() as { task_id: string }[]).map((m) => m.task_id)).toEqual(["t1", "t2", "t3", "t4", "t5", "t7", "t8"]);
+    expect(sh(primary, ["ls-tree", "--name-only", "main"]).split("\n")).not.toContain("f6.txt");
+    for (const s of all) expect(sh(s.wt, ["rev-parse", "HEAD"])).toBe(s.head);
   });
 
-  test("a fix that raises a budget holds the green batch as loosened_gate with a countersign decision; the leader's countersign lands it", async () => {
-    mkdirSync(join(primary, "ui", "tests"), { recursive: true });
-    writeFileSync(join(primary, "ui", "tests", "budget.json"), '{ "brief": 228 }\n');
-    sh(primary, ["add", "."]);
-    sh(primary, ["commit", "-q", "-m", "budget"]);
-    const { lq, b, s1, s2 } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    const fix = deliverFix(b, { "pkg/store/fix.go": "package store\n", "ui/tests/budget.json": '{ "brief": 229 }\n' });
+  test("two bad branches: both go back to their workers, the other six land, nothing is held", async () => {
+    const all = ships(8);
+    const lq = queue();
     await lq.pass();
-    const v = verifyBatch("passed");
-    await lq.pass();
+    await bisect(lq, new Set(["t2", "t7"]));
+    expect(all.map((s) => runState(s))).toEqual(["landed", "running", "landed", "landed", "landed", "landed", "running", "landed"]);
+    expect([row(all[1]!).reason, row(all[6]!).reason]).toEqual(["culprit", "culprit"]);
+    expect(openHeld()).toEqual([]);
+  });
 
-    // Green, but not landed: the fix's own diff raises a budget, so it waits for the leader's countersign.
-    const held = getBatch(db, b.id)!;
-    expect(held).toMatchObject({ state: "held", reason: "loosened_gate", culprit: task, verification_id: v.id });
-    expect(mainTip()).toBe(b.base_sha);
-    const decision = countersignOf(db, task, fix.head)!;
-    expect(held.detail).toBe(`${task} loosens a gate; ${decision.id} asks the countersign`);
-    expect(decision.context).toContain("ui/tests/budget.json: raised 228 → 229");
-    expect(decision).toMatchObject({ state: "open", origin: "countersign", options: JSON.stringify(["countersign", "refuse"]), reserved_reason: null });
-    expect(decision.context).toContain(`Proof: verify ${v.id} passed at this head`);
-    expect(events("merge.loosened_gate")).toEqual([expect.objectContaining({ task, head: fix.head, base: b.head_sha, decision: decision.id, proof: `verify ${v.id}` })]);
+  test("all bad: one baseline of main (nothing landed since the split began), then every branch goes back", async () => {
+    const all = ships(4);
+    const lq = queue();
+    await lq.pass();
+    const verified = await bisect(lq, new Set(["t1", "t2", "t3", "t4"]));
+    expect(verified).toEqual([["t1", "t2", "t3", "t4"], ["t1", "t2"], ["t1"], ["t2"], ["t3", "t4"], ["t3"], ["t4"]]);
+    expect(all.map((s) => runState(s))).toEqual(["running", "running", "running", "running"]);
+    expect(events("landing.batch_baseline")).toHaveLength(1);
+    expect(openHeld()).toEqual([]);
+  });
+
+  test("main itself red: the lone branch is not sent back; the batch is held for the leader with main's verify", async () => {
+    const all = ships(2);
+    const lq = queue();
+    await lq.pass();
+    await bisect(lq, new Set(["t1", "t2"]), { mainRed: true });
+    const held = batchOf();
+    expect(held).toMatchObject({ state: "held", reason: "main_red" });
+    expect(held.detail).toContain(`main ${mainTip().slice(0, 8)} itself fails at \`bun test\``);
+    expect(batchMembers(db, held.id).map((r) => r.task_id)).toEqual(["t1"]);
+    expect(all.map((s) => runState(s))).toEqual(["ready", "ready"]);
     const item = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").get() as { line: string };
-    expect(item.line).toContain(`Next: flowryn decide ${decision.id} countersign | flowryn batch drop ${b.id} ${task}`);
-    // Another pass asks nothing twice and lands nothing.
+    expect(item.line).toContain(`flowryn batch retry ${held.id}`);
+    // The leader's retry: a new batch of t1 on main as it is, with t2 next on the stack.
+    tx(db, () => lq.batches.retry(held.id));
     await lq.pass();
-    expect(db.query("SELECT COUNT(*) AS n FROM decisions WHERE origin = 'countersign'").get()).toEqual({ n: 1 });
-    expect(getBatch(db, b.id)!.state).toBe("held");
-
-    tx(db, () => answerDecision({ db, now: () => now }, decision, { choice: "countersign", words: "the brief screen grew by one icon", by: "leader", via: "cli" }));
-    await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("landed");
-    expect(mainTip()).toBe(fix.head);
-    expect([runState(s1), runState(s2), getRunWithPolicy(db, fix.run)!.state]).toEqual(["landed", "landed", "landed"]);
-    expect(events("landing.batch_countersigned")).toEqual([expect.objectContaining({ batch: b.id, from: "held" })]);
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual(["t1"]);
   });
 
-  test("dropping the fix of a batch held for a countersign dismisses its open decision", async () => {
-    const { lq, b } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    const fix = deliverFix(b, { "pkg/store/store_test.go": `package store\n\nfunc TestSave(t *testing.T) { t.Skip${"("}"later") }\n` });
+  test("a timeout is retried by itself after 5 minutes, and a pass then lands the whole batch", async () => {
+    const all = ships(3);
+    const lq = queue();
     await lq.pass();
+    const b = batchOf();
+    const red = verifyBatch("failed", timedOut());
+    await lq.pass();
+    const waiting = getBatch(db, b.id)!;
+    expect(waiting).toMatchObject({ state: "verifying", auto_retries: 1, request_id: null, verification_id: red.id, retry_at: now + RETRY_BACKOFF_MS[0] });
+    expect(waiting.detail).toBe(`verify ${red.id} failed (timeout); retry 1 of 2 in 5 min`);
+    expect(events("landing.batch_auto_retry")).toEqual([expect.objectContaining({ batch: b.id, attempt: 1, cause: "timeout", of: red.id, at: now + RETRY_BACKOFF_MS[0] })]);
+    expect(landingProgress(db, row(all[0]!))).toContain(`retry 1 of 2 in 5 min`);
+    // Not before its backoff.
+    now += RETRY_BACKOFF_MS[0] - 1;
+    await lq.pass();
+    expect(findQueued(db, batchRef("web", b.id), b.head_sha, fullPolicy())).toBeNull();
+    now += 1;
+    await lq.pass();
+    expect(getBatch(db, b.id)).toMatchObject({ retry_at: null });
+    expect(findQueued(db, batchRef("web", b.id), b.head_sha, fullPolicy())).not.toBeNull();
     verifyBatch("passed");
     await lq.pass();
-    const decision = countersignOf(db, task, fix.head)!;
-    expect(decision.state).toBe("open");
-
-    tx(db, () => lq.batches.drop(b.id, task));
-    expect(countersignOf(db, task, fix.head)).toMatchObject({ state: "dismissed" });
-    expect(events("decision.dismissed")).toEqual([expect.objectContaining({ decision: decision.id, origin: "countersign", task })]);
+    expect(all.map((s) => runState(s))).toEqual(["landed", "landed", "landed"]);
+    expect(events("landing.batch_split")).toEqual([]);
   });
 
-  test("a refused countersign keeps the batch held; dropping the fix rebuilds the members from main", async () => {
-    const { lq, b, s1, s2 } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    const fix = deliverFix(b, { "pkg/store/store_test.go": `package store\n\nfunc TestSave(t *testing.T) { t.Skip${"("}"later") }\n` });
+  test("assumption: load counts only while the host check refused on load during the verify, or when the red is judged", async () => {
+    const blocked = (ts: number, reason = "load 2.10 per core, over 1.5") => tx(db, () => appendEvent(db, { source: "daemon", kind: "sched.host_blocked", payload: { ok: false, reason }, ts }));
+    const hostOk = (ts: number) => tx(db, () => appendEvent(db, { source: "daemon", kind: "sched.host_ok", payload: { ok: true, reason: "ok" }, ts }));
+    ships(2);
+    // Blocked on load before the verify, cleared before it started: a plain red, so the batch splits.
+    blocked(now - 20);
+    hostOk(now - 10);
+    let lq = queue();
     await lq.pass();
+    let b = batchOf();
+    verifyBatch("failed", failedStep("bun test", BAD_LOG));
+    await lq.pass();
+    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "split" });
+
+    // Blocked on load while it ran: retried.
+    b = batchOf();
+    const v = runVerify(batchRef("web", b.id), b.head_sha, fullPolicy(), "failed", failedStep("bun test", BAD_LOG));
+    blocked(v.started_at + 1);
+    await lq.pass();
+    expect(getBatch(db, b.id)).toMatchObject({ state: "verifying", auto_retries: 1 });
+    expect(events("landing.batch_auto_retry").at(-1)).toMatchObject({ cause: "load" });
+
+    // Memory, not load, does not count; a host check refusing on load as the red is judged does.
+    hostOk(now);
+    now += RETRY_BACKOFF_MS[0];
+    lq = queue(config(), async () => ({ ok: false, sample: null, reason: "load 3.00 per core, over 1.5" }));
+    await lq.pass();
+    b = batchOf();
+    blocked(now + 1, "2.0 GB available, under 8 GB");
+    verifyBatch("failed", failedStep("bun test", BAD_LOG));
+    await lq.pass();
+    expect(getBatch(db, b.id)).toMatchObject({ state: "verifying", auto_retries: 2 });
+    expect(events("landing.batch_auto_retry").at(-1)).toMatchObject({ cause: "load", attempt: 2 });
+  });
+
+  test("retries used up: a batch of two splits; a lone branch still timing out leaves the line held for the leader, and the next half goes on", async () => {
+    const [s1, s2] = ships(2);
+    const lq = queue();
+    await lq.pass();
+    const timeoutUntilSettled = async () => {
+      const b = batchOf();
+      for (let attempt = 0; attempt <= MAX_AUTO_RETRIES; attempt++) {
+        verifyBatch("failed", timedOut());
+        await lq.pass();
+        now += 15 * 60_000;
+        await lq.pass();
+      }
+      return b;
+    };
+    const pair = await timeoutUntilSettled();
+    expect(getBatch(db, pair.id)).toMatchObject({ state: "dissolved", reason: "split", auto_retries: MAX_AUTO_RETRIES });
+    expect(events("landing.batch_split")).toEqual([expect.objectContaining({ cause: "timeout", first: [s1!.task], rest: [s2!.task] })]);
+    const lone = await timeoutUntilSettled();
+    expect(getBatch(db, lone.id)).toMatchObject({ state: "dissolved", reason: "held_member" });
+    expect(row(s1!)).toMatchObject({ state: "left", reason: "held:verify_timeout" });
+    expect(runState(s1!)).toBe("ready");
+    expect(openHeld()).toEqual([{ kind: "auto_merge_held", task_id: s1!.task }]);
+    expect(events("landing.batch_member_held")).toEqual([expect.objectContaining({ batch: lone.id, code: "verify_timeout" })]);
+    // The rest go on: s2 is the next batch.
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s2!.task]);
     verifyBatch("passed");
     await lq.pass();
-    const decision = countersignOf(db, task, fix.head)!;
-    expect(getBatch(db, b.id)).toMatchObject({ state: "held", reason: "loosened_gate" });
-    expect(decision.context).toContain("adds a test skip");
-
-    tx(db, () => answerDecision({ db, now: () => now }, decision, { choice: "refuse", words: null, by: "leader", via: "cli" }));
-    await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("held");
-    expect(mainTip()).toBe(b.base_sha);
-
-    tx(db, () => lq.batches.drop(b.id, task));
-    await lq.pass();
-    const next = batchOf();
-    expect(next.id).not.toBe(b.id);
-    expect(batchMembers(db, next.id).map((r) => r.task_id)).toEqual([s1.task, s2.task]);
+    expect(runState(s2!)).toBe("landed");
   });
 
-  test("a second red holds the batch for the leader; dropping a branch then cancels the fix and rebuilds the rest from main", async () => {
-    const { lq, b, s1, s2 } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    const fix = deliverFix(b);
+  test("nothing joins a batch while the split stack has halves: a branch delivered during a split lands after it", async () => {
+    ships(4);
+    const lq = queue();
     await lq.pass();
-    const v2 = verifyBatch("failed", failedStep("bun test", STORE_LOG));
+    verifyBatch("failed", failedStep("bun test", BAD_LOG));
     await lq.pass();
-
-    const held = getBatch(db, b.id)!;
-    expect(held).toMatchObject({ state: "held", reason: "verify_failed", culprit: s1.task, verification_id: v2.id, head_sha: fix.head, fix_state: "delivered" });
-    expect(held.detail).toContain(`(after its fix ${task})`);
-    expect(db.query("SELECT COUNT(*) AS n FROM plans").get()).toEqual({ n: 1 });
-    const items = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { line: string }[];
-    expect(items).toHaveLength(1);
-    expect(items[0]!.line).toContain(`flowryn batch drop ${b.id} ${s1.task}`);
-
-    tx(db, () => lq.batches.drop(b.id, s1.task));
-    expect(row(s1)).toMatchObject({ state: "left", reason: "dropped" });
-    expect(row(fix)).toMatchObject({ state: "left", reason: "fix_ended" });
-    // The fix's run is being cancelled: the reconciler stops its worker.
-    expect(db.query("SELECT kind, run_id, requested_by FROM operations WHERE run_id = ?1").all(fix.run)).toEqual([{ kind: "cancel", run_id: fix.run, requested_by: "daemon" }]);
-    expect(getBatch(db, b.id)!.fix_state).toBe("ended");
-    expect(events("landing.batch_fix_ended")).toEqual([expect.objectContaining({ batch: b.id, task, run: fix.run, cancelled: true })]);
-
+    const late = ship(9, { "late.txt": "late\n" });
     await lq.pass();
-    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "rebuilt" });
-    const next = batchOf();
-    expect(next.base_sha).toBe(mainTip());
-    expect(next.fix_task).toBeNull();
-    expect(batchMembers(db, next.id).map((r) => r.task_id)).toEqual([s2.task]);
-    // The rebuilt head holds neither the dropped branch nor the fix.
-    expect(() => sh(primary, ["merge-base", "--is-ancestor", fix.head, next.head_sha])).toThrow();
-    expect(sh(primary, ["ls-tree", "-r", "--name-only", next.head_sha]).split("\n")).not.toContain("pkg/store/fix.go");
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual(["t1", "t2"]);
+    verifyBatch("passed");
+    await lq.pass();
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual(["t3", "t4"]);
+    expect(batchView(db, batchOf())).toMatchObject({ split_rest: [] });
+    verifyBatch("passed");
+    await lq.pass();
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([late.task]);
   });
 
-  test("a fix that ends without a delivery holds the batch; one past the deadline holds it, and its late delivery is still taken", async () => {
-    const { lq, b } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    now += FIX_DEADLINE_MS - 1;
+  test("a split stack survives a rebuild and a member that left; switching batching off clears it", async () => {
+    ships(4);
+    const lq = queue();
     await lq.pass();
-    expect(getBatch(db, b.id)!.state).toBe("fixing");
-    now += 2;
+    verifyBatch("failed", failedStep("bun test", BAD_LOG));
     await lq.pass();
-    const late = getBatch(db, b.id)!;
-    expect(late).toMatchObject({ state: "held", reason: "verify_failed", fix_state: "open" });
-    expect(db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").get()).toEqual({ line: expect.stringContaining("was not delivered within 60 min") });
-    // The flowryn/batch/<id> branch stays while the fix may still start from it.
-    expect(sh(primary, ["rev-parse", `refs/heads/${fixBranch(b.id)}`])).toBe(b.head_sha);
-
-    const fix = deliverFix(b);
-    await lq.pass();
-    expect(getBatch(db, b.id)).toMatchObject({ state: "verifying", head_sha: fix.head, fix_state: "delivered" });
-    expect(db.query("SELECT 1 FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all()).toEqual([]);
-    expect(task).toBe(row(fix).task_id);
-  });
-
-  test("a late fix that then fails ends: the hold names its failure in place of its lateness", async () => {
-    const { lq, b } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    now += FIX_DEADLINE_MS + 1;
-    await lq.pass();
-    const late = getBatch(db, b.id)!;
-    expect(late).toMatchObject({ state: "held", fix_state: "open" });
-    const red = late.detail!.slice(late.detail!.indexOf("; ") + 2);
-
-    const fix = deliverFix(b);
-    tx(db, () => db.query("UPDATE runs SET state = 'failed' WHERE id = ?1").run(fix.run));
-    await lq.pass();
-    const held = getBatch(db, b.id)!;
-    expect(held).toMatchObject({ state: "held", reason: "verify_failed", fix_state: "ended" });
-    expect(held.detail).toBe(`its fix ${task} failed; ${red}`);
-    const items = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { line: string }[];
-    expect(items).toEqual([{ line: expect.stringContaining(`its fix ${task} failed`) }]);
-    expect(items[0]!.line).not.toContain("within 60 min");
-  });
-
-  test("a late fix delivered off the batch head names that fate once, before the verify failure", async () => {
-    const { lq, b } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    now += FIX_DEADLINE_MS + 1;
-    await lq.pass();
-    const late = getBatch(db, b.id)!.detail!;
-    const red = late.slice(late.indexOf("; ") + 2);
-    ship(9, { "pkg/store/fix.go": "package store\n" }, { task, from: "main" });
-    await lq.pass();
-    expect(getBatch(db, b.id)!.detail).toBe(`its fix ${task} was delivered off the batch head; ${red}`);
-  });
-
-  test("a batch held because main kept moving keeps that hold when its fix then fails", async () => {
-    const { lq, b } = await redBatch();
-    tx(db, () => db.query("UPDATE landing_batches SET integrations = 99 WHERE id = ?1").run(b.id));
+    const first = batchOf();
+    expect(batchView(db, first)).toMatchObject({ split_rest: [["t3", "t4"]] });
+    // main moves by hand: rebuilt, the stack carried.
     writeFileSync(join(primary, "hand.txt"), "x\n");
     sh(primary, ["add", "."]);
     sh(primary, ["commit", "-q", "-m", "by hand"]);
     await lq.pass();
-    expect(getBatch(db, b.id)).toMatchObject({ state: "held", reason: "base_moving", fix_state: "open" });
-
-    const fix = deliverFix(b);
-    tx(db, () => db.query("UPDATE runs SET state = 'failed' WHERE id = ?1").run(fix.run));
-    await lq.pass();
-    const held = getBatch(db, b.id)!;
-    expect(held).toMatchObject({ state: "held", reason: "base_moving", fix_state: "ended" });
-    expect(held.detail).toStartWith(`its fix ${fix.task} failed; main moved under the batch`);
-    const items = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { line: string }[];
-    expect(items).toHaveLength(1);
-    expect(items[0]!.line).toEndWith(`Next: flowryn batch retry ${b.id}`);
+    const rebuilt = batchOf();
+    expect(rebuilt.id).not.toBe(first.id);
+    expect(batchView(db, rebuilt)).toMatchObject({ split_rest: [["t3", "t4"]] });
+    // Batching off: dissolved, the stack cleared.
+    await queue(parseConfig(`[projects.web]\nverify = ${JSON.stringify(STEPS)}\nlanding = "queue"\n`, dir)).pass();
+    expect(getBatch(db, rebuilt.id)).toMatchObject({ state: "dissolved", reason: "batching_off", split_rest: null });
   });
 
-  test("a fix whose run fails holds the batch", async () => {
-    const first = await redBatch();
-    const fix = deliverFix(first.b);
-    tx(db, () => db.query("UPDATE runs SET state = 'failed' WHERE id = ?1").run(fix.run));
-    await first.lq.pass();
-    expect(getBatch(db, first.b.id)).toMatchObject({ state: "held", fix_state: "ended" });
-    expect(getBatch(db, first.b.id)!.detail).toContain(`its fix ${fix.task} failed`);
-  });
-
-  test("a fix delivered off the batch head is refused: it ends and the batch is held", async () => {
-    const { lq, b } = await redBatch();
-    const task = getBatch(db, b.id)!.fix_task!;
-    const off = ship(9, { "pkg/store/fix.go": "package store\n" }, { task, from: "main" });
-    await lq.pass();
-    const held = getBatch(db, b.id)!;
-    expect(held).toMatchObject({ state: "held", fix_state: "ended", head_sha: b.head_sha });
-    expect(held.detail).toContain(`its fix ${task} was delivered off the batch head`);
-    expect(row(off)).toMatchObject({ state: "left", reason: "fix_ended" });
-  });
-
-  test("a timeout or an error is not code to fix: no fix task, held as before", async () => {
-    ship(1, { "one.txt": "one\n" });
+  test("the leader's drop works on a verifying batch: its queued verify is cancelled and the rest are rebuilt; retry has no once-per-head limit", async () => {
+    const [s1, s2] = ships(2);
     const lq = queue();
     await lq.pass();
     const b = batchOf();
-    verifyBatch("failed", timedOut());
+    const request = b.request_id!;
+    tx(db, () => lq.batches.drop(b.id, s1!.task));
+    expect(getRequest(db, request)).toMatchObject({ state: "cancelled" });
+    expect(note(s1!)).toContain(`Your leader dropped your branch from landing batch ${b.id} (verifying)`);
+    expect(note(s1!)).toContain("No verify failed on it.");
     await lq.pass();
-    verifyBatch("failed", timedOut());
-    await lq.pass();
-    expect(getBatch(db, b.id)).toMatchObject({ state: "held", fix_task: null });
-    expect(db.query("SELECT COUNT(*) AS n FROM plans").get()).toEqual({ n: 0 });
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s2!.task]);
+    expect(() => tx(db, () => lq.batches.retry(batchOf().id))).toThrow(/only a held batch is retried/);
+    for (let i = 0; i < 2; i++) {
+      tx(db, () => db.query("UPDATE landing_batches SET state = 'held', reason = 'verify_cancelled' WHERE id = ?1").run(batchOf().id));
+      tx(db, () => lq.batches.retry(batchOf().id));
+      await lq.pass();
+      expect(batchOf().state).toBe("verifying");
+    }
   });
 
-  test("a fix's own delivery never takes a light check nor forms a batch of its own", async () => {
-    const lightCfg = config("", true);
-    const s1 = ship(1, { "pkg/store/store.go": "package store\n" });
-    const lq = queue(lightCfg);
-    await lq.pass();
-    runVerify(`local:${s1.branch}`, s1.head, lightPolicy(), "passed", [], s1.task);
+  test("a batch row left fixing by an older daemon is dissolved: its fix task is dropped, its branches form a new batch", async () => {
+    const [s1] = ships(1);
+    const lq = queue();
     await lq.pass();
     const b = batchOf();
-    runVerify(batchRef("web", b.id), b.head_sha, fullPolicy(lightCfg), "failed", failedStep("bun test", STORE_LOG));
+    tx(db, () => db.query("UPDATE landing_batches SET state = 'fixing', fix_task = 'fix-landing-batch-old', fix_state = 'open', fix_base = head_sha WHERE id = ?1").run(b.id));
     await lq.pass();
-    const fix = deliverFix(b);
+    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "rebuilt", fix_state: "ended" });
+    expect(db.query("SELECT task_id, dropped_by FROM drops").all()).toEqual([{ task_id: "fix-landing-batch-old", dropped_by: "daemon" }]);
     await lq.pass();
-    expect(events("landing.light_queued").map((e) => e.landing)).not.toContain(row(fix).id);
-    expect(getBatch(db, b.id)).toMatchObject({ state: "verifying", head_sha: fix.head });
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s1!.task]);
+  });
+});
+
+describe("a gate loosening in a batch", () => {
+  /** Two routine branches (fix workflow), the second raising a budget; the batch's verify green. */
+  async function loosened(files: Record<string, string>): Promise<{ lq: LandingQueue; b: BatchRow; s1: Ship; s2: Ship; v: Verification }> {
+    mkdirSync(join(primary, "ui", "tests"), { recursive: true });
+    writeFileSync(join(primary, "ui", "tests", "budget.json"), '{ "brief": 228 }\n');
+    sh(primary, ["add", "."]);
+    sh(primary, ["commit", "-q", "-m", "budget"]);
+    const s1 = ship(1, { "pkg/store/store.go": "package store\n" });
+    const s2 = ship(2, files);
+    const lq = queue();
+    await lq.pass();
+    const b = batchOf();
+    const v = verifyBatch("passed");
+    await lq.pass();
+    return { lq, b, s1, s2, v };
+  }
+
+  test("a member that raises a budget holds the green batch as loosened_gate with a countersign decision; the leader's countersign lands it", async () => {
+    const { lq, b, s1, s2, v } = await loosened({ "ui/tests/budget.json": '{ "brief": 229 }\n' });
+    const held = getBatch(db, b.id)!;
+    expect(held).toMatchObject({ state: "held", reason: "loosened_gate", culprit: s2.task, verification_id: v.id });
+    expect(mainTip()).toBe(b.base_sha);
+    const decision = countersignOf(db, s2.task, s2.head)!;
+    expect(held.detail).toBe(`${s2.task} loosens a gate; ${decision.id} asks the countersign`);
+    expect(decision.context).toContain("ui/tests/budget.json: raised 228 → 229");
+    const item = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").get() as { line: string };
+    expect(item.line).toContain(`Next: flowryn decide ${decision.id} countersign | flowryn batch drop ${b.id} ${s2.task}`);
+    await lq.pass();
+    expect(db.query("SELECT COUNT(*) AS n FROM decisions WHERE origin = 'countersign'").get()).toEqual({ n: 1 });
+
+    tx(db, () => answerDecision({ db, now: () => now }, decision, { choice: "countersign", words: "the brief screen grew by one icon", by: "leader", via: "cli" }));
+    await lq.pass();
+    expect(getBatch(db, b.id)!.state).toBe("landed");
+    expect([runState(s1), runState(s2)]).toEqual(["landed", "landed"]);
+    expect(events("landing.batch_countersigned")).toEqual([expect.objectContaining({ batch: b.id, from: "held" })]);
+  });
+
+  test("dropping the member of a batch held for a countersign dismisses its open decision; the rest are rebuilt", async () => {
+    const { lq, b, s1, s2 } = await loosened({ "pkg/store/store_test.go": `package store\n\nfunc TestSave(t *testing.T) { t.Skip${"("}"later") }\n` });
+    const decision = countersignOf(db, s2.task, s2.head)!;
+    expect(getBatch(db, b.id)).toMatchObject({ state: "held", reason: "loosened_gate" });
+    expect(decision.context).toContain("adds a test skip");
+
+    tx(db, () => lq.batches.drop(b.id, s2.task));
+    expect(countersignOf(db, s2.task, s2.head)).toMatchObject({ state: "dismissed" });
+    expect(events("decision.dismissed")).toEqual([expect.objectContaining({ decision: decision.id, origin: "countersign", task: s2.task })]);
+    await lq.pass();
+    expect(batchMembers(db, batchOf().id).map((r) => r.task_id)).toEqual([s1.task]);
   });
 });
 
@@ -785,7 +735,7 @@ describe("what keeps a batch honest", () => {
     const held = batchOf();
     expect(held).toMatchObject({ state: "held", reason: "base_moving" });
     tx(db, () => lq.batches.drop(held.id, s1.task));
-    expect(note(s1)).toContain(`Your leader dropped your branch from landing batch ${held.id}, held (base_moving)`);
+    expect(note(s1)).toContain(`Your leader dropped your branch from landing batch ${held.id} (held, base_moving)`);
     expect(note(s1)).not.toContain("failed its verify");
   });
 
@@ -977,20 +927,18 @@ describe("a flaky batch (docs/notes/2026-11-22-phase-flake-earns-a3.md)", () => 
     expect(phase.body).toContain(`(verify ${rerun.id}), and that verify passed.`);
   });
 
-  test("a rerun that fails fixes the batch forward as before, with nothing recorded as flaky; no second rerun at that head", async () => {
-    const { lq, b, red, cfg } = await redBatch();
+  test("a rerun that fails splits the batch as before, with nothing recorded as flaky; no second rerun at that head", async () => {
+    const { lq, b, s1, red, cfg } = await redBatch();
     const rerun = admitted(cfg);
     finish(rerun, "failed", [{ ...failedStep("bun test", STORE_LOG)[0]!, rerun: rerun.steps[0]!.rerun! }]);
     await lq.pass();
 
-    const fixing = getBatch(db, b.id)!;
-    expect(fixing).toMatchObject({ state: "fixing", verification_id: rerun.id, fix_state: "open" });
+    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "split" });
+    expect(events("landing.batch_split")).toEqual([expect.objectContaining({ batch: b.id, of: rerun.id, cause: "red", first: [s1.task] })]);
     expect(events("verify.flake_rerun_failed")).toEqual([expect.objectContaining({ batch: b.id, of: red.id, rerun: rerun.id, ran: true })]);
     expect(events("verify.flake")).toEqual([]);
     expect(flakyRows()).toEqual([]);
     expect(events("verify.flake_rerun")).toHaveLength(1);
-    const brief = (db.query("SELECT body FROM plan_phases WHERE task_id = ?1").get(fixing.fix_task) as { body: string }).body;
-    expect(brief).toContain(`verify ${rerun.id} failed at \`bun test\` (its rerun of the failing tests of ${red.id}) (exit 1)`);
     const briefing = composeBriefing(db, { session: null, now: now + 10, morningHour: 99, ageMs: 60_000, markMorning: false }).text;
     expect(briefing).toContain(`landing batch ${b.id} (web): its failing tests failed again alone (${rerun.id}).`);
   });
@@ -1028,10 +976,10 @@ describe("a flaky batch (docs/notes/2026-11-22-phase-flake-earns-a3.md)", () => 
   });
 
   test("the weekly rule: a test that flaked this week earns another rerun only while its fix task is open; one fix task per test per week", async () => {
-    // Flaked two days ago with no fix task: no rerun, fixed forward, and the refusal says why.
+    // Flaked two days ago with no fix task: no rerun, split, and the refusal says why.
     tx(db, () => db.query("INSERT INTO flaky_tests (project_id, test, target, flakes, first_seen, last_seen, last_verification) VALUES ('web', ?1, 'example.com/app/pkg/store', 1, ?2, ?2, 'v0')").run(TEST, now - 2 * 86_400_000));
     const { b } = await redBatch();
-    expect(getBatch(db, b.id)!.state).toBe("fixing");
+    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "split" });
     expect(events("verify.flake_rerun")).toEqual([]);
     expect(events("verify.flake_refused")).toEqual([expect.objectContaining({ batch: b.id, tests: [TEST], why: expect.stringContaining(`${TEST} already flaked within the week (2 days ago, v0) and has no fix task`) })]);
   });
@@ -1048,9 +996,9 @@ describe("a flaky batch (docs/notes/2026-11-22-phase-flake-earns-a3.md)", () => 
     expect(flakyRows()).toEqual([expect.objectContaining({ test: TEST, flakes: 2, task_id: "fix-flaky-open" })]);
   });
 
-  test("a red whose log names no failing test it can rerun alone is fixed forward, with the refusal recorded", async () => {
+  test("a red whose log names no failing test it can rerun alone is split, with the refusal recorded", async () => {
     const { b } = await redBatch("error: cannot connect to the database\n");
-    expect(getBatch(db, b.id)!.state).toBe("fixing");
+    expect(getBatch(db, b.id)).toMatchObject({ state: "dissolved", reason: "split" });
     expect(events("verify.flake_refused")).toEqual([expect.objectContaining({ batch: b.id, tests: [], why: expect.stringContaining("names no failing tests") })]);
   });
 });

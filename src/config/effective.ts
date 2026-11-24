@@ -1,6 +1,6 @@
 import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { accountsConfig, accountsView } from "./accounts.ts";
-import { autoMergeSetting, landingMode, landingTrainDepth, verifyConfig } from "../verify/config.ts";
+import { autoMergeSetting, batchMax, landingMode, landingTrainDepth, verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
@@ -58,7 +58,7 @@ function projectsView(config: FlowrynConfig, _env: NodeJS.ProcessEnv, modes: Rea
     // The config alone: a local-only project (its mode is in the database) also queues when landing is unset.
     landingMode(config, id, modes[id] ?? null);
     const landing = landingMode(config, id, null);
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landing === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, null) } : landing === "batch" ? { landing: "batch" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landing === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, null) } : landing === "batch" ? { landing: "batch", batch_max: batchMax(config, id) } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
   }
   return out;
 }

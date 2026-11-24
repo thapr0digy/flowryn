@@ -11,7 +11,7 @@ import { findLoosenings, looseningLine, type Loosening } from "./loosening.ts";
 
 /**
  * Countersigned gate loosening (docs/notes/2026-11-22-phase-countersign-gate-7e.md): a fix
- * (a run on the `fix` workflow, or a landing batch's fix-forward) whose diff loosens a gate
+ * (a run on the `fix` workflow) whose diff loosens a gate
  * (src/policy/loosening.ts) merges only once a verifier proved the new number and the leader
  * countersigned it. The proof is the gate's own local green at this head (the batch's verify for
  * a batch member) or, with no verify steps, a PR whose GitHub checks are all green; with neither
@@ -34,27 +34,18 @@ export interface LooseningFacts {
   unread: string | null;
 }
 
-/** The batch a fix-forward task was opened for, with the head it started on; null for any other task. */
-function fixForwardBase(db: Db, taskId: string): string | null {
-  const row = db.query("SELECT fix_base FROM landing_batches WHERE fix_task = ?1 AND fix_base IS NOT NULL ORDER BY created_at DESC LIMIT 1").get(taskId) as { fix_base: string } | null;
-  return row?.fix_base ?? null;
-}
-
 /**
- * Read a fix's diff for loosened gates: a fix-forward's own commits past the batch head it started
- * on; a fix run's commits past its base branch (local, or origin's for a PR). Undefined for a run
- * that is not a fix: the rule does not apply.
+ * Read a fix run's diff for loosened gates: its commits past its base branch (local, or origin's
+ * for a PR). Undefined for a run that is not a fix: the rule does not apply.
  */
-export async function readLoosening(db: Db, git: GitRunner, run: RunWithPolicy, project: ProjectRow, head: string, pr: boolean): Promise<LooseningFacts | undefined> {
-  const fixBase = fixForwardBase(db, run.task_id);
-  if (fixBase === null && run.workflow !== "fix") return undefined;
-  if (head === "") return { base: fixBase ?? "-", found: null, unread: "its head could not be read" };
+export async function readLoosening(git: GitRunner, run: RunWithPolicy, project: ProjectRow, head: string, pr: boolean): Promise<LooseningFacts | undefined> {
+  if (run.workflow !== "fix") return undefined;
+  if (head === "") return { base: "-", found: null, unread: "its head could not be read" };
   const branch = runBase(run, project);
   // A PR's base is origin's branch; a checkout that never fetched it has only the local one.
   const remote = pr && (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`], project.path)).code === 0;
-  const base = fixBase ?? (remote ? `refs/remotes/origin/${branch}` : `refs/heads/${branch}`);
-  const range = fixBase ? [fixBase, head] : [`${base}...${head}`];
-  const diff = await git(["diff", "--unified=0", "--no-renames", "--no-color", "--no-ext-diff", ...range, "--"], project.path);
+  const base = remote ? `refs/remotes/origin/${branch}` : `refs/heads/${branch}`;
+  const diff = await git(["diff", "--unified=0", "--no-renames", "--no-color", "--no-ext-diff", `${base}...${head}`, "--"], project.path);
   if (diff.code !== 0) return { base, found: null, unread: `git diff exited ${diff.code}: ${(diff.stderr || diff.stdout).trim().slice(0, 200) || "no output"}` };
   return { base, found: findLoosenings(diff.stdout), unread: null };
 }
