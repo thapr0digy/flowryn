@@ -63,6 +63,17 @@ function explanationRow(kind: string, closed: string): string {
 }
 
 describe("migrations", () => {
+  // A fresh test database has no rows pointing at a rebuilt table, so a missing flag only fails on a live
+  // database (migration 69 stopped flowrynd on 2026-11-23 with "FOREIGN KEY constraint failed").
+  test("a migration that drops a table another table references sets rebuildsReferencedTable", () => {
+    const allSql = MIGRATIONS.map((m) => m.sql).join("\n");
+    const referenced = new Set([...allSql.matchAll(/REFERENCES\s+(\w+)\s*\(/gi)].map((m) => m[1]!.toLowerCase()));
+    const unflagged = MIGRATIONS.filter((m) => !m.rebuildsReferencedTable)
+      .filter((m) => [...m.sql.matchAll(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)/gi)].some((d) => referenced.has(d[1]!.toLowerCase())))
+      .map((m) => m.version);
+    expect(unflagged).toEqual([]);
+  });
+
   test("a fresh database gets every section 13 table, in WAL mode with foreign keys", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     expect(migrate(db)).toEqual(MIGRATIONS.map((m) => m.version));

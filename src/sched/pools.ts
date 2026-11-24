@@ -114,6 +114,35 @@ export function releaseLeases(db: Db, runId: string, taskId: string | null, opts
 }
 
 /**
+ * The release reason of a worker slot freed at a local delivery on a batch-landing project
+ * (docs/notes/2026-11-22-phase-free-the-rn.md): the worker is retired once idle, and a send-back starts a fresh one.
+ */
+export const FREED_AT_DELIVERY = "delivered to the landing line";
+
+/** Whether the run's latest worker slot was freed at its delivery (a live slot, or one released otherwise, is not). */
+export function workerFreedAtDelivery(db: Db, runId: string): boolean {
+  const row = db.query("SELECT released_by FROM pool_leases WHERE run_id = ?1 AND pool = ?2 ORDER BY id DESC LIMIT 1").get(runId, WORKER_POOL) as { released_by: string | null } | null;
+  return row?.released_by === FREED_AT_DELIVERY;
+}
+
+/**
+ * Delivered runs whose worker runs on no slot: still ready, their slot freed at delivery, the worker
+ * judged idle by the reconciler, no launch pending, no operation open or escalated, and no steer it has not acknowledged.
+ */
+export function workersToRetire(db: Db, runId: string | null = null): { id: string; task_id: string; proc_pid: number }[] {
+  return db
+    .query(
+      `SELECT r.id, r.task_id, r.proc_pid FROM runs r
+       WHERE (?3 IS NULL OR r.id = ?3) AND r.state = 'ready' AND r.proc_pid IS NOT NULL AND r.liveness = 'idle' AND r.pending_launch IS NULL
+         AND (SELECT l.released_by FROM pool_leases l WHERE l.run_id = r.id AND l.pool = ?1 ORDER BY l.id DESC LIMIT 1) = ?2
+         AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.run_id = r.id AND o.phase IN ('requested','effect_issued','escalated'))
+         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.run_id = r.id AND m.acked_at IS NULL)
+       ORDER BY r.id`,
+    )
+    .all(WORKER_POOL, FREED_AT_DELIVERY, runId) as { id: string; task_id: string; proc_pid: number }[];
+}
+
+/**
  * Job leases (docs/notes/2026-10-12-next-steps-md-64.md): heavy work that is
  * not a run, a `flowryn verify`, holds a slot of a pool in job_leases. It is
  * counted by liveCounts with the runs' leases, so the scheduler and a job

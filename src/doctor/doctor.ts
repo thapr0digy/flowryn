@@ -7,7 +7,7 @@ import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts"
 import { divergedMigrations, integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
 import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.ts";
-import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
+import { isLoaded, plistPath, PROCESS_TYPE, readInstalledPlist, selfCommand, serviceLabel } from "../service/launchd.ts";
 import { isLockHeld, tryExclusiveLock } from "../util/flock.ts";
 import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERIFIED_LAVISH_AXI, VERSION } from "../version.ts";
@@ -27,8 +27,10 @@ import { INSTALL_HINTS } from "../init/install.ts";
 import { checkHost } from "../sched/host.ts";
 import { judgeQuota, probeQuota, quotaTarget, type QuotaReading } from "../sched/quota.ts";
 import { resumeCommand } from "../sched/usage.ts";
+import { githubConfig } from "../config/delivery.ts";
+import { ghAuthToken, sendsToken, type GhToken } from "../forge/github.ts";
 import { accountsConfig, type Account } from "../config/accounts.ts";
-import { nmAutoFixChecks } from "./nomistakes.ts";
+import { nmChecks } from "./nomistakes.ts";
 import { brokenGitLink, projectWorktrees, relinkHint } from "../lifecycle/relink.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -251,9 +253,36 @@ async function daemonChecks(home: string, config: FlowrynConfig, env: DoctorEnv)
   const plist = plistPath(label);
   if (process.platform === "darwin") {
     if (!existsSync(plist)) checks.push({ check: "launchd", status: "warn", detail: "agent not installed (flowryn daemon install)" });
-    else checks.push({ check: "launchd", status: (await isLoaded(label)) ? "ok" : "warn", detail: `${plist}${(await isLoaded(label)) ? " loaded" : " installed but not loaded"}` });
+    else {
+      const loaded = await isLoaded(label);
+      checks.push({ check: "launchd", status: loaded ? "ok" : "warn", detail: `${plist}${loaded ? " loaded" : " installed but not loaded"}` });
+      checks.push(await processTypeCheck(plist));
+    }
   }
   return checks;
+}
+
+/**
+ * Whether the installed plist runs the daemon unthrottled. A plist written
+ * before ProcessType Interactive leaves launchd's light resource limits on the
+ * daemon and every verify child it runs, so timing checks fail regardless of
+ * the change. `daemon restart` re-bootstraps the same plist, so only a
+ * reinstall applies it.
+ */
+export async function processTypeCheck(plist: string, read: (path: string) => Promise<{ processType: string | null }> = readInstalledPlist): Promise<Check> {
+  let processType: string | null;
+  try {
+    processType = (await read(plist)).processType;
+  } catch (error) {
+    return { check: "launchd throttle", status: "warn", detail: (error as Error).message };
+  }
+  if (processType === PROCESS_TYPE) return { check: "launchd throttle", status: "ok", detail: `ProcessType ${PROCESS_TYPE}` };
+  const found = processType === null ? "no ProcessType" : `ProcessType ${processType}`;
+  return {
+    check: "launchd throttle",
+    status: "warn",
+    detail: `${plist} has ${found}, so launchd throttles the daemon and its verify children (timing checks fail); reinstall to apply: flowryn daemon install`,
+  };
 }
 
 function binaryCheck(): Check | null {
@@ -388,7 +417,7 @@ function notifyCommandChecks(config: FlowrynConfig): Check[] {
  */
 export function checkoutChecks(db: Db): Check[] {
   const checks: Check[] = [];
-  const projects = db.query("SELECT id, path FROM projects ORDER BY id").all() as { id: string; path: string }[];
+  const projects = db.query("SELECT id, path FROM projects WHERE removed_at IS NULL ORDER BY id").all() as { id: string; path: string }[];
   const missing = new Set<string>();
   for (const p of projects) {
     if (existsSync(join(p.path, ".git"))) continue;
@@ -486,6 +515,8 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const binary = binaryCheck();
   if (binary) checks.push(binary);
   checks.push(...toolChecks(config));
+  const token = await githubTokenCheck(config, env.env);
+  if (token) checks.push(token);
   const chromeMcp = chromeMcpCheck(config, env.env);
   if (chromeMcp) checks.push(chromeMcp);
   checks.push(...(await tasksChecks(config)));
@@ -499,12 +530,37 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(await herdrCheck(config));
   checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
-  checks.push(...(await nmAutoFixChecks(config, env.env)));
+  checks.push(...(await nmChecks(config, env.env)));
   const policy = policyCheck(config);
   if (policy) checks.push(policy);
   checks.push(await hostCheckNow(config));
   checks.push(...(await quotaChecks(config)));
   return checks;
+}
+
+/**
+ * Where the daemon's GitHub token comes from, looked up as the daemon looks
+ * it up (src/forge/github.ts tokenSource) from this shell: a [github]
+ * token_env variable, else `gh auth token`. None is a warning: requests then
+ * go unauthenticated, at 60 an hour. Never prints the token. Null when the
+ * [github] config is invalid (its config line says so).
+ */
+export async function githubTokenCheck(config: FlowrynConfig, env: NodeJS.ProcessEnv, lookup: (gh: string, webUrl: string) => Promise<GhToken> = ghAuthToken): Promise<Check | null> {
+  let github;
+  try {
+    github = githubConfig(config);
+  } catch {
+    return null;
+  }
+  const check = "github token";
+  if (!sendsToken(github.api_url, github.web_url)) return { check, status: "info", detail: `none sent: [github] api_url ${github.api_url} is not GitHub's API` };
+  const named = github.token_env.find((name) => (env[name] ?? "").length > 0);
+  if (named) return { check, status: "ok", detail: `from $${named}` };
+  const unauthenticated = "GitHub requests go unauthenticated, at 60 an hour (gh auth login, or set one of [github] token_env)";
+  const gh = resolveTool(config, "gh");
+  if (!gh) return { check, status: "warn", detail: `none: gh is not found and no [github] token_env variable is set; ${unauthenticated}` };
+  const answer = await lookup(gh, github.web_url);
+  return answer.token ? { check, status: "ok", detail: "from gh auth token" } : { check, status: "warn", detail: `none: ${answer.why}; ${unauthenticated}` };
 }
 
 /** The [policy] mode in force, in one line; a bad value is already a config failure above. */

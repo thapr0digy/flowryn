@@ -72,6 +72,8 @@ export const ERROR_CODES = {
   invalid_project: EXIT.validation,
   invalid_report: EXIT.validation,
   invalid_todo: EXIT.validation,
+  // a fix diff loosens a gate (raised budget or timeout, new skip, wider allowlist) without the leader's countersign
+  loosened_gate: EXIT.policy,
   merge_in_flight: EXIT.policy,
   merge_refused: EXIT.policy,
   // a project's account scope with none for the harness (docs/notes/2026-10-22-multiple-ai-provider-u9.md)
@@ -102,6 +104,8 @@ export const ERROR_CODES = {
   pr_closed: EXIT.policy,
   pr_draft: EXIT.policy,
   primary_checkout_tangle: EXIT.policy,
+  // flowryn project rm: the project still has live runs, queued tasks, open phases, decisions, batches or watches
+  project_busy: EXIT.policy,
   protocol_mismatch: EXIT.protocol,
   qa_page_invalid: EXIT.validation,
   // a review gate whose own questions are still open

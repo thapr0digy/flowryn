@@ -10,23 +10,24 @@ import { applyDrop } from "../lifecycle/drop.ts";
 import { recordPlan } from "../lifecycle/plans.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
-import { workflowsConfig } from "../config/workflows.ts";
 import { ulid } from "../util/ulid.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import type { GitRunner } from "../policy/landed.ts";
+import { COUNTERSIGN, countersigned, countersignOf, dismissCountersigns } from "../policy/countersign.ts";
 import { DAEMON_CALLER } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergePrepared, type MergeServices } from "../policy/merge-path.ts";
 import type { DeliveryServices } from "../policy/services.ts";
-import { sanitizeLine } from "../util/sanitize.ts";
+import { fenceFor, sanitizeLine } from "../util/sanitize.ts";
 import { batchLine, batchMembers, batchRef, batchRows, batchVerify, FIX_BRANCH_PREFIX, fixBranch, getBatch, liveBatch, projectBatches, type BatchRow, type BatchState } from "./batch-store.ts";
-import { landingBatched, lightVerifyConfig, MAX_BATCH, MAX_INTEGRATIONS, verifyConfig } from "./config.ts";
+import { landingBatched, lightVerifyConfig, MAX_BATCH, MAX_INTEGRATIONS, verifyConfig, type VerifyConfig } from "./config.ts";
 import { likelyCulprit, numberClashes } from "./culprit.ts";
+import { batchFlake, FLAKE_FAILED_KIND, FLAKE_PASSES, FLAKE_REFUSED_KIND, FLAKE_RERUN_KIND, flakeCandidate, flakeView, fixWorkflow, recordFlake, rerunStep, type FlakeState } from "./flake.ts";
 import type { LandingRow, LandingState } from "./landing-queue.ts";
 import { mergeInStore } from "./object-merge.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest } from "./queue.ts";
 import { autoRerunAt, cleanTail, queueAutoRerun, recordEscalation, routeVerifyOutcome, SENT_BACK_KIND, sendBackText, sentBackPayload, verifyVerdict } from "./route.ts";
-import { finishedAtHead, getVerification, interruptedByStop, runningVerifications, type Verification } from "./store.ts";
+import { finishedAtHead, getVerification, interruptedByStop, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
 
 /**
  * Landing batches (docs/notes/2026-11-21-landing-batches-one-27.md): on a local-only project with
@@ -93,6 +94,8 @@ const RETRY_CODES = new Set(["checks_pending", "forge_unavailable", "merge_in_fl
 const REVERIFY_CODES = new Set(["verify_failed", "verify_stale", "red_checks"]);
 /** How long a batch waits for its fix task's delivery before it is held for the leader (the fix keeps going). */
 export const FIX_DEADLINE_MS = 60 * 60_000;
+/** A held batch's reason while a member's gate loosening waits for the leader's countersign (src/policy/countersign.ts). */
+const LOOSENED_GATE = "loosened_gate";
 /** Changed files listed per member in a fix task's brief; the rest are counted. */
 const FIX_FILES_SHOWN = 12;
 
@@ -142,12 +145,6 @@ function detailBeforeFixFate(batch: BatchRow): string | null {
   if (!batch.detail?.startsWith(`its fix ${batch.fix_task} `)) return batch.detail;
   const cut = batch.detail.indexOf("; ");
   return cut < 0 ? null : batch.detail.slice(cut + 2);
-}
-
-/** A fence for `text` that no run of backticks in it closes. */
-function fenceFor(text: string): string {
-  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
-  return "`".repeat(Math.max(3, longest + 1));
 }
 
 /**
@@ -272,6 +269,11 @@ export class LandingBatches {
     // A held batch whose fix ran late still takes the fix when it is delivered.
     if (batch.state === "held") {
       if (batch.fix_state === "open") await this.driveFix(batch, project);
+      else if (batch.reason === LOOSENED_GATE && this.countersignGiven(batch)) {
+        tx(db, () => this.moveBatch(getBatch(db, batch.id)!, "landing", { reason: null, detail: `${batch.culprit ?? "-"}'s gate loosening was countersigned` }, this.deps.now(), "daemon", "landing.batch_countersigned"));
+        await this.land(getBatch(db, batch.id)!, project);
+        return liveBatch(db, project.id) !== null;
+      }
       return true;
     }
     const main = await this.mainTip(project);
@@ -290,8 +292,10 @@ export class LandingBatches {
     }
     const outcome = this.verifyOutcome(batch);
     if (outcome === "pending") return true;
+    const flake = this.judgeFlake(batch, project, outcome);
     if (outcome.state === "passed") {
-      tx(db, () => this.moveBatch(getBatch(db, batch.id)!, "landing", { verification_id: outcome.id, detail: `verify ${outcome.id} passed` }, this.deps.now()));
+      const flaky = flake === "passed" ? `, its failing tests having passed ${FLAKE_PASSES} of ${FLAKE_PASSES} alone (flaky)` : "";
+      tx(db, () => this.moveBatch(getBatch(db, batch.id)!, "landing", { verification_id: outcome.id, detail: `verify ${outcome.id} passed${flaky}` }, this.deps.now()));
       await this.land(getBatch(db, batch.id)!, project);
       return liveBatch(db, project.id) !== null;
     }
@@ -358,10 +362,13 @@ export class LandingBatches {
     // The fix is never the culprit: its diff against main holds every member's (and a drop of it is no answer to a red).
     const files = await this.memberFiles(project, batchMembers(db, batch.id).filter((m) => m.task_id !== batch.fix_task), main);
     const culprit = likelyCulprit(tail, files.map((f) => ({ task: f.row.task_id, files: f.changed })));
-    const what = step ? `verify ${v.id} failed at \`${step.name}\`${step.exit !== null ? ` (exit ${step.exit})` : ""}` : `verify ${v.id} ${v.state}: ${v.detail ?? "no detail"}`;
+    const rerun = step?.rerun ? ` (its rerun of the failing tests of ${step.rerun.of})` : "";
+    const what = step ? `verify ${v.id} failed at \`${step.name}\`${rerun}${step.exit !== null ? ` (exit ${step.exit})` : ""}` : `verify ${v.id} ${v.state}: ${v.detail ?? "no detail"}`;
     const hint = culprit.task ? `likely ${culprit.task}: ${culprit.why}` : culprit.why;
     // A step that failed (not a timeout, not an error) is code to fix: one fix task per batch, before any hold.
     if ("sendBack" in verdict && !batch.fix_task) {
+      // Unless its failing tests earn one rerun alone at this head first: a flake lands without a fix.
+      if (this.startFlakeRerun(batch, v, verdict.sendBack)) return;
       const opened = await this.openFix(batch, project, { verification: v, step: verdict.sendBack, tail, files, what, hint, culprit: culprit.task });
       if (opened) return;
     }
@@ -371,6 +378,71 @@ export class LandingBatches {
       if (fresh?.state !== "verifying") return;
       this.hold(fresh, "verify_failed", `${what}${after}; ${hint}`, culprit.task, v.id);
     });
+  }
+
+  /**
+   * A red verify's failing tests earn one rerun alone at the same head (src/verify/flake.ts): the
+   * batch stays verifying, its request the rerun's, and the `verify.flake_rerun` event names the
+   * tests and the command. False when the step has no rerun_failed command, the batch already
+   * reran at this head, or the weekly rule refuses it (`verify.flake_refused`): the batch is fixed forward.
+   */
+  private startFlakeRerun(batch: BatchRow, v: Verification, step: VerifyStep): boolean {
+    const { db } = this.deps;
+    if (batchFlake(batch)?.head === batch.head_sha) return false;
+    let verify: VerifyConfig | null;
+    try {
+      verify = verifyConfig(this.deps.config(), batch.project_id);
+    } catch {
+      return false;
+    }
+    const policies = todaysPolicies(this.deps.config(), batch.project_id);
+    if (!verify || !policies || v.policy_id !== policies.full) return false;
+    const now = this.deps.now();
+    const candidate = flakeCandidate(db, verify, v, step, now);
+    if (!candidate) return false;
+    const started = tx(db, () => {
+      const fresh = getBatch(db, batch.id);
+      if (fresh?.state !== "verifying" || fresh.head_sha !== v.head_sha || fresh.fix_task || batchFlake(fresh)?.head === fresh.head_sha) return false;
+      if ("refused" in candidate) {
+        appendEvent(db, { source: "daemon", kind: FLAKE_REFUSED_KIND, payload: { batch: batch.id, project: batch.project_id, head: v.head_sha, of: v.id, step: step.name, why: candidate.refused, tests: candidate.tests }, ts: now });
+        return false;
+      }
+      const { flake } = candidate;
+      const request = findQueued(db, batchRef(fresh.project_id, fresh.id), fresh.head_sha, policies.full) ?? this.queueVerify(fresh, policies.full, now);
+      const detail = `verify ${v.id} failed at \`${step.name}\`; rerunning its ${flake.tests.length} failing test${flake.tests.length === 1 ? "" : "s"} alone, ${FLAKE_PASSES} times (${request.id})`;
+      db.query("UPDATE landing_batches SET flake = ?2, request_id = ?3, verification_id = ?4, detail = ?5, updated_at = ?6 WHERE id = ?1").run(fresh.id, JSON.stringify(flake), request.id, v.id, detail, now);
+      appendEvent(db, { source: "daemon", kind: FLAKE_RERUN_KIND, payload: { batch: fresh.id, project: fresh.project_id, head: fresh.head_sha, of: v.id, step: step.name, command: flake.command, targets: flake.targets, tests: flake.tests, passes: FLAKE_PASSES, request: request.id }, ts: now });
+      this.ops.refreshLine(fresh.project_id);
+      return true;
+    });
+    if (started) this.deps.kickScheduler();
+    return started;
+  }
+
+  /**
+   * The batch's pending flake rerun, judged by the finished verify of its head: `passed` records
+   * the flake (flaky_tests, a fix task, `verify.flake`), `failed` says so (`verify.flake_rerun_failed`)
+   * and the red is fixed forward; a verify whose rerun step never ran ends it. Returns how it was judged, or null.
+   */
+  private judgeFlake(batch: BatchRow, project: ProjectRow, v: Verification): FlakeState | null {
+    const { db } = this.deps;
+    const pending = batchFlake(batch);
+    if (pending?.state !== "pending" || pending.head !== v.head_sha) return null;
+    const judged = tx(db, () => {
+      const fresh = getBatch(db, batch.id);
+      const flake = fresh ? batchFlake(fresh) : null;
+      if (!fresh || flake?.state !== "pending" || flake.head !== v.head_sha) return null;
+      const now = this.deps.now();
+      const step = rerunStep(v);
+      const ran = step !== null && (step.state === "passed" || step.state === "failed");
+      const state: FlakeState = !ran ? "ended" : step.state === "passed" ? "passed" : "failed";
+      db.query("UPDATE landing_batches SET flake = ?2, updated_at = ?3 WHERE id = ?1").run(fresh.id, JSON.stringify({ ...flake, state, verification: v.id }), now);
+      if (state === "passed") return { state, task: recordFlake(db, { config: this.deps.config(), project, batch: fresh, flake, rerun: v, red: getVerification(db, flake.of), now }) };
+      appendEvent(db, { source: "daemon", kind: FLAKE_FAILED_KIND, payload: { batch: fresh.id, project: fresh.project_id, head: flake.head, of: flake.of, rerun: v.id, state: v.state, step: step?.name ?? null, ran }, ts: now });
+      return { state, task: null };
+    });
+    if (judged?.task) this.deps.kickScheduler();
+    return judged?.state ?? null;
   }
 
   /**
@@ -387,8 +459,7 @@ export class LandingBatches {
       this.deps.log(`landing batch ${batch.id}: no fix task: git could not create ${branch}: ${(made.stderr || made.stdout).trim()}`);
       return false;
     }
-    const config = this.deps.config();
-    const workflow = workflowsConfig(config).fix ? "fix" : project.workflow;
+    const workflow = fixWorkflow(this.deps.config(), project);
     const opened = tx(db, () => {
       const fresh = getBatch(db, batch.id);
       if (fresh?.state !== "verifying" || fresh.head_sha !== batch.head_sha || fresh.fix_task) return false;
@@ -493,6 +564,7 @@ export class LandingBatches {
       applyDrop(db, { plan: null, tasks: [{ id: task, title: phase?.title ?? task, plan: phase?.plan_id ?? null, inBacklog: true }], dependents: [] }, { reason, by: "daemon", now });
     }
     db.query("UPDATE landing_batches SET fix_state = 'ended' WHERE id = ?1").run(batch.id);
+    dismissCountersigns(db, task, reason, now);
     appendEvent(db, { source: "daemon", kind: "landing.batch_fix_ended", taskId: task, runId: run?.id ?? null, payload: { batch: batch.id, task, why, run: run?.id ?? null, cancelled: run !== null && !isTerminal(run.state) }, ts: now });
   }
 
@@ -513,14 +585,34 @@ export class LandingBatches {
     }
   }
 
+  /**
+   * A green batch whose member `row` is a fix that loosens a gate: held until the leader
+   * countersigns it (its decision is open, src/policy/countersign.ts), then landed (drive); a
+   * refusal leaves it held for a drop. Call inside a transaction.
+   */
+  private holdForCountersign(batch: BatchRow, row: LandingRow, why: string): void {
+    if (batch.state !== "landing") return;
+    const decision = countersignOf(this.deps.db, row.task_id, row.head_sha)?.id;
+    // The item line keeps the next commands whole; the loosenings themselves are in the decision.
+    const detail = decision ? `${row.task_id} loosens a gate; ${decision} asks the countersign` : why;
+    this.hold(batch, LOOSENED_GATE, detail, row.task_id, batch.verification_id, `${decision ? `flowryn decide ${decision} ${COUNTERSIGN} | ` : ""}flowryn batch drop ${batch.id} ${row.task_id}`);
+  }
+
+  /** A batch held for a loosened gate whose fix was countersigned at the head it delivered (by the user, on sensitive work). */
+  private countersignGiven(batch: BatchRow): boolean {
+    const row = batchMembers(this.deps.db, batch.id).find((m) => m.task_id === batch.culprit);
+    const run = row ? getRunWithPolicy(this.deps.db, row.run_id) : null;
+    return row !== undefined && run !== null && countersigned(this.deps.db, run, row.head_sha);
+  }
+
   /** Hold the batch for the leader, with one landing_batch_held item naming the next commands. Call inside a transaction. */
-  private hold(batch: BatchRow, reason: string, detail: string, culprit: string | null, verification: string | null = null): void {
+  private hold(batch: BatchRow, reason: string, detail: string, culprit: string | null, verification: string | null = null, nextCommands: string | null = null): void {
     const { db } = this.deps;
     const now = this.deps.now();
     const members = batchMembers(db, batch.id);
     const owner = members.find((m) => m.task_id === culprit) ?? members[0] ?? null;
     const retry = `flowryn batch retry ${batch.id}`;
-    const next = reason !== "verify_failed" ? retry : `flowryn batch drop ${batch.id} ${owner?.task_id ?? "<task>"}${batch.retried_head !== batch.head_sha ? ` | ${retry}` : ""}`;
+    const next = nextCommands ?? (reason !== "verify_failed" ? retry : `flowryn batch drop ${batch.id} ${owner?.task_id ?? "<task>"}${batch.retried_head !== batch.head_sha ? ` | ${retry}` : ""}`);
     const seq = this.moveBatch(batch, "held", { reason, detail, culprit, verification_id: verification ?? batch.verification_id }, now);
     if (batch.item_id) resolveItem(db, batch.item_id, "landing.batch_held", now);
     // The digest keeps the next commands whole: the reason is cut first (the batch keeps it whole, show lb<N> prints it).
@@ -563,6 +655,11 @@ export class LandingBatches {
           return;
         }
         if (RETRY_CODES.has(error.code)) return;
+        // A fix that loosens a gate waits for the leader's countersign; the batch lands once it is given (drive).
+        if (error.code === "loosened_gate" && !onMain) {
+          tx(db, () => this.holdForCountersign(getBatch(db, batch.id)!, row, error.message));
+          return;
+        }
         if (REVERIFY_CODES.has(error.code) && !onMain) {
           await this.rebuild(batch, project, `the gate refused its verify for ${row.task_id}: ${error.message}`, batch.integrations);
           return;
@@ -880,6 +977,7 @@ export class LandingBatches {
     if (!row) throw new FlowrynError("not_found", `${taskId} is not in landing batch ${batchId} (it has ${batchMembers(db, batch.id).map((r) => r.task_id).join(", ") || "no branches"})`, `flowryn show ${batchId}`);
     // The fix holds every member: dropping any branch (or the fix itself) ends it, and the rest are rebuilt from main.
     this.endFix(batch, taskId === batch.fix_task ? "the leader dropped the fix" : `the leader dropped ${taskId}, which the fix's branch holds`);
+    dismissCountersigns(db, taskId, `the leader dropped it from landing batch ${batch.id}`, this.deps.now());
     if (taskId === batch.fix_task) {
       appendEvent(db, { source, kind: "landing.batch_dropped", runId: row.run_id, taskId, payload: { batch: batch.id, landing: row.id, verification: batch.verification_id, step: null, fix: true }, ts: this.deps.now() });
       this.deps.kickScheduler();
@@ -935,6 +1033,12 @@ export class LandingBatches {
     if (!policies) throw new FlowrynError("not_ready", `project ${batch.project_id} has no verify steps now`);
     // A retry says the red was a flake: a fix not yet delivered is no longer wanted (a delivered one is part of the head).
     if (batch.fix_state === "open") this.endFix(batch, "the leader retried the batch's verify");
+    // The retry runs every step in full: a flake rerun still pending at this head is not it.
+    const flake = batchFlake(batch);
+    if (flake?.state === "pending") {
+      db.query("UPDATE landing_batches SET flake = ?2 WHERE id = ?1").run(batch.id, JSON.stringify({ ...flake, state: "ended" }));
+      appendEvent(db, { source, kind: FLAKE_FAILED_KIND, payload: { batch: batch.id, project: batch.project_id, head: flake.head, of: flake.of, rerun: null, state: "ended", step: null, ran: false }, ts: this.deps.now() });
+    }
     const now = this.deps.now();
     const request = findQueued(db, batchRef(batch.project_id, batch.id), batch.head_sha, policies.full) ?? this.queueVerify(batch, policies.full, now);
     db.query("UPDATE landing_batches SET retried_head = ?2, request_id = ?3, culprit = NULL WHERE id = ?1").run(batch.id, batch.head_sha, request.id);
@@ -1039,6 +1143,7 @@ export function batchView(db: Db, batch: BatchRow): Record<string, unknown> {
     integrations: batch.integrations,
     retried: batch.retried_head === batch.head_sha,
     fix: batch.fix_task ? { task: batch.fix_task, state: batch.fix_state, base: batch.fix_base?.slice(0, 8) ?? "-" } : "-",
+    flake: flakeView(batch),
     members: rows.map((r) => ({ task: r.task_id, pos: r.batch_pos, head: r.head_sha.slice(0, 8), state: r.state, ...(r.reason ? { reason: r.reason } : {}) })),
   };
 }

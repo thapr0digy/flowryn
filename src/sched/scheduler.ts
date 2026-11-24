@@ -24,7 +24,7 @@ import { activateStage, neededPools, positionOf, projectLimit, type StagePos } f
 import { explainHumanWaits } from "../attention/human-waits.ts";
 import { queuedRequests } from "../verify/queue.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
-import { fullPools, OverCapacity, projectAtLimit, ProjectAtLimit } from "./pools.ts";
+import { FREED_AT_DELIVERY, fullPools, OverCapacity, projectAtLimit, ProjectAtLimit, workersToRetire } from "./pools.ts";
 import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, clearUsageLimit, pausedAccounts, usageGate, usagePauses } from "./usage.ts";
 import { moveLegacyCapacity } from "./legacy.ts";
@@ -70,6 +70,9 @@ export interface SchedulerDeps {
   /** Start queued asks while their slots are free (src/ask/runner.ts): they hold no pool lease, so they never wait on a stage. */
   drainAsks?(stopped: () => boolean): Promise<number>;
 }
+
+/** A Queued phase autoDispatch may start; `kind` is its task policy's (a corrections scout's phase is a scout). */
+type StartablePhase = PhaseRow & { kind: "ship" | "scout"; plan_title: string; project_id: string; source_task: string | null; phases: number };
 
 interface Candidate {
   run: RunWithPolicy;
@@ -222,8 +225,34 @@ export class Scheduler {
     await this.step("review revivals", async () => {
       if ((await this.reviveReviews()) > 0) this.deps.kickJournal();
     });
+    await this.step("retire freed workers", () => this.retireFreedWorkers());
     await this.step("grant", () => this.grant());
     await this.step("alerts", async () => this.alerts());
+  }
+
+  /**
+   * A batch project's delivery freed its worker's slot (docs/notes/2026-11-22-phase-free-the-rn.md):
+   * once the reconciler judges that worker idle, it exits by its recorded identity, so no worker runs
+   * without a slot. A send-back then starts a fresh one through a grant. A refused exit waits out the
+   * same backoff as a refused replacement, and is tried again.
+   */
+  private async retireFreedWorkers(): Promise<void> {
+    const { db, now } = this.deps;
+    for (const { id } of workersToRetire(db)) {
+      // Read again: an earlier exit was awaited, and a steer or a send-back since then keeps this worker.
+      const candidate = workersToRetire(db, id)[0];
+      if (!candidate || this.backingOff(id, now()) || this.relaunching.has(id) || this.deps.isLaunching(id)) continue;
+      const exited = await this.verifiedExit(candidate.id);
+      if (!exited.ok) {
+        const attempts = this.backOff(candidate.id);
+        this.deps.log(`sched: the delivered worker of ${candidate.id} did not exit (${exited.detail ?? "unverified"}; attempt ${attempts})`);
+        continue;
+      }
+      this.exitRefusals.delete(candidate.id);
+      tx(db, () =>
+        appendEvent(db, { source: "daemon", kind: "run.worker_retired", runId: candidate.id, taskId: candidate.task_id, payload: { pid: candidate.proc_pid, reason: FREED_AT_DELIVERY, detail: exited.detail ?? null }, ts: now() }),
+      );
+    }
   }
 
   private async step(name: string, fn: () => Promise<void>): Promise<void> {
@@ -600,6 +629,14 @@ export class Scheduler {
     }
   }
 
+  /** One more refused exit of the run's worker: the next attempt waits twice as long, up to EXIT_BACKOFF_MAX_MS. Returns the attempts so far. */
+  private backOff(runId: string): number {
+    const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
+    const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
+    this.exitRefusals.set(runId, { attempts, nextAt: this.deps.now() + backoff });
+    return attempts;
+  }
+
   /** A refused worker replacement waits out its backoff: no exit attempt holds the pass meanwhile. */
   private backingOff(runId: string, t: number): boolean {
     const refusals = this.exitRefusals.get(runId);
@@ -618,9 +655,7 @@ export class Scheduler {
   /** One refused worker replacement: an event when the episode starts, one P1 once it has lasted EXIT_REFUSALS_FOR_ITEM attempts. */
   private replacementRefused(runId: string, detail: string): void {
     const { db, now } = this.deps;
-    const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
-    const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
-    this.exitRefusals.set(runId, { attempts, nextAt: now() + backoff });
+    const attempts = this.backOff(runId);
     this.deps.log(`sched: the replacement worker for ${runId} waits: the old worker did not exit (${detail}; attempt ${attempts})`);
     if (attempts !== 1 && attempts < EXIT_REFUSALS_FOR_ITEM) return;
     tx(db, () => {
@@ -650,12 +685,12 @@ export class Scheduler {
     const config = this.deps.config();
     const phases = db
       .query(
-        `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT MAX(x.phase_no) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
+        `SELECT ph.*, tp.kind, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT MAX(x.phase_no) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
          FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id JOIN task_policy tp ON tp.task_id = ph.task_id
          WHERE pl.state = 'approved' AND tp.auto = 1 AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ph.task_id)
          ORDER BY pl.created_at, ph.phase_no`,
       )
-      .all() as (PhaseRow & { plan_title: string; project_id: string; source_task: string | null; phases: number })[];
+      .all() as StartablePhase[];
     if (phases.length === 0) return 0;
     const pass = newPass();
     const backlog = readSnapshot(db, "backlog")?.tasks ?? null;
@@ -664,7 +699,8 @@ export class Scheduler {
       const project = getProject(db, phase.project_id);
       // A landing batch's fix starts by itself on any project: the batch it fixes holds the project's landings.
       const fix = fixStartOf(db, phase.task_id);
-      if (!project || (project.autonomy !== "plan" && !fix)) continue;
+      // A removed project (flowryn project rm) starts nothing; rm refuses while a phase is open, so this only closes a race.
+      if (!project || project.removed_at != null || (project.autonomy !== "plan" && !fix)) continue;
       const task = backlog?.find((t) => t.id === phase.task_id);
       // Not in the backlog yet (its add is still pending), held, parked or already started by hand: wait.
       if (!task || task.state !== "queued" || task.hold) continue;
@@ -692,7 +728,7 @@ export class Scheduler {
       }
       let made: string | null;
       try {
-        const workflow = workflowFor(config, phase.workflow, "ship");
+        const workflow = workflowFor(config, phase.workflow, phase.kind);
         const checked = await checkStart(this.deps.startDeps, project, account, ready.stack?.branch ?? storedBase(db, phase.task_id));
         // A batch's fix starts on the batch head (its local flowryn/batch/<id> branch), not main's tip.
         const start = fix ? { ...checked, base: fix.base } : checked;
@@ -746,7 +782,7 @@ export class Scheduler {
 
   /** One phase's run, its backlog start and its P3, in one transaction; null when a run appeared meanwhile. */
   private startPhase(
-    phase: PhaseRow & { plan_title: string; source_task: string | null; phases: number },
+    phase: StartablePhase,
     project: ProjectRow,
     account: Account,
     start: { version: string; base: string; baseBranch: string | null; stackedOn: string | null },
@@ -762,7 +798,7 @@ export class Scheduler {
       const usage = usageGate(db, t, account.id, null);
       if (usage === "paused" || (moved && usage !== "open")) return null;
       const probe = usage === "probe";
-      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, baseBranch: start.baseBranch, stackedOn: start.stackedOn, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: phase.kind, account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, baseBranch: start.baseBranch, stackedOn: start.stackedOn, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, account.id, runId, t);
       if (moved) appendEvent(db, { source: "daemon", kind: "sched.overflow", runId, taskId: phase.task_id, payload: { from: moved.from, to: account.id, why: moved.why, at: "phase start" }, ts: t });
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);

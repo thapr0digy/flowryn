@@ -254,6 +254,17 @@ describe("the CI-wait watchdog", () => {
     expect(d!.question).not.toContain("no_ci");
   });
 
+  test("a no_ci project's CI wait recommends accept-without-ci: no-mistakes already counts it green", async () => {
+    mainAddsNoCi();
+    sh(worktree, "pull", "-q", "--no-rebase", "--no-edit", "origin", "main");
+    nmSays(CI_WAIT("2h"));
+    await watcher().pass();
+    const [d] = ciWaits();
+    expect(d!.recommendation).toBe("accept-without-ci");
+    expect(d!.question).toContain("no-mistakes counts a PR with no checks as passed under no_ci and keeps watching until merge, so waiting ends only at ci_timeout.");
+    expect(d!.question).not.toContain("lacks");
+  });
+
   test("merge-main steers the worker to merge and ship again, and settles this pipeline run; the next run is a new stall", async () => {
     mainAddsNoCi();
     nmSays(CI_WAIT("2h"));

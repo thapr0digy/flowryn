@@ -54,6 +54,8 @@ export interface ValidationRow {
   ended_at: number | null;
   /** A merge round's PR ref (migration 60); null for a review round. */
   ref: string | null;
+  /** Why it ran (migration 69): under an away the user started, or as the evidence gate's reviewer (away_since is then 0). */
+  basis: "away" | "evidence";
 }
 
 /** The stage a merge round records in gate_validations (src/attention/away-merge.ts): no review gate is named so. */
@@ -79,6 +81,7 @@ interface RoundRow {
   verdict_json: string | null;
   waited_ms: number;
   run_state: RunState | null;
+  basis: "away" | "evidence";
 }
 
 function outcome(r: RoundRow): string {
@@ -98,10 +101,14 @@ function outcome(r: RoundRow): string {
 }
 
 function undo(db: Db, r: RoundRow): string {
-  if (r.state !== "passed") return "";
-  if (r.run_state === null || isTerminal(r.run_state)) return "; run over, no undo";
-  if (deliveredOf(db, r.task_id)) return "; delivered: send changes on the PR instead";
-  return `; undo: flowryn gate reopen ${r.task_id} --gate ${r.stage} --body-file -`;
+  return r.state === "passed" ? reopenUndo(db, r.task_id, r.run_state, r.stage) : "";
+}
+
+/** The undo of a passed review while its run is live and undelivered: send it back with your words. */
+function reopenUndo(db: Db, taskId: string, runState: RunState | null, stage: string): string {
+  if (runState === null || isTerminal(runState)) return "; run over, no undo";
+  if (deliveredOf(db, taskId)) return "; delivered: send changes on the PR instead";
+  return `; undo: flowryn gate reopen ${taskId} --gate ${stage} --body-file -`;
 }
 
 /** What became of a passed merge round's approval: merged, waiting, stopped by your return, or voided by a new head. */
@@ -135,9 +142,9 @@ export function validatorRoundLines(db: Db, since: number, until: number, lens: 
   const rows = (
     db
       .query(
-        `SELECT v.id, v.task_id, v.stage, v.state, v.reason, v.verdict_json, v.waited_ms, r.state AS run_state
+        `SELECT v.id, v.task_id, v.stage, v.state, v.reason, v.verdict_json, v.waited_ms, v.basis, r.state AS run_state
          FROM gate_validations v LEFT JOIN runs r ON r.id = v.run_id
-         WHERE v.state != 'running' AND v.ended_at > ?1 AND v.ended_at <= ?2 ORDER BY v.ended_at, v.id`,
+         WHERE v.state != 'running' AND v.ended_at > ?1 AND v.ended_at <= ?2 AND NOT (v.basis = 'evidence' AND v.state = 'passed') ORDER BY v.ended_at, v.id`,
       )
       .all(since, until) as RoundRow[]
   ).filter((r) => lens.task(r.task_id));
@@ -145,7 +152,46 @@ export function validatorRoundLines(db: Db, since: number, until: number, lens: 
     const title = taskTitle(db, r.task_id);
     const name = `${sanitizeLine(title, 60)}${title === r.task_id ? "" : ` (${r.task_id})`}`;
     if (r.stage === MERGE_STAGE) return `- [${r.id}] pre-merge check of sensitive ${name} → ${mergeOutcome(r)} (report: flowryn show ${r.id}${r.state === "passed" ? mergeFate(db, r.id) : ""})`;
-    return `- [${r.id}] ${r.stage} review of ${name} → ${outcome(r)} (after ${waitedLabel(r.waited_ms)}; report: flowryn show ${r.id}${undo(db, r)})`;
+    return `- [${r.id}] ${r.stage} ${r.basis === "evidence" ? "evidence review" : "review"} of ${name} → ${outcome(r)} (after ${waitedLabel(r.waited_ms)}; report: flowryn show ${r.id}${undo(db, r)})`;
+  });
+}
+
+interface EvidenceEventRow {
+  kind: "gate.evidence_passed" | "gate.evidence_held";
+  task_id: string;
+  payload: string;
+  run_state: RunState | null;
+}
+
+/** What passed a gate on evidence, in a few words. */
+function evidenceWords(p: Record<string, unknown>): string {
+  if (typeof p.validation === "string") return `gap check ${String(p.gap ?? "ready")}, independent review ${p.validation} passed; report: flowryn show ${p.validation}`;
+  const probes = p.nothing_visible === true ? "nothing visible" : `${Number(p.probes ?? 0)} clean probes`;
+  return `${String(p.verdict ?? "works")}, ${probes}, verify ${String(p.verification ?? "-")} passed at ${String(p.head ?? "").slice(0, 8)}`;
+}
+
+/**
+ * The evidence gate's work in (since, until] (docs/notes/2026-11-23-phase-gates-pass-8f.md): each
+ * review it passed, with its evidence, its page and the send-back while the run is live and
+ * undelivered; and each it held for the user, with why.
+ */
+export function evidenceGateLines(db: Db, since: number, until: number, lens: ScopeLens): string[] {
+  const rows = (
+    db
+      .query(
+        `SELECT e.kind, e.task_id, e.payload, r.state AS run_state FROM events e LEFT JOIN runs r ON r.id = e.run_id
+         WHERE e.kind IN ('gate.evidence_passed', 'gate.evidence_held') AND e.ts > ?1 AND e.ts <= ?2 ORDER BY e.seq`,
+      )
+      .all(since, until) as EvidenceEventRow[]
+  ).filter((r) => lens.task(r.task_id));
+  return rows.map((r) => {
+    const p = JSON.parse(r.payload) as Record<string, unknown>;
+    const title = taskTitle(db, r.task_id);
+    const name = `${sanitizeLine(title, 60)}${title === r.task_id ? "" : ` (${r.task_id})`}`;
+    const stage = String(p.stage ?? "");
+    const page = typeof p.review_url === "string" ? `page: ${p.review_url}` : "no page";
+    if (r.kind === "gate.evidence_held") return `- [${String(p.gate)}] ${stage} review of ${name} → waits for you: ${sanitizeLine(String(p.why ?? ""), 120)} (${page})`;
+    return `- [${String(p.gate)}] ${stage} review of ${name} → passed on evidence (${evidenceWords(p)}; ${page}${reopenUndo(db, r.task_id, r.run_state, stage)})`;
   });
 }
 

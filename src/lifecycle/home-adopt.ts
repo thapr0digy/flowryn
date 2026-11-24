@@ -292,7 +292,7 @@ function adoptProjects(db: Db, config: FlowrynConfig, accounts: AccountsConfig, 
       skipped.push(project.id);
       continue;
     }
-    const samePath = mine.find((p) => real(p.path) === real(project.path));
+    const samePath = project.removed_at == null && mine.find((p) => real(p.path) === real(project.path));
     if (samePath) refuse(`${project.path} is already registered here as project ${samePath.id}, not ${project.id}`);
     added.push(project);
   }
@@ -301,9 +301,9 @@ function adoptProjects(db: Db, config: FlowrynConfig, accounts: AccountsConfig, 
 
 function insertAdoptedProject(db: Db, p: ProjectRow & { import_source?: string | null }): void {
   db.query(
-    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, import_source, kind)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
-  ).run(p.id, p.repo_url, p.path, p.default_branch, p.delivery_mode, p.yolo, p.priority, p.harness, p.workflow, p.autonomy, p.import_source ?? null, p.kind ?? "code");
+    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, import_source, kind, removed_at, removed_reason)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+  ).run(p.id, p.repo_url, p.path, p.default_branch, p.delivery_mode, p.yolo, p.priority, p.harness, p.workflow, p.autonomy, p.import_source ?? null, p.kind ?? "code", p.removed_at ?? null, p.removed_reason ?? null);
 }
 
 function insertPolicy(db: Db, row: Row): void {

@@ -15,7 +15,7 @@ import { verificationLine } from "../verify/store.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { openUserActed } from "../attention/follow-up.ts";
-import { channelOf, checkGate, chooseApproval, gatherFacts, standingApproval, type MergeFacts } from "./merge.ts";
+import { channelOf, checkGateAndCountersign, chooseApproval, gatherFacts, standingApproval, type MergeFacts } from "./merge.ts";
 import { requireDeliveryBasis } from "../lifecycle/observed.ts";
 import { getRunWithPolicy } from "../lifecycle/runs.ts";
 import { landingQueued } from "../verify/config.ts";
@@ -100,7 +100,7 @@ const merge: VerbSpec = {
       if (run.sensitive && chosen.choice.kind === "yolo") throw new FlowrynError("approval_required", `no approval to queue ${run.task_id} for landing: sensitive work needs a human approval even under yolo`, `approve in your shell: flowryn approve ${run.task_id}`);
       return { facts, gate: { waived: null, alreadyMerged: false, localGreen: null }, chosen, seen, queue: true } satisfies QueuedMerge;
     }
-    const gate = checkGate(facts, chosen);
+    const gate = checkGateAndCountersign(ctx.db, facts, chosen, ctx.now());
     return { facts, gate, chosen, seen };
   },
   apply(ctx, _args, prepared) {

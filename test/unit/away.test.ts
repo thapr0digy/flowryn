@@ -68,13 +68,19 @@ describe("--until", () => {
     expect(parseUntil("+2h30m", now)).toBe(now + 150 * 60_000);
   });
 
+  test("+7d and 1d12h count days from now", () => {
+    expect(parseUntil("+7d", now)).toBe(now + 7 * 24 * HOUR);
+    expect(parseUntil("1d12h", now)).toBe(now + 36 * HOUR);
+    expect(parseUntil("+1d30m", now)).toBe(now + 24 * HOUR + 30 * 60_000);
+  });
+
   test("a local date and time, with a space or a T", () => {
     expect(parseUntil("2026-10-06 08:00", now)).toBe(new Date(2026, 9, 6, 8, 0).getTime());
     expect(parseUntil("2026-10-06T08:00", now)).toBe(new Date(2026, 9, 6, 8, 0).getTime());
   });
 
   test("anything else is not a time", () => {
-    for (const text of ["soon", "25:00", "8:61", "+h", "", "2026-02-30 08:00", "tomorrow"]) expect(parseUntil(text, now)).toBeNull();
+    for (const text of ["soon", "25:00", "8:61", "+h", "+d", "7days", "", "2026-02-30 08:00", "tomorrow"]) expect(parseUntil(text, now)).toBeNull();
   });
 });
 

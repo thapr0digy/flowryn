@@ -16,6 +16,10 @@ import { fileClass, findingPath, matchRules, readRuleFacts, type RuleFacts, type
 import { classifyAsk, type AskVerdict } from "../policy/nomistakes-classes.ts";
 import { nmRecordJson } from "../attention/real-actions.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
+import { correctionsPlanOf, fileChecks } from "../leader/corrections.ts";
+import { CORRECT_SKILL_NAME } from "../skills/correct.ts";
+import { skillPath } from "../skills/stages.ts";
+import { reportProblems } from "./brief.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { deliveryBasis, requireDeliveryBasis, type BasisPart, type DeliveryBasis } from "./observed.ts";
@@ -32,6 +36,7 @@ import { landScout } from "./landing.ts";
 import { requireApprovedDraft } from "./draft.ts";
 import { startAutoMerge, startAutoVerify } from "../verify/auto-merge.ts";
 import { deliveredToQueue } from "../verify/landing-queue.ts";
+import { FREED_AT_DELIVERY, releaseLeases } from "../sched/pools.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -383,7 +388,7 @@ function isInside(path: string, root: string): boolean {
 /**
  * Verify a scout's report and copy it to `<data_dir>/<task>/report.md`: a
  * regular file inside the run's worktree or its report directory, no
- * symlink, at most 1 MB. A report elsewhere is refused rather than read, and
+ * symlink, at most 1 MB, that a leader reads in a minute (reportProblems). A report elsewhere is refused rather than read, and
  * whatever sits at the destination is replaced, never written through.
  */
 function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): DeliveredReport {
@@ -423,6 +428,11 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
   // Read the stored copy, not the worker-controlled source: the worker's own process could still
   // rewrite `real` between the copy above and a read of it, but nothing writes `artifact` afterward.
   const text = readFileSync(artifact, "utf8");
+  const problems = reportProblems(text);
+  if (problems.length > 0) {
+    if (artifact !== real) rmSync(artifact, { force: true });
+    throw new FlowrynError("invalid_report", `the report breaks the scout report rules: ${problems.join("; ")}`, "$FLOWRYN_BIN template report");
+  }
   return { source: real, artifact, bytes: st.size, text };
 }
 
@@ -552,7 +562,9 @@ const deliver: VerbSpec = {
         // The watcher's pass kicks the auto-merger, whose pass takes it into the line.
         ctx.delivery.watch(run.id);
         // A batch project's branch gets its light check, then lands in a batch (src/verify/landing-batch.ts).
+        // Its worker slot is free from here: the scheduler retires the idle worker, and a send-back starts a fresh one.
         const landing = landingBatched(ctx.config(), run.project_id, run.delivery_mode) ? "batch" : "queue";
+        if (landing === "batch") releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: false }, FREED_AT_DELIVERY, now);
         return { data: { ...data, landing, ...(verify ? { auto_verify: verify.id } : {}) }, hints: ["end your turn"] };
       }
       // A yolo delivery on a project that auto-merges is verified and merged by the daemon; any other is verified by it (src/verify/auto-merge.ts).
@@ -605,12 +617,18 @@ const deliver: VerbSpec = {
         warnings.push(`entry ${entry.key}: ${error.message}`);
       }
     }
+    // The weekly corrections scout's `## Checks to ship` become ships of its project (src/leader/corrections.ts).
+    const corrections = correctionsPlanOf(ctx.db, run.task_id);
+    const checks = corrections
+      ? fileChecks(ctx.db, { project: getProject(ctx.db, run.project_id)!, scoutTask: run.task_id, runId: run.id, plan: corrections, report: delivered.text, skillPath: skillPath(ctx.config().state_dir, CORRECT_SKILL_NAME), now })
+      : null;
+    const checksNote = checks ? `; ${checks.ships.length} check${checks.ships.length === 1 ? "" : "s"} filed as ships${checks.plan ? ` (${checks.plan})` : ""}${checks.refused.length > 0 ? `, ${checks.refused.length} refused` : ""}` : "";
     openItem(ctx.db, {
       kind: "report_ready",
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id} --full${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}`,
+      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id} --full${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}${checksNote}`,
       now,
     });
     // A scout's workflow ends in no gate: the verified report lands it, and the daemon cleans up (design section 8).
@@ -618,7 +636,7 @@ const deliver: VerbSpec = {
     if (parsed.length > 0) {
       appendEvent(ctx.db, { source: "cli", kind: "report.decisions", runId: run.id, taskId: run.task_id, payload: { opened, warnings }, ts: now });
     }
-    return { data: { run: run.id, state: "landed", report: delivered.artifact, decisions: opened }, hints: ["end your turn"] };
+    return { data: { run: run.id, state: "landed", report: delivered.artifact, decisions: opened, ...(checks ? { checks: checks.ships, refused: checks.refused } : {}) }, hints: ["end your turn"] };
   },
   async settle(ctx, result) {
     // A PR is watched; a landed report's worktree is cleaned up by the same watcher pass.

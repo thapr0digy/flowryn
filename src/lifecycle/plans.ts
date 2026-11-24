@@ -1,6 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import { ID as ACCOUNT_ID, resolveAccount } from "../config/accounts.ts";
 import { checkModelName, checkPins } from "../config/model-choice.ts";
+import { phaseKind } from "../config/workflows.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
@@ -301,11 +302,13 @@ export function approvePlan(db: Db, planId: string, via: string, now: number): v
   if (!project) throw new FlowrynError("not_found", `project ${plan.project_id} is gone`);
   db.query("UPDATE plans SET state = 'approved', approved_at = ?2, approved_via = ?3 WHERE id = ?1").run(planId, now, via);
   for (const phase of phasesOf(db, planId)) {
+    // A phase of a scout workflow (the weekly corrections scout) is a scout: it ends in a report, not a merge.
+    const kind = phaseKind(phase.workflow);
     db.query(
       `INSERT OR IGNORE INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, auto, created_at)
-       VALUES (?1, ?2, 'ship', ?3, ?4, 0, ?5, 1, ?6)`,
-    ).run(phase.task_id, project.id, project.delivery_mode, project.yolo, phase.workflow, now);
-    const flags: Record<string, string | true | string[]> = { kind: "ship", repo: project.id, body: phase.body.slice(0, MAX_BACKLOG_BODY) };
+       VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 1, ?7)`,
+    ).run(phase.task_id, project.id, kind, project.delivery_mode, project.yolo, phase.workflow, now);
+    const flags: Record<string, string | true | string[]> = { kind, repo: project.id, body: phase.body.slice(0, MAX_BACKLOG_BODY) };
     const deps = JSON.parse(phase.blocked_by) as string[];
     if (deps.length > 0) flags["blocked-by"] = deps;
     recordIntent(db, { file: "backlog", verb: "add", taskId: phase.task_id, positional: [phase.task_id, phase.title], flags, now });

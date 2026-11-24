@@ -141,7 +141,7 @@ export class MergeBuilder {
     const source = this.deps.source();
     if (!source) return null;
     const want = real(source);
-    const projects = this.deps.db.query("SELECT * FROM projects").all() as ProjectRow[];
+    const projects = this.deps.db.query("SELECT * FROM projects WHERE removed_at IS NULL").all() as ProjectRow[];
     return projects.find((p) => real(p.path) === want) ?? null;
   }
 

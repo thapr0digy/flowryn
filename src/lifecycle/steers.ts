@@ -55,8 +55,12 @@ function nextMessageId(db: Db): string {
   return `m${next}`;
 }
 
-/** Record a steer. Call inside a transaction; notify the bus (and, for an urgent one, the preempter) after commit. */
-export function createSteer(db: Db, run: RunRow, body: string, now: number, decisionId: string | null = null, urgent = false, endTurn = false): MessageRow {
+/**
+ * Record a steer. Call inside a transaction; notify the bus (and, for an urgent one, the preempter) after commit.
+ * `by` names a person's steer (`flowryn steer`: leader or human), so the weekly corrections digest can tell it
+ * from Flowryn's own (src/leader/corrections.ts); Flowryn's steers leave it null.
+ */
+export function createSteer(db: Db, run: RunRow, body: string, now: number, decisionId: string | null = null, urgent = false, endTurn = false, by: string | null = null): MessageRow {
   const text = sanitizeBlock(body).trim().slice(0, MAX_STEER_CHARS);
   const id = nextMessageId(db);
   db.query("INSERT INTO messages (id, run_id, body, created_at, decision_id, urgent, end_turn) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)").run(id, run.id, text, now, decisionId, urgent ? 1 : 0, endTurn ? 1 : 0);
@@ -65,7 +69,7 @@ export function createSteer(db: Db, run: RunRow, body: string, now: number, deci
     kind: "steer.created",
     runId: run.id,
     taskId: run.task_id,
-    payload: { steer: id, decision: decisionId, chars: text.length, ...(urgent ? { urgent: true } : {}), ...(endTurn ? { end_turn: true } : {}) },
+    payload: { steer: id, decision: decisionId, chars: text.length, ...(urgent ? { urgent: true } : {}), ...(endTurn ? { end_turn: true } : {}), ...(by ? { by } : {}) },
     ts: now,
   });
   return getMessage(db, id)!;

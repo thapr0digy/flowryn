@@ -1,11 +1,12 @@
-import { autonomyLines } from "./autonomy-report.ts";
+import { autonomyLines, renewLine } from "./autonomy-report.ts";
+import { RENEW_NOTICE_MS } from "../policy/autonomy.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
-import { DEADLINE_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
-import { awayMergeLines, validatorRoundLines } from "./validator-report.ts";
+import { DEADLINE_VIA, LEADER_AWAY_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
+import { awayMergeLines, evidenceGateLines, validatorRoundLines } from "./validator-report.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { isTerminal, taskTitle, type RunState } from "../lifecycle/runs.ts";
@@ -21,6 +22,7 @@ import { HARNESS_IDS } from "../harness/types.ts";
 import { waitedLabel } from "./deadline-defaults.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { RUN_HOLD_KINDS, waitingPointer, waitingRuns } from "./explanations.ts";
+import { FLAKE_FAILED_KIND, FLAKE_KIND } from "../verify/flake.ts";
 import { FACTS_NOTE, openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -133,31 +135,37 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
   const decided = (
     db
       .query(
-        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_via, d.answered_at, d.created_at, r.state AS run_state
+        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_via, d.answered_at, d.created_at, d.reserved_class, r.state AS run_state
          FROM decisions d LEFT JOIN runs r ON r.id = d.run_id
          WHERE (d.answered_by = 'leader' OR (d.answered_by = 'policy' AND d.answered_via IN ('${DEADLINE_VIA}', '${VALIDATOR_VIA}'))) AND d.answered_at > ?1 AND d.answered_at <= ?2 ORDER BY d.answered_at`,
       )
-      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_via: string | null; answered_at: number; created_at: number | null; run_state: RunState | null }[]
+      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_via: string | null; answered_at: number; created_at: number | null; reserved_class: string | null; run_state: RunState | null }[]
   ).filter((d) => lens.task(d.task_id));
   // The review-gate validator's rounds (src/attention/validator-report.ts) count as decided for you too.
   // Sensitive merges during an away you started (docs/notes/2026-11-08-merge-sensitive-prs-rr.md), first: each with its undo.
-  const rounds = [...awayMergeLines(db, since, until, lens), ...validatorRoundLines(db, since, until, lens)];
+  // Review gates passed on evidence, or held for you (docs/notes/2026-11-23-phase-gates-pass-8f.md), each with its page and send-back.
+  const rounds = [...awayMergeLines(db, since, until, lens), ...evidenceGateLines(db, since, until, lens), ...validatorRoundLines(db, since, until, lens)];
   if (decided.length + rounds.length === 0) return [];
   const lines = [`${heading} (${decided.length + rounds.length}):`];
   for (const d of decided.slice(0, MAX_DECISION_LINES)) {
+    const undo = d.run_state !== null && !isTerminal(d.run_state) ? `undo: flowryn decide ${d.id} <choice> --by captain` : "run over, no undo";
+    if (d.answered_via === LEADER_AWAY_VIA) {
+      // A reserved question the leader answered under the user's autonomy grant (docs/notes/2026-11-23-while-the-user-67.md): theirs to review.
+      lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (reserved${d.reserved_class ? `: ${sanitizeLine(d.reserved_class, 30)}` : ""}; the leader decided while you were away; ${undo}): ${sanitizeLine(d.rationale ?? "", 160)}`);
+      continue;
+    }
     if (d.answered_by === "leader") {
       lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
       continue;
     }
     // A deadline default (docs/notes/2026-10-30-deadline-defaults-for-gg.md): undone like a rule's answer, while the run is live.
     const waited = waitedLabel(d.answered_at - (d.created_at ?? d.answered_at));
-    const undo = d.run_state !== null && !isTerminal(d.run_state) ? `undo: flowryn decide ${d.id} <choice> --by captain` : "run over, no undo";
     const how = d.answered_via === VALIDATOR_VIA ? "taken by the validator as recommended" : "deadline";
     lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (${how} after ${waited}; ${undo})`);
   }
   if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
   lines.push(...rounds.slice(0, MAX_DECISION_LINES));
-  if (rounds.length > MAX_DECISION_LINES) lines.push(`+${rounds.length - MAX_DECISION_LINES} more validator rounds: flowryn show j<N>`);
+  if (rounds.length > MAX_DECISION_LINES) lines.push(`+${rounds.length - MAX_DECISION_LINES} more: flowryn show j<N> or flowryn show <task>`);
   return lines;
 }
 
@@ -274,6 +282,31 @@ function recordLines(db: Db): string[] {
     .map((r) => `Contract ${hhmm(r.ts)}: ${(r.by === "leader" ? leaderRecordLine : autoRecordLine)(r.harness, r.version, r.build ?? null)}.`);
 }
 
+/**
+ * Flake reruns judged since the last briefing, each shown once (src/verify/flake.ts): a batch that
+ * a rerun whose failing tests passed, with the tests that flaked and their fix task, or a rerun that failed or ended unrun.
+ */
+function flakeLines(db: Db, lens: ScopeLens): string[] {
+  const since = Number(getMeta(db, "last_briefing_at") ?? "0");
+  const rows = db.query(`SELECT ts, kind, payload FROM events WHERE kind IN ('${FLAKE_KIND}', '${FLAKE_FAILED_KIND}') AND ts > ?1 ORDER BY seq`).all(since) as { ts: number; kind: string; payload: string }[];
+  return rows
+    .map((r) => ({ ts: r.ts, kind: r.kind, ...(JSON.parse(r.payload) as { batch: string; project: string; tests?: string[]; passes?: number; task?: string | null; rerun: string | null; ran?: boolean; rerun_passed?: boolean }) }))
+    .filter((r) => lens.project(r.project))
+    .map((r) => {
+      const at = `Flake ${hhmm(r.ts)}: landing batch ${r.batch} (${r.project})`;
+      if (r.kind === FLAKE_FAILED_KIND) {
+        if (r.ran) return `${at}: its failing tests failed again alone (${r.rerun}).`;
+        if (r.rerun) return `${at}: its rerun ${r.rerun} ended before its failing tests ran.`;
+        return `${at}: its flake rerun ended when the leader retried the batch's verify.`;
+      }
+      const tests = r.tests ?? [];
+      const named = `${sanitizeLine(tests[0] ?? "-", 80)}${tests.length > 1 ? ` (+${tests.length - 1} more)` : ""}`;
+      const task = r.task ? `; fix task ${r.task}` : "; its fix task was already filed";
+      const verify = r.rerun_passed ? `its rerun verify ${r.rerun} passed` : `its rerun verify ${r.rerun} failed at a later step`;
+      return `${at}: ${named} passed ${r.passes} of ${r.passes} alone; ${verify}${task}.`;
+    });
+}
+
 /** An automatic contract check queued or running now (src/contracts/auto.ts): shown while it lasts. */
 function autoCheckLines(db: Db, config: FlowrynConfig | undefined): string[] {
   const lines: string[] = [];
@@ -307,6 +340,8 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   if (leader) lines.push(leader);
   const away = getAway(db, input.now);
   if (away) lines.push(awayLine(away, input.now));
+  const renew = renewLine(db, input.now, lens, RENEW_NOTICE_MS);
+  if (renew) lines.push(renew);
   const wake = wakeLineFor(db, input.session, input.now);
   if (wake) lines.push(wake);
   const needs = needsLines(db, input.now, input.ageMs, "Needs you", lens);
@@ -318,6 +353,7 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   lines.push(...restartLines(db));
   lines.push(...lavishLines(db, lens));
   lines.push(...recordLines(db));
+  lines.push(...flakeLines(db, lens));
   lines.push(...autoCheckLines(db, input.config));
   lines.push(...decisionLines(db, input.now, input.markMorning, lens));
   lines.push(fleetLine(db, lens));

@@ -34,7 +34,8 @@ import { confirmLogin, type ReportedLogin } from "./login.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { decisionRef } from "../lifecycle/decision-verbs.ts";
-import { captainAnswerable, DEADLINE_VIA, getDecision, isRuleAnswer, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
+import { captainAnswerable, DEADLINE_VIA, getDecision, isRuleAnswer, LEADER_AWAY_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
+import { awayProjects } from "../policy/autonomy.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
@@ -289,11 +290,11 @@ function pushTurn(s: LeaderSessionRow, mode: PushMode): number {
 }
 
 /** The text a push hands over: the P0 line; for a batch, the wake line (Claude's waiter) or every item's line. */
-function pushText(push: Push, items: RankedItem[], harness: string): string {
+function pushText(push: Push, items: RankedItem[], harness: string, away: readonly string[]): string {
   const wakeLine = push.mode === "waiter" && harness === "claude";
   if (push.kind === "p0") return p0Line(items[0]!);
   if (push.kind === "follow_up") return wakeLine ? followUpWakeLine(items) : followUpText(items, push.more);
-  return wakeLine ? questionWakeLine(items) : questionsText(items, push.more);
+  return wakeLine ? questionWakeLine(items) : questionsText(items, push.more, away);
 }
 
 /** The items of these kinds a wake carried into `turn`, for that turn's prompt hook. */
@@ -518,7 +519,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
     // A question or follow-up wake's line names the items; the woken turn gets each one in full.
     if (isQuestionWake(input.prompt)) {
       const woken = wokenItems(ctx.db, s.session_id, turn, QUESTION_KINDS);
-      if (woken.length > 0) lines.push(questionsText(woken));
+      if (woken.length > 0) lines.push(questionsText(woken, 0, awayProjects(ctx.db, now, visibleTo(ctx, s))));
     }
     if (isFollowUpWake(input.prompt)) {
       const woken = wokenItems(ctx.db, s.session_id, turn, LEADER_WAKE_KINDS);
@@ -763,7 +764,7 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
     if (gated.tooMany) return { line: `more than one captain answer in one command: "${sanitizeLine(command, 300)}"; only one flowryn decide … --by captain is allowed per command, so none of them will be recorded`, prUrl: null, head: null };
     const d = gated.task ? getDecision(ctx.db, gated.task) : null;
     if (!d || !captainAnswerable(d)) return { line: `record an answer to ${gated.task || "?"} from: "${sanitizeLine(command, 300)}": no open decision; it will be refused`, prUrl: null, head: null };
-    if (isRuleAnswer(d)) return { line: `UNDO the ${d.answered_via === DEADLINE_VIA ? "deadline default" : d.answered_via === "autonomous" ? "unattended mode" : d.answered_via === VALIDATOR_VIA ? "validator" : "rule"}'s answer ${d.answer} (${d.answered_via}) to ${d.id} ("${sanitizeLine(d.question, 120)}") and RECORD as the user's own answer: ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
+    if (isRuleAnswer(d)) return { line: `UNDO the ${d.answered_via === DEADLINE_VIA ? "deadline default" : d.answered_via === "autonomous" ? "unattended mode" : d.answered_via === VALIDATOR_VIA ? "validator" : d.answered_via === LEADER_AWAY_VIA ? "leader" : "rule"}'s answer ${d.answer} (${d.answered_via}) to ${d.id} ("${sanitizeLine(d.question, 120)}") and RECORD as the user's own answer: ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
     return { line: `RECORD as the user's own answer to ${d.id} ("${sanitizeLine(d.question, 120)}"): ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
   }
   const run = findRun(ctx.db, gated.task);
@@ -973,7 +974,7 @@ export function stop(ctx: HandlerCtx): HandlerResult {
       const texts: string[] = [];
       if (questions.length > 0) {
         appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: questions.map((q) => q.id), path: "continuation", turn: s.turn_no }, ts: now });
-        texts.push(questionsText(questions, batch!.more));
+        texts.push(questionsText(questions, batch!.more, awayProjects(ctx.db, now, visible)));
       }
       if (relayed.length > 0) {
         appendEvent(ctx.db, { source: "hook", kind: "leader.relay_pushed", payload: { session: s.session_id, items: relayed.map((r) => r.id), path: "continuation", turn: s.turn_no }, ts: now });
@@ -1116,7 +1117,7 @@ export function takeP0(ctx: HandlerCtx, outcome: WaitOutcome): HandlerResult {
   if (push.kind === "questions") appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: ids, path, turn }, ts: now });
   else if (push.kind === "follow_up") appendEvent(ctx.db, { source: "hook", kind: "leader.follow_ups_pushed", payload: { session: s.session_id, items: ids, path, turn }, ts: now });
   else appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: ids[0], path, turn }, ts: now });
-  return { data: { fire: { id: ids[0], items: ids, line: pushText(push, taken, s.harness), mode: push.mode } } };
+  return { data: { fire: { id: ids[0], items: ids, line: pushText(push, taken, s.harness, push.kind === "questions" ? awayProjects(ctx.db, now, visibleTo(ctx, s)) : []), mode: push.mode } } };
 }
 
 /**

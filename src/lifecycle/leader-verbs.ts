@@ -1,5 +1,5 @@
 import { autonomyLines } from "../attention/autonomy-report.ts";
-import { getAutonomy, latestAutonomy, projectsShown } from "../policy/autonomy.ts";
+import { autonomyForDecision, getAutonomy, latestAutonomy, projectsShown } from "../policy/autonomy.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
@@ -86,7 +86,7 @@ const steer: VerbSpec = {
     if (body.length === 0) throw new FlowrynError("bad_args", "the steer goes in --body-file -");
     const urgent = boolArg(args, "urgent");
     const endTurn = boolArg(args, "end-turn");
-    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent, endTurn);
+    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent, endTurn, ctx.caller.role);
     return { data: { steer: message.id, run: run.id, task: run.task_id, liveness: run.liveness, urgent, ...(endTurn ? { end_turn: true } : {}) }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
@@ -122,7 +122,11 @@ const answer: VerbSpec = {
     // answer stays a plain alias for a run-scoped question; a standalone decision carries no run to
     // steer, and the leader's rationale rule (decide --rationale) must not be skippable through it.
     if (!human && d.run_id === null) throw new FlowrynError("bad_args", `a standalone decision needs: flowryn decide ${id} ${choice} --rationale <why>`, `flowryn decide ${id} ${choice} --rationale <why>`);
-    if (!human && d.reserved_reason) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
+    if (!human && d.reserved_reason) {
+      // Under a live autonomy grant the leader answers it through decide, which records its reason.
+      const help = autonomyForDecision(ctx.db, d, ctx.now()) ? `under the autonomy grant, answer with your reason: flowryn decide ${id} <choice> --rationale -` : `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`;
+      throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, help);
+    }
     const done = answerDecision(ctx, d, { choice, words: note, by: human ? "captain" : "leader", via: human ? captainChannel(ctx, d, id, args) : "leader" });
     return { data: { decision: id, answer: choice, steer: done.steer ?? "-", run: done.run ?? "-" } };
   },
@@ -919,7 +923,7 @@ const show: VerbSpec = {
     if (ask) return askView(ctx, ask, text.full);
     const batch = /^lb\d+$/.test(target) ? getBatch(ctx.db, target) : null;
     if (batch) return { data: batchView(ctx.db, batch), hints: batch.state === "held" ? [`flowryn batch drop ${batch.id} ${batch.culprit ?? "<task>"}`, `flowryn batch retry ${batch.id}`] : ["flowryn fleet"] };
-    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, text.full) : null;
+    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, ctx.now, text.full) : null;
     if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
     if (divergence) return { data: { ...divergenceView(divergence), ...grantsField(ctx, { item: divergence.id }) }, hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
@@ -945,7 +949,7 @@ const show: VerbSpec = {
       const phase = phaseOfTask(ctx.db, target);
       if (phase) {
         const base = storedBase(ctx.db, target);
-        return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...(base ? { base } : {}), ...planView(ctx.db, phase.plan_id, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
+        return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...(base ? { base } : {}), ...planView(ctx.db, phase.plan_id, ctx.now, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
       }
       throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
     }

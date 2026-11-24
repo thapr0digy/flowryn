@@ -154,6 +154,22 @@ export function changeGate(step: Pick<VerifyStep, "when_changed">, changed: Chan
   return { skip: `skipped: none of the ${changed.files.length} file${changed.files.length === 1 ? "" : "s"} changed against ${changed.base} matches its when_changed (${globs})` };
 }
 
+/**
+ * A flake rerun's shell: `command` `passes` times in a row, each run marked in the log, stopping
+ * at the first that fails with its exit code (src/verify/flake.ts).
+ */
+export function repeatedCommand(command: string, passes: number): string {
+  const runs = Array.from({ length: passes }, (_, i) => i + 1).join(" ");
+  return `for n in ${runs}; do echo "--- flowryn: flake rerun $n of ${passes}"; ( ${command}\n ) || exit $?; done`;
+}
+
+/** What a flake rerun's step says it ran instead of its own command; null for any other step. */
+function rerunNote(step: VerifyStep): string | null {
+  if (!step.rerun) return null;
+  const { of, command, passes, tests } = step.rerun;
+  return `flake rerun of ${of}: ${tests.length} failing test${tests.length === 1 ? "" : "s"}, ${passes} times, with \`${command}\`${step.state === "passed" ? `: passed ${passes} of ${passes}` : ""}`;
+}
+
 /** "2-bun-run-typecheck.log" -> "2-bun-run-typecheck.retry.log". */
 export function retryLogName(log: string): string {
   return log.replace(/\.log$/, ".retry.log");
@@ -665,7 +681,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
         result = await runStep(
           job,
           {
-            command: step.name,
+            command: step.rerun ? repeatedCommand(step.rerun.command, step.rerun.passes) : step.name,
             cwd: v.worktree_path,
             logPath: join(v.dir, step.log),
             env: childEnv,
@@ -684,7 +700,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       step.exit = result.exit;
       step.tests = parseBunSummary(readTail(join(v.dir, step.log)));
       step.state = result.stopped ? "stopped" : result.exit === 0 && result.timedOut === null ? "passed" : "failed";
-      step.detail = [gate.note, stepDetail(step, result, deadline, plan, firstLog, stoppedBy())].filter((d) => d !== null).join("; ") || null;
+      step.detail = [gate.note, rerunNote(step), stepDetail(step, result, deadline, plan, firstLog, stoppedBy())].filter((d) => d !== null).join("; ") || null;
       if (result.note !== undefined && result.timedOut !== "run") step.detail = `${result.timedOut === "step" ? "the review timed out" : "the review gave no verdict"}: ${result.note}`;
       record(step);
     };

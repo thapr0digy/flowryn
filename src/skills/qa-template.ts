@@ -191,6 +191,15 @@ export function verdictsAllowed(worst: QaSeverity | null): readonly string[] {
   return QA_VERDICTS;
 }
 
+/** The card's verdict as written in `data-verdict`, or null when the page has no card or no verdict. */
+export function qaVerdictOf(html: string): string | null {
+  const start = html.search(/<section\b[^>]*\bdata-flowryn-card\b/i);
+  if (start === -1) return null;
+  const close = html.indexOf("</dl>", start);
+  const card = close === -1 ? html.slice(start) : html.slice(start, close + "</dl>".length);
+  return /\bdata-verdict\s*=\s*["']([^"']*)["']/i.exec(slotBody(card, "verdict")?.tag ?? "")?.[1] ?? null;
+}
+
 /** Whether the card says the change has no frontend surface ("Nothing visible." first in what-changed). */
 export function qaNothingVisible(html: string): boolean {
   const start = html.search(/<section\b[^>]*\bdata-flowryn-card\b/i);
@@ -246,7 +255,7 @@ export function qaPageProblems(html: string): string[] {
   const unknown = [...new Set(severities.filter((s) => !(QA_SEVERITIES as readonly string[]).includes(s)))];
   if (unknown.length > 0) problems.push(`unknown finding severity ${unknown.map((s) => `"${s}"`).join(", ")}: use data-severity="${QA_SEVERITIES.join('" | "')}"`);
   const worst = QA_SEVERITIES.find((s) => severities.includes(s)) ?? null;
-  const verdict = /\bdata-verdict\s*=\s*["']([^"']*)["']/i.exec(slotBody(card, "verdict")?.tag ?? "")?.[1];
+  const verdict = qaVerdictOf(html) ?? undefined;
   if (worst && verdict && (QA_VERDICTS as readonly string[]).includes(verdict) && !verdictsAllowed(worst).includes(verdict)) {
     problems.push(`the verdict is ${verdict} but the page has a ${worst} finding: a ${worst} means ${verdictsAllowed(worst).join(" or ")}`);
   }

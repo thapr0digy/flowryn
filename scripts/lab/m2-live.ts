@@ -192,11 +192,11 @@ async function dispatch(harness: "claude" | "pi", body: string, title: string): 
   return { task: String(reply.data.task), run: String(reply.data.run) };
 }
 
-const deliverScript = `bash mkdir -p "$FLOWRYN_REPORT_DIR" && ls src > "$FLOWRYN_REPORT_DIR/notes.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/notes.md"`;
+const deliverScript = `bash mkdir -p "$FLOWRYN_REPORT_DIR" && { printf '## Short answer\\nThe top-level source modules.\\n\\n## Evidence\\n'; ls src; } > "$FLOWRYN_REPORT_DIR/notes.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/notes.md"`;
 
 function piScout(extra: string[]): string {
   const text = [
-    "Scout: list the top-level source modules of this repository into $FLOWRYN_REPORT_DIR/notes.md, then deliver it with $FLOWRYN_BIN deliver --report $FLOWRYN_REPORT_DIR/notes.md and end your turn.",
+    "Scout: list the top-level source modules of this repository into $FLOWRYN_REPORT_DIR/notes.md under a one-line ## Short answer, then deliver it with $FLOWRYN_BIN deliver --report $FLOWRYN_REPORT_DIR/notes.md and end your turn.",
   ];
   if (scripted) text.push(`FLOWRYN-SCRIPT: ${[...extra, deliverScript, "say DONE"].join(" ;; ")}`);
   return text.join("\n");

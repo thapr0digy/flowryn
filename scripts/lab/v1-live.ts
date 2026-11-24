@@ -221,7 +221,7 @@ async function dispatch(script: string, title: string): Promise<{ task: string; 
   return { task: String(reply.data.task), run: String(reply.data.run) };
 }
 
-const REPORT = `bash mkdir -p "$FLOWRYN_REPORT_DIR" && ls src > "$FLOWRYN_REPORT_DIR/notes.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/notes.md"`;
+const REPORT = `bash mkdir -p "$FLOWRYN_REPORT_DIR" && { printf '## Short answer\\nThe top-level source modules.\\n\\n## Evidence\\n'; ls src; } > "$FLOWRYN_REPORT_DIR/notes.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/notes.md"`;
 /**
  * The promoted worker's ship step, safe to play twice: it commits once, delivers once (marked in the
  * run's own TMPDIR, which survives the relaunch) and is a no-op after that. promote() plays it twice

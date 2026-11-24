@@ -172,6 +172,8 @@ function grantLine(g: GrantRow): string {
           ? `${g.choice} for ${g.item}`
           : g.action === "autonomy"
             ? `start unattended mode (${g.item})`
+          : g.action === "autonomy-renew"
+            ? `renew unattended mode for the same span from now (${g.item})`
             : g.action === "away"
               ? `start away as yours (${g.item}), so Flowryn decides for you meanwhile`
             : g.action === "allow-red"

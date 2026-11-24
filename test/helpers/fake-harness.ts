@@ -10,7 +10,7 @@
  *   FAKE: deliver <file> <text...>   write $FLOWRYN_REPORT_DIR/<file>, deliver --report
  *   FAKE: deliver-raw <file> <text...>  like deliver, but literal \n tokens become real newlines
  *                                    (hand-craft a report's exact bytes, such as a malformed heading)
- *   FAKE: deliver-decisions <file> <k:q:opts:rec:reserved ; ...>  write a report with an ## Open decisions
+ *   FAKE: deliver-decisions <file> <k:q:opts:rec:reserved ; ...>  write a report with a ## Short answer and an ## Open decisions
  *                                    section (- for no recommendation or reason), then deliver --report
  *   FAKE: symlink <name> <target>    make $FLOWRYN_REPORT_DIR/<name> a symlink to <target>
  *   FAKE: tmpdir <file>              write the $TMPDIR it was started with to $FLOWRYN_REPORT_DIR/<file>, and a file in it
@@ -337,7 +337,8 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       });
       const path = join(env.FLOWRYN_REPORT_DIR ?? ".", file);
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, `# Fake report\n\n## Open decisions\n\n${entries.join("\n")}`);
+      // A short answer first, as deliver --report requires of a report over 15 lines.
+      writeFileSync(path, `# Fake report\n\n## Short answer\n\nDecisions below.\n\n## Open decisions\n\n${entries.join("\n")}`);
       await tool(async () => {
         const result = await flowryn(["deliver", "--report", path]);
         log(`deliver -> ${result.code} ${result.stdout.trim()}`);

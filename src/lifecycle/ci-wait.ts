@@ -33,6 +33,8 @@ export interface BranchFacts {
   lacksNoCi: boolean | null;
   /** The branch already contains the default branch's tip: merging it changes nothing. */
   hasMain: boolean | null;
+  /** The default branch's `.no-mistakes.yaml` says `no_ci: true`. */
+  mainNoCi: boolean | null;
 }
 
 const NO_CI = /^no_ci:[ \t]*true[ \t]*(#.*)?$/m;
@@ -100,10 +102,11 @@ export async function readBranchFacts(git: GitRunner, worktree: string, defaultB
     return r && r.code === 0 ? r.stdout : null;
   };
   const tip = await git(["rev-parse", "--verify", "--quiet", `${main}^{commit}`], worktree).catch(() => null);
-  if (!tip || tip.code !== 0) return { lacksNoCi: null, hasMain: null };
+  if (!tip || tip.code !== 0) return { lacksNoCi: null, hasMain: null, mainNoCi: null };
   const contains = await git(["merge-base", "--is-ancestor", main, "HEAD"], worktree).catch(() => null);
   const hasMain = contains === null || (contains.code !== 0 && contains.code !== 1) ? null : contains.code === 0;
-  return { lacksNoCi: declaresNoCi(await show(main)) && !declaresNoCi(await show("HEAD")), hasMain };
+  const mainNoCi = declaresNoCi(await show(main));
+  return { lacksNoCi: mainNoCi && !declaresNoCi(await show("HEAD")), hasMain, mainNoCi };
 }
 
 export interface CiStall {
@@ -121,7 +124,9 @@ export function ciWaitText(title: string, project: string, stall: CiStall, facts
   const remarks: string[] = [];
   if (facts.lacksNoCi) remarks.push(`Its branch lacks ${stall.defaultBranch}'s \`no_ci: true\` (.no-mistakes.yaml), so its pipeline cannot count a PR with no checks as green; merging ${main} brings it.`);
   if (facts.hasMain && !facts.lacksNoCi) remarks.push(`Its branch already has ${main}: merging changes nothing.`);
-  const recommend: CiWaitChoice = facts.hasMain && !facts.lacksNoCi ? "keep-waiting" : "merge-main";
+  const countedGreen = facts.mainNoCi === true && facts.lacksNoCi === false;
+  if (countedGreen) remarks.push("no-mistakes counts a PR with no checks as passed under no_ci and keeps watching until merge, so waiting ends only at ci_timeout.");
+  const recommend: CiWaitChoice = countedGreen ? "accept-without-ci" : facts.hasMain && !facts.lacksNoCi ? "keep-waiting" : "merge-main";
   const question = [
     `${title} (${project}): its no-mistakes pipeline has waited ${stall.minutes} min in CI with no checks registered on ${on}.`,
     ...remarks,

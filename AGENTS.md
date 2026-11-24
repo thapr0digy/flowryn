@@ -81,8 +81,23 @@ fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"
 - Keep `ERROR_CODES` in alphabetical order (a test checks).
 - Workers never rewrite history. Make new commits and `git merge origin/main`; never amend, rebase or force-push.
 
+## Rules and their checks
+
+A correction made twice becomes a check (the correct skill; docs/notes/2026-11-22-phase-corrections-become-7t.md). Add its row here.
+
+| Rule | Enforced by | Proven on |
+|---|---|---|
+| Every verb a leader reaches declares `scope` | test/unit/leader-scope.test.ts | - |
+| `ERROR_CODES` in alphabetical order | test/unit/basics.test.ts | - |
+| Migrations run 1..N | test/unit/db.test.ts | - |
+| No version change mixed with other files | test/unit/release.test.ts | - |
+| A no_ci project's CI wait recommends accept-without-ci | test/unit/ci-wait.test.ts | fails at 2f31e53, passes at HEAD |
+| Frozen docs gain no heading; notes files well formed | test/unit/docs-notes.test.ts | - |
+| Toolkit rules (gh-axi, sqlite-axi, ...) | the hook, src/policy/toolkit.ts; test/integration/toolkit.test.ts | - |
+| Leader skill under 6,000 characters | test/unit/prompts-that-keep.test.ts | - |
+
 ## Maintaining this file
 
 - Keep only what almost every session needs and cannot learn from the code. Point to the authoritative file instead of restating it.
 - Keep each bullet to one or two lines. Edit or prune an existing bullet instead of adding a near-duplicate. Stay well under 200 lines.
-- A rule that must never be broken belongs in a test or hook, with a one-line pointer here.
+- A rule that must never be broken belongs in a test or hook, with a one-line pointer here and a row in the table above.

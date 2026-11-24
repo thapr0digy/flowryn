@@ -45,6 +45,9 @@ export interface ProjectRow {
   workflow: string;
   autonomy: (typeof AUTONOMY)[number];
   kind: ProjectKind;
+  /** Set by `project rm` (src/lifecycle/project-rm.ts): the row stays for history, and live work skips it. */
+  removed_at?: number | null;
+  removed_reason?: string | null;
 }
 
 function oneOf<T extends string>(value: string | undefined, allowed: readonly T[], flag: string): T | undefined {
@@ -89,8 +92,17 @@ function requireNotesLocal(kind: ProjectKind, mode: ProjectRow["delivery_mode"],
   }
 }
 
+/** Any project, removed ones too: history (runs, plans, events) still resolves the project it named. */
 export function getProject(db: Db, id: string): ProjectRow | null {
   return db.query("SELECT * FROM projects WHERE id = ?1").get(id) as ProjectRow | null;
+}
+
+/** A project new work may start on: registered and not removed. */
+export function requireActiveProject(db: Db, id: string): ProjectRow {
+  const project = getProject(db, id);
+  if (!project) throw new FlowrynError("not_found", `no project ${id}`, "flowryn project list");
+  if (project.removed_at != null) throw new FlowrynError("not_found", `project ${id} was removed`, "flowryn project list --all");
+  return project;
 }
 
 /** Insert a project row and its event (call inside a transaction). */
@@ -104,12 +116,14 @@ export function insertProject(db: Db, row: ProjectRow): void {
 
 /** Each registered project's delivery mode, for the config checks that depend on it. */
 export function deliveryModes(db: Db): Record<string, string> {
-  const rows = db.query("SELECT id, delivery_mode FROM projects").all() as { id: string; delivery_mode: string }[];
+  const rows = db.query("SELECT id, delivery_mode FROM projects WHERE removed_at IS NULL").all() as { id: string; delivery_mode: string }[];
   return Object.fromEntries(rows.map((r) => [r.id, r.delivery_mode]));
 }
 
-export function listProjects(db: Db): ProjectRow[] {
-  return db.query("SELECT * FROM projects ORDER BY priority, id").all() as ProjectRow[];
+/** The projects live work runs on; `removed: true` adds the ones `project rm` removed. */
+export function listProjects(db: Db, opts: { removed?: boolean } = {}): ProjectRow[] {
+  const where = opts.removed ? "" : "WHERE removed_at IS NULL ";
+  return db.query(`SELECT * FROM projects ${where}ORDER BY priority, id`).all() as ProjectRow[];
 }
 
 function projectView(p: ProjectRow): Record<string, unknown> {
@@ -179,8 +193,9 @@ const projectAdd: VerbSpec = {
     const facts = prepared as RepoFacts;
     const id = stringArg(args, "id") ?? slugify(basename(facts.path), 6);
     if (!PROJECT_ID.test(id)) throw new FlowrynError("invalid_project", "--id must be lowercase letters, digits and dashes");
-    if (getProject(ctx.db, id)) throw new FlowrynError("already_exists", `project ${id} already exists`, `flowryn project set ${id} ...`);
-    const byPath = ctx.db.query("SELECT id FROM projects WHERE path = ?1").get(facts.path) as { id: string } | null;
+    const existing = getProject(ctx.db, id);
+    if (existing) throw new FlowrynError("already_exists", existing.removed_at != null ? `project ${id} was removed; its id stays taken by its history` : `project ${id} already exists`, existing.removed_at != null ? "pass another --id" : `flowryn project set ${id} ...`);
+    const byPath = ctx.db.query("SELECT id FROM projects WHERE path = ?1 AND removed_at IS NULL").get(facts.path) as { id: string } | null;
     if (byPath) throw new FlowrynError("already_exists", `${facts.path} is already project ${byPath.id}`);
     const kind = oneOf(stringArg(args, "kind"), PROJECT_KINDS, "kind") ?? "code";
     const mode = oneOf(stringArg(args, "mode"), DELIVERY_MODES, "mode") ?? (kind === "notes" ? "local-only" : "no-mistakes");
@@ -249,8 +264,7 @@ const projectSet: VerbSpec = {
   },
   apply(ctx, args, prepared) {
     const id = stringArg(args, "id")!;
-    const current = getProject(ctx.db, id);
-    if (!current) throw new FlowrynError("not_found", `no project ${id}`, "flowryn project list");
+    const current = requireActiveProject(ctx.db, id);
     const updates: Partial<ProjectRow> = {};
     const moved = prepared as RepoFacts | null;
     if (moved) updates.path = moved.path;
@@ -321,7 +335,7 @@ const projectSet: VerbSpec = {
 
 /** A new path for a project must be the same repository: the origin its remote will be (this call's --repo-url, else the stored one), and no other project's checkout. */
 function requireSameRepository(db: Db, project: ProjectRow, moved: RepoFacts): void {
-  const other = db.query("SELECT id FROM projects WHERE path = ?1 AND id != ?2").get(moved.path, project.id) as { id: string } | null;
+  const other = db.query("SELECT id FROM projects WHERE path = ?1 AND id != ?2 AND removed_at IS NULL").get(moved.path, project.id) as { id: string } | null;
   if (other) throw new FlowrynError("already_exists", `${moved.path} is already project ${other.id}`);
   if (project.repo_url !== "" && moved.repoUrl && normalizeRemote(moved.repoUrl) !== normalizeRemote(project.repo_url)) {
     throw new FlowrynError("invalid_project", `${moved.path}'s origin is ${moved.repoUrl}, not project ${project.id}'s ${project.repo_url}`, "give the path of the same repository's checkout");
@@ -332,13 +346,16 @@ const projectList: VerbSpec = {
   name: "project list",
   summary: "List registered projects",
   positionals: [],
-  flags: {},
+  flags: {
+    all: { type: "boolean", help: "removed projects too" },
+  },
   kind: "read",
   roles: ["leader", "reader", "human"],
   scope: { kind: "list" },
-  read(ctx) {
+  read(ctx, args) {
     const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
-    const projects = listProjects(ctx.db)
+    const all = boolArg(args, "all");
+    const projects = listProjects(ctx.db, { removed: all })
       .filter((p) => lens.project(p.id))
       .map((p) => ({
       id: p.id,
@@ -349,6 +366,7 @@ const projectList: VerbSpec = {
       harness: p.harness,
       branch: p.default_branch,
       path: p.path,
+      ...(all ? { removed: p.removed_at != null ? new Date(p.removed_at).toISOString() : "-" } : {}),
     }));
     return { data: { projects }, hints: projects.length === 0 ? ["flowryn project add <path>"] : ["flowryn project set <id> --mode <mode>"] };
   },

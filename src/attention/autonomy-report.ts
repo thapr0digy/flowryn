@@ -1,7 +1,8 @@
 import type { Db } from "../db/db.ts";
 import type { ScopeLens } from "../leader/scope.ts";
+import { LEADER_AWAY_VIA } from "../lifecycle/decisions.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
-import { autonomyLine, type AutonomyRow } from "../policy/autonomy.ts";
+import { autonomyLine, autonomyRenewRef, grantSpan, latestAutonomy, projectsOf, RENEW_NOTICE_MS, spanLabel, stampOf, type AutonomyRow } from "../policy/autonomy.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -39,6 +40,25 @@ function group(heading: string, lines: string[]): string[] {
   if (lines.length === 0) return [`${heading}: none.`];
   const shown = lines.slice(0, MAX_AUTONOMY_LINES);
   return [`${heading} (${lines.length}):`, ...shown, ...(lines.length > shown.length ? [`+${lines.length - shown.length} more: flowryn show autonomy`] : [])];
+}
+
+/**
+ * The renew offer for the latest grant, or null: once it has expired (for `shownFor` after), and
+ * from RENEW_NOTICE_MS before its end for a grant longer than that. A line, never a question:
+ * only the user's answer to `flowryn chat-question autonomy-renew:...` renews it.
+ */
+export function renewLine(db: Db, now: number, lens: Pick<ScopeLens, "project">, shownFor: number): string | null {
+  const row = latestAutonomy(db);
+  if (!row || (row.ended_at !== null && row.end_reason !== "expired")) return null;
+  if (!projectsOf(row).every((p) => lens.project(p))) return null;
+  const span = grantSpan(row);
+  const ends = stampOf(row.expires_at).replace("T", " ");
+  const ask = `ask the user: flowryn chat-question ${autonomyRenewRef(row)} (then flowryn grant use <grant>)`;
+  if (row.expires_at <= now) {
+    return now - row.expires_at <= shownFor ? `Unattended mode ${row.id} ended at ${ends}. To renew it for ${spanLabel(span)} on the same projects, ${ask}.` : null;
+  }
+  if (span > RENEW_NOTICE_MS && row.expires_at - now <= RENEW_NOTICE_MS) return `Unattended mode ${row.id} ends at ${ends}. If the user wants it renewed for ${spanLabel(span)} from their answer on the same projects, ${ask}.`;
+  return null;
 }
 
 /** The grants that were live at some point in the window. */
@@ -89,8 +109,9 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
     .map((e) => {
       const p = payload(e);
       const what = typeof p.decision === "string" ? p.decision : typeof p.gate === "string" ? p.gate : "?";
-      const d = typeof p.decision === "string" ? (db.query("SELECT state FROM decisions WHERE id = ?1").get(p.decision) as { state: string } | null) : null;
-      const next = typeof p.decision === "string" ? (d?.state === "open" ? `; answer: flowryn decide ${p.decision} <choice> --by captain` : "; answered since") : `; pass or send back: flowryn approve ${e.task_id ?? "<task>"} --gate <stage>`;
+      const d = typeof p.decision === "string" ? (db.query("SELECT state, answer, answered_via FROM decisions WHERE id = ?1").get(p.decision) as { state: string; answer: string | null; answered_via: string | null } | null) : null;
+      const answered = d?.answered_via === LEADER_AWAY_VIA ? `; the leader answered ${sanitizeLine(d.answer ?? "?", 60)} while you were away (Decided for you)` : "; answered since";
+      const next = typeof p.decision === "string" ? (d?.state === "open" ? `; answer: flowryn decide ${p.decision} <choice> --by captain` : answered) : `; pass or send back: flowryn approve ${e.task_id ?? "<task>"} --gate <stage>`;
       return `- ${named(db, e.task_id)} on ${sanitizeLine(what, 12)}: ${sanitizeLine(String(p.why ?? "?"), 160)}${next}`;
     });
   return [
@@ -99,5 +120,7 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
     ...group("Decided", decided),
     ...group("Merged", merges),
     ...group("Parked", parked),
+    // After what it did: the offer to renew, when the window's own last grant expired.
+    ...[grants.at(-1)?.id === latestAutonomy(db)?.id ? renewLine(db, input.now, lens, Number.POSITIVE_INFINITY) : null].filter((l): l is string => l !== null),
   ];
 }

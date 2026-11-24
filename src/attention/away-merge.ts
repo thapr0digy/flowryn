@@ -7,7 +7,7 @@ import { approvalRef, deliveredOf, prEvidence, type Delivered } from "../lifecyc
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { consumeApproval, insertApproval, type ApprovalRow } from "../policy/approvals.ts";
-import { AUTONOMY_MAX_MS, autonomyForRun } from "../policy/autonomy.ts";
+import { autonomyForRun } from "../policy/autonomy.ts";
 import { createAutoMerge, liveAutoMerge, supersedeAutoMerge } from "../verify/auto-merge.ts";
 import { landingQueued, verifyConfig } from "../verify/config.ts";
 import { leaveLanding, liveLanding, MAX_INTEGRATIONS } from "../verify/landing-queue.ts";
@@ -48,6 +48,9 @@ import { AWAY_VALIDATOR_CHANNEL, getValidation, MERGE_STAGE, validationIdOfActor
  * judgement. The trigger, eligibility (awayMergeRefusal), the record, the live check
  * (awayApprovalLive), the stop when the away ends (stopAwayMerges) and the merge are plain code.
  */
+
+/** A validator's merge approval lasts while the away does, and at most this long. */
+const AWAY_APPROVAL_MAX_MS = 16 * 60 * 60_000;
 
 /** Passes per task per away: the landing queue moves the head at most MAX_INTEGRATIONS times, and each new head is judged again. A function, so a module cycle never reads it early. */
 export function maxMergePasses(): number {
@@ -332,7 +335,7 @@ export function applyMergeValidation(db: Db, input: { id: string; result: Parame
     now,
   });
   // It lasts while the away does, and the merge gate checks the away again at every use.
-  const until = Math.min(away!.until, now + AUTONOMY_MAX_MS);
+  const until = Math.min(away!.until, now + AWAY_APPROVAL_MAX_MS);
   db.query("UPDATE approvals SET expires_at = ?2 WHERE id = ?1").run(approval.id, until);
   appendEvent(db, { source: "daemon", kind: "away_merge.approved", runId: run!.id, taskId: run!.task_id, payload: { validation: row.id, approval: approval.id, ref, head: row.head, away_since: away!.since, by: away!.by }, ts: now });
   // A landing that left for want of an approval waits no longer.

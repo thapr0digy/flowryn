@@ -77,3 +77,37 @@ test("flowryn drop through the CLI: refuses started work and a missing reason, d
   expect(again.code).toBe(4);
   expect(JSON.stringify(again.reply)).toContain("was dropped");
 }, 60_000);
+
+// The shape that misled an audit (p9): one phase ran, the rest were dropped one task at a time; `show` must say so.
+test("flowryn show <plan> through the CLI: dropped phases read dropped, and a plan with nothing left to run reads finished", async () => {
+  const env = await makeFleetEnv();
+  envs.push(env);
+  expect((await env.json(["project", "set", "web", "--autonomy", "manual"])).code).toBe(0);
+  const filed = await env.json(["plan", "web", "--body-file", "-"], { stdin: "# Three steps\n## Phase 1: Ran\nx\n## Phase 2: Edges\nx\n## Phase 3: Cutover\nx\n" });
+  expect(filed.code).toBe(0);
+  const { plan, phases } = filed.reply.data as { plan: string; phases: { task: string }[] };
+  const [first, second, third] = phases.map((p) => p.task);
+  await waitUntil(() => inSnapshot(env, third!), 10_000, "the plan's phases in the snapshot");
+  env.h
+    .db()
+    .query(
+      `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+       VALUES ('r-ran', ?1, 'claude', '1', 'cancelled', 'dead', 'fix', 'build', '/tmp/wt', 'b', 'abc', 'r-ran', 1, 1)`,
+    )
+    .run(first!);
+
+  for (const task of [third!, second!]) {
+    const dropped = await env.json(["drop", task, "--body-file", "-"], { stdin: "superseded by p12\nthe long story" });
+    expect(dropped.code).toBe(0);
+    await waitUntil(() => !inSnapshot(env, task), 10_000, `${task}'s rm applied`);
+  }
+
+  const shown = await env.json(["show", plan]);
+  expect(shown.code).toBe(0);
+  const data = shown.reply.data as { state: string; phases: { task: string; at: string }[] };
+  expect(data.state).toBe("finished");
+  const at = data.phases.map((p) => p.at);
+  expect(at[0]).toBe("cancelled · build active");
+  for (const line of at.slice(1)) expect(line).toMatch(/^dropped · \d+s ago · superseded by p12$/);
+  expect(JSON.stringify(data)).not.toContain("waits for");
+}, 60_000);

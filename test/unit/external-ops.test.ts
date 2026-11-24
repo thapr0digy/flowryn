@@ -283,7 +283,7 @@ describe("the axi tools and the other helpers, silent", () => {
 
   test("gh auth token gives no token within its budget", async () => {
     const gh = silentTool("gh");
-    const token = tokenSource({}, [], gh, "https://api.github.com", "https://github.com", TIMEOUT_MS);
+    const token = tokenSource({}, [], gh, "https://api.github.com", "https://github.com", { ghTimeoutMs: TIMEOUT_MS });
     const { value, ms } = await fromReady(join(dir, "gh.pid"), () => token());
     expect(value).toBeNull();
     expect(ms).toBeLessThan(BUDGET_MS);
@@ -294,7 +294,7 @@ describe("the axi tools and the other helpers, silent", () => {
     const gh = join(dir, "gh");
     writeFileSync(gh, `#!/bin/sh\nsleep 600 >/dev/null &\necho $! > ${JSON.stringify(join(dir, "gh.pid"))}\nhead -c 20000000 /dev/zero >&2\necho tok-123\n`);
     chmodSync(gh, 0o755);
-    const token = tokenSource({}, [], gh, "https://api.github.com", "https://github.com", 5_000);
+    const token = tokenSource({}, [], gh, "https://api.github.com", "https://github.com", { ghTimeoutMs: 5_000 });
     expect(await token()).toBe("tok-123");
     expect(alive(pidIn(join(dir, "gh.pid")))).toBe(true);
   });

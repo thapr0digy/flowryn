@@ -8,7 +8,7 @@ Scout finding 10 (scout-efficiency-and-fz): Flowryn read a delivered PR's state,
 
 ## What it does
 
-On each delivery-watcher poll (`[github] poll_ms`), for every open PR delivered by a ship that is `ready` (delivered) or `running`/`validating` (back at work on it):
+Every `QUIET_READ_POLLS` delivery-watcher polls (`[github] poll_ms`; cadence in docs/notes/2026-11-22-flowryn-spends-less-ks.md), for every open PR delivered by a ship that is `ready` (delivered) or `running`/`validating` (back at work on it):
 
 1. Read the PR's reviews, inline review comments and conversation comments (`GET pulls/N/reviews`, `pulls/N/comments`, `issues/N/comments`). These are paged and ETag-cached, so an unchanged list is a free 304.
 2. Read the review threads' resolution through GraphQL (`reviewThreads { isResolved comments(first:1) { databaseId } }`; REST has no resolved flag). This read happens only while an inline thread waits on an answer, and at most every 5 min per PR (`REVIEW_THREADS_MIN_GAP_MS`), because a GraphQL POST has no ETag and costs rate limit. The GraphQL URL is `<host>/api/graphql` for an Enterprise `…/api/v3` base, otherwise `<api_url>/graphql`. The token rule is unchanged.

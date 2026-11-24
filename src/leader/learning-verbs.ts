@@ -1,9 +1,11 @@
 import { FlowrynError } from "../api/errors.ts";
-import { boolArg, stringArg, type Args, type Caller, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
+import { boolArg, intArg, stringArg, type Args, type Caller, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { learningsConfig } from "../config/leader.ts";
 import type { Db } from "../db/db.ts";
 import { localDate, parseDueArg } from "../lifecycle/dates.ts";
+import { getProject } from "../lifecycle/projects.ts";
+import { correctionsOf, CORRECTIONS_MIN, CORRECTIONS_WINDOW_MS } from "./corrections.ts";
 import { getLesson, learn, LESSON_MAX_CHARS, lessonId, parseLessonId, unlearn, visibleLessons, type LearningRow } from "./learnings.ts";
 import { defaultScope, lensFor, projectScopeById, requireInScope } from "./scope.ts";
 
@@ -50,6 +52,7 @@ const learnVerb: VerbSpec = {
     project: { type: "string", help: "the project it is about", placeholder: "id", complete: "project" },
     until: { type: "string", help: "set it aside after this day: YYYY-MM-DD, tomorrow or +Nd", placeholder: "date" },
     replaces: { type: "string", help: "a lesson this one corrects, set aside as replaced", placeholder: "l<N>" },
+    correction: { type: "boolean", help: "it records the user correcting you: the weekly corrections scout reads it" },
     "body-file": { type: "string", help: "the lesson, read from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -70,8 +73,9 @@ const learnVerb: VerbSpec = {
     const scope = lessonScope(ctx.db, config, ctx.caller, stringArg(args, "project") ?? null, replaces);
     if (replaces && replaces.scope !== scope) throw new FlowrynError("bad_args", `${replacesRef} is in scope ${replaces.scope}, not ${scope}`, "a lesson replaces one of its own scope");
     requireInScope(config, ctx.caller, scope, `scope ${scope}`);
-    const result = learn(ctx.db, { scope, project, text, until: untilArg(stringArg(args, "until"), now), replaces, max: learningsConfig(config).max, now, source: "cli" });
+    const result = learn(ctx.db, { scope, project, text, until: untilArg(stringArg(args, "until"), now), replaces, correction: boolArg(args, "correction"), max: learningsConfig(config).max, now, source: "cli" });
     const data: Record<string, unknown> = { lesson: lessonId(result.lesson.id), action: result.action, scope, project: result.lesson.project ?? "-" };
+    if (result.lesson.correction === 1) data.correction = true;
     if (replaces) data.replaced = lessonId(replaces.id);
     if (result.setAside.length > 0) data.set_aside = result.setAside.map((r) => ({ lesson: lessonId(r.id), text: r.text }));
     const hints = result.setAside.length > 0 ? ["the cap set these aside: learn one again if it still matters", "flowryn learnings --archived"] : ["flowryn learnings"];
@@ -124,4 +128,34 @@ const learningsVerb: VerbSpec = {
   read: listLearnings,
 };
 
-export const LEARNING_VERBS: VerbSpec[] = [learnVerb, learningsVerb, unlearnVerb];
+const MAX_DAYS = 90;
+
+function listCorrections(ctx: ReadCtx, args: Args): HandlerResult {
+  const project = getProject(ctx.db, stringArg(args, "project")!);
+  if (!project) throw new FlowrynError("not_found", `no project ${stringArg(args, "project")}`, "flowryn project list");
+  const days = intArg(args, "days") ?? CORRECTIONS_WINDOW_MS / 86_400_000;
+  if (days < 1 || days > MAX_DAYS) throw new FlowrynError("bad_args", `--days must be 1 to ${MAX_DAYS}`);
+  const until = ctx.now;
+  const since = until - days * 86_400_000;
+  const rows = correctionsOf(ctx.db, project.id, since, until);
+  const corrections = rows.map((c) => ({ id: c.id, source: c.source, date: localDate(new Date(c.at)), task: c.task ?? "-", text: c.text }));
+  const enough = rows.length >= CORRECTIONS_MIN;
+  return {
+    data: { project: project.id, corrections, summary: `${rows.length} correction${rows.length === 1 ? "" : "s"} in ${days} days` },
+    hints: enough ? ["a correction made twice is a class: the correct skill turns it into a check", "the weekly corrections scout files them as ships"] : [],
+  };
+}
+
+/** `flowryn corrections <project>`: the list the weekly corrections scout groups (src/leader/corrections.ts), as of now. */
+const correctionsVerb: VerbSpec = {
+  name: "corrections",
+  summary: "List a project's corrections (your answers, steers, review-page words, send-backs, lessons): what the weekly corrections scout groups",
+  positionals: [{ name: "project", required: true, help: "project id", complete: "project" }],
+  flags: { days: { type: "int", help: `how far back, 1 to ${MAX_DAYS} days (default 7)`, placeholder: "n" } },
+  kind: "read",
+  roles: ["leader", "reader", "human"],
+  scope: { kind: "project", arg: "project" },
+  read: listCorrections,
+};
+
+export const LEARNING_VERBS: VerbSpec[] = [learnVerb, learningsVerb, unlearnVerb, correctionsVerb];

@@ -69,7 +69,7 @@ afterEach(() => {
 });
 
 function add(text: string, extra: Partial<LearnInput> = {}) {
-  return tx(db, () => learn(db, { scope: "work", project: null, text, until: null, replaces: null, max: 25, now: T0, source: "cli", ...extra }));
+  return tx(db, () => learn(db, { scope: "work", project: null, text, until: null, replaces: null, correction: false, max: 25, now: T0, source: "cli", ...extra }));
 }
 
 function events(kind: string): Record<string, unknown>[] {
