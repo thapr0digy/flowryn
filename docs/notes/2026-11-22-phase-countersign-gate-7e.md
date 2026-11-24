@@ -1,16 +1,13 @@
 # Countersigned gate loosening
 
 - Status: done
-- Open: not yet run live on a real fix-forward
+- Open: not yet run live on a real fix in a landing batch
 
 Plan p104, proposal 6. A fix can make a red check green by moving the check instead of the code: raising a budget, lengthening a timeout, skipping a test, adding an allowlist entry. This week two fix-forwards each raised a UI first-load budget by 1 KB, and nobody saw it. Now such a fix merges only after a verifier has proved the new number and the leader has countersigned it. The model is Lauren Tan's rule (pstack autopilot-full): "Anything that loosens a gate … needs a verifier's proof and then your fresh countersign."
 
 ## Which diffs
 
-The rule covers two kinds of diff:
-
-- A run on the `fix` workflow. The diff is its commits past its base branch: local `refs/heads/<base>` for a local-only ship, `refs/remotes/origin/<base>` for a PR.
-- A landing batch's fix-forward. The diff is only the fix's own commits, past the batch head it started on (`fix_base`), so the members' changes never count.
+The rule covers a run on the `fix` workflow. The diff is its commits past its base branch: local `refs/heads/<base>` for a local-only ship, `refs/remotes/origin/<base>` for a PR. A landing batch's fix-forward was a second kind until landing batches split on red instead (landing-batches-split-3f, docs/notes/2026-11-21-landing-batches-one-27.md); a fix run in a batch is still checked, and holds the green batch `loosened_gate` until its countersign.
 
 Feature work is not checked.
 
@@ -72,4 +69,4 @@ The open decision appears in the briefing's decisions for the leader.
 - `test/unit/loosening.test.ts`: the detector rules.
 - `test/unit/countersign.test.ts`: the gate on a local-only fix with real git. It covers a refused gate, a single decision, a countersign that passes, a project with no verify steps that keeps refusing with no decision, a refuse that keeps refusing, a new head that dismisses the old decision, a sensitive decision reserved for the user where only the user's countersign passes, and features and clean fixes that pass untouched.
 - `test/integration/decisions.test.ts`: `decision add` refuses the `countersign` origin.
-- `test/unit/landing-batch.test.ts`, under "fix forward": a fix-forward that raises a budget holds the green batch, and the countersign lands it. A refused countersign keeps the batch held, and dropping the fix rebuilds it. Dropping the fix while its decision is open dismisses the decision.
+- `test/unit/landing-batch.test.ts`, under "a gate loosening in a batch": a fix run in a batch that raises a budget holds the green batch, and the countersign lands it. Dropping that member while its decision is open dismisses the decision and rebuilds the rest.
