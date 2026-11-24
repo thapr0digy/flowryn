@@ -26,15 +26,17 @@ export interface WaitFileOptions {
 
 /**
  * A shell loop that waits for `path` to exist, with a bounded life: it exits 1
- * once `WAIT_FILE_LIMIT_S` seconds of polls have passed, or as soon as the process that
+ * once `WAIT_FILE_LIMIT_S` seconds of wall-clock time have passed, or as soon as the process that
  * started it is gone (a daemon a teardown force-killed), so a test that ends
  * without writing the file never leaves it spinning. Ends the shell on giving
  * up, so what follows it in the same script runs only once the file is there.
+ * The deadline is read from the clock, not counted in polls: each `sleep 0.05`
+ * fork costs well over 50 ms, so 1,200 polls took about 150 s.
  */
 export function waitForFileShell(path: string, options: WaitFileOptions = {}): string {
-  const polls = WAIT_FILE_LIMIT_S * 20;
   const parent = options.exitWithParent === false ? "" : "kill -0 $PPID 2>/dev/null || exit 1; ";
-  return `fw_polls=0; while [ ! -f ${JSON.stringify(path)} ]; do ${parent}fw_polls=$((fw_polls + 1)); [ $fw_polls -gt ${polls} ] && exit 1; sleep 0.05; done`;
+  // The clock is read about once a second (every 20th poll), keeping each poll to one fork.
+  return `fw_end=$(($(date +%s) + ${WAIT_FILE_LIMIT_S})); fw_polls=0; while [ ! -f ${JSON.stringify(path)} ]; do ${parent}fw_polls=$((fw_polls + 1)); [ $((fw_polls % 20)) -eq 0 ] && [ $(date +%s) -ge $fw_end ] && exit 1; sleep 0.05; done`;
 }
 
 /**
