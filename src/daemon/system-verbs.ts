@@ -54,6 +54,8 @@ export function systemVerbs(): VerbSpec[] {
             pending_intents: pending,
             failed_intents: failed,
             build: info?.build ?? null,
+            dashboard: info?.dashboard?.().url ?? null,
+            dashboard_why: info?.dashboard?.().why ?? null,
             restart_pending: readPending(ctx.db),
             restart_handoff: handoffPending(ctx.db),
             restart_dropped: lastDropped(ctx.db),

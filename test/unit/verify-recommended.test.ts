@@ -30,6 +30,8 @@ function importClosure(entries: string[]): string[] {
     const file = queue.pop()!;
     if (seen.has(file)) continue;
     seen.add(file);
+    // An asset imported as text (src/dashboard/page.html) is in the binary and the closure, but has no imports of its own.
+    if (!file.endsWith(".ts")) continue;
     const specifiers = transpiler.scanImports(readFileSync(file, "utf8").replace(/^#!.*/, "")).map((entry) => entry.path);
     for (const specifier of specifiers.filter((s) => s.startsWith("./") || s.startsWith("../"))) {
       const target = resolve(dirname(file), specifier);

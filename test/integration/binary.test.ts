@@ -59,6 +59,23 @@ describe("compiled binary", () => {
       expect(await daemon.exited).toBe(0);
     }
   }, 60_000);
+
+  // docs/notes/2026-11-24-a-live-build-t8.md: the page is imported as text, so the binary must carry it.
+  test("assumption: the compiled daemon serves the embedded dashboard page", async () => {
+    requireNotificationsOff(h.env, "binary test");
+    const daemon = Bun.spawn([join(h.home, "bin", "flowrynd")], { env: { ...h.env, FLOWRYN_DASHBOARD_PORT: "0" }, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+    try {
+      await waitUntil(() => pingSocket(h), 15_000, "the compiled daemon");
+      const reply = JSON.parse(run(bin, ["dashboard", "--json"]).stdout) as { data: { url: string } };
+      const page = await fetch(reply.data.url);
+      expect(page.status).toBe(200);
+      expect(await page.text()).toContain("<title>Flowryn builds</title>");
+      expect((await fetch(`${reply.data.url}api/status`)).status).toBe(200);
+    } finally {
+      daemon.kill("SIGTERM");
+      expect(await daemon.exited).toBe(0);
+    }
+  }, 60_000);
 });
 
 function build(out: string, env: Record<string, string> = {}): void {

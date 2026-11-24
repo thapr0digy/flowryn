@@ -99,6 +99,8 @@ import { adoptLegacyScope } from "../leader/scope.ts";
 import { refreshScopeGuard } from "../leader/scope-guard.ts";
 import { AutoMerger, startAutoMerge, startAutoVerify } from "../verify/auto-merge.ts";
 import { deliveredToQueue, LANDING_NET_TIMEOUT_MS, LandingQueue } from "../verify/landing-queue.ts";
+import { DashboardServer, dashboardPort } from "../dashboard/server.ts";
+import { buildStatus } from "../dashboard/status.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -220,6 +222,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   let lock: HeldLock | null = null;
   let db: Db | null = null;
   let listener: Listener | null = null;
+  let dashboard: DashboardServer | null = null;
   let boundSocket = false;
   let removeSignals: (() => void) | null = null;
   let ownsProcesses = false;
@@ -825,6 +828,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     listener = await listen(sock, (message) => gateway.handle(message), (error) => log(`socket: ${error.message}`));
     boundSocket = true;
+    // The live build page (docs/notes/2026-11-24-a-live-build-t8.md): read-only, on 127.0.0.1.
+    const page = new DashboardServer({
+      choice: dashboardPort(env),
+      status: () => JSON.stringify(buildStatus({ db: database, config, now: Date.now(), build: build ?? null, log })),
+      log,
+    });
+    dashboard = page;
+    info.dashboard = () => page.state();
+    page.start();
     log(`started pid=${process.pid} version=${VERSION} proto=${PROTO} build=${build ?? "dev"} socket=${sock} state=${config.state_dir}`);
     if (restarted) log(`restart: asked by ${String(restarted.by)}; ${JSON.stringify(restarted.old)} → this daemon`);
     const missing = missingTools(config);
@@ -1088,7 +1100,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const reason = await stopped;
     log(`stopping: ${reason}`);
     // Every timer first, then wait for what is under way: the database closes only after its last use.
-    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }];
+    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }, { name: "dashboard", done: page.stop() }];
+    dashboard = null;
     stopVerifications();
     draining.push({ name: "asks", done: stopAsks() });
     draining.push({ name: "validators", done: stopValidators() });
@@ -1135,6 +1148,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     removeSignals?.();
     if (ownsProcesses) configureOwnedProcesses(null);
     if (listener) await Promise.race([listener.close(), Bun.sleep(1_000)]);
+    if (dashboard) await Promise.race([dashboard.stop(), Bun.sleep(1_000)]);
     if (db && !keepDbOpen) db.close();
     if (boundSocket) {
       try {

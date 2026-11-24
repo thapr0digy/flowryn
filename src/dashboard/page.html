@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Flowryn builds</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mut:#66635c;--card:#fff;--line:#e3e0d8;--acc:#2f6f5e;--ok:#2f7a5f;--run:#b7791f;--wait:#d6d2c8;--bad:#b4433a;--skip:#ece9e1}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#ecebe6;--mut:#a29f97;--card:#1f1f1c;--line:#34332f;--acc:#7cc4ad;--ok:#6dbb9f;--run:#e0a64a;--wait:#45433d;--bad:#e07a70;--skip:#2a2926}}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:980px;margin:0 auto;padding:20px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-bottom:8px}
+h1{font-size:1.3rem;margin:0}
+h2{font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:26px 0 8px;font-weight:600}
+.mut{color:var(--mut)}
+.live{font-size:.85rem;color:var(--mut)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-right:6px;vertical-align:middle}
+.lost .dot{background:var(--bad)}
+.banner{display:none;border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;margin:8px 0}
+.lost .banner{display:block}
+.lost main{opacity:.5}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 10px}
+.row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 12px;align-items:baseline}
+.title{font-weight:600;overflow-wrap:anywhere}
+.eta{font-variant-numeric:tabular-nums}
+.over{color:var(--bad)}
+.strip{display:flex;gap:3px;margin:10px 0 6px;height:12px}
+.seg{border-radius:3px;min-width:6px;background:var(--wait)}
+.seg.passed{background:var(--ok)}.seg.running{background:var(--run)}.seg.failed,.seg.stopped{background:var(--bad)}.seg.skipped{background:var(--skip)}
+.steps{display:flex;flex-wrap:wrap;gap:2px 14px;font-size:.85rem;color:var(--mut);margin:0;padding:0;list-style:none}
+.steps .running{color:var(--fg);font-weight:600}
+.steps .failed{color:var(--bad)}
+ol.list,ul.list{list-style:none;margin:0;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:7px 0;display:flex;flex-wrap:wrap;gap:2px 12px;align-items:baseline}
+.list li:last-child{border-bottom:0}
+.list .what{flex:1 1 260px;min-width:0;overflow-wrap:anywhere}
+.pos{font-variant-numeric:tabular-nums;color:var(--mut);min-width:1.6em}
+.why{font-size:.85rem;color:var(--mut);flex-basis:100%;overflow-wrap:anywhere}
+button.id{font:inherit;font-size:.85rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:transparent;color:var(--acc);border:1px solid var(--line);border-radius:5px;padding:0 6px;cursor:pointer}
+button.id:hover,button.id:focus-visible{border-color:var(--acc);outline:none}
+button.id.copied{color:var(--ok)}
+a{color:var(--acc)}
+.empty{color:var(--mut);font-size:.9rem;margin:0}
+.error{color:var(--bad);font-size:.9rem;margin:0}
+.pools{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px}
+.pools .row{flex-wrap:nowrap}
+.meter{height:6px;background:var(--wait);border-radius:3px;overflow:hidden;margin-top:4px}
+.meter span{display:block;height:100%;background:var(--acc)}
+.meter.full span{background:var(--run)}
+.tag{font-size:.78rem;border:1px solid var(--line);border-radius:999px;padding:0 8px;color:var(--mut)}
+footer{margin-top:28px;font-size:.8rem;color:var(--mut)}
+@media (max-width:520px){.strip{height:10px}.steps{flex-direction:column}}
+</style></head><body>
+<header><h1>Flowryn builds</h1><span class="live" id="live"><span class="dot"></span><span id="as-of">connecting…</span></span></header>
+<div class="banner" id="banner" role="status"></div>
+<main id="main" aria-live="polite"></main>
+<footer>Estimates are the median of each step’s recent clean passes; they are estimates. Click an id to copy its Flowryn command. This page only reads.</footer>
+<script>
+"use strict";
+const POLL_MS = 2000;
+let build = null;
+let lastGood = null;
+
+function el(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key === "style") node.style.cssText = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) if (child !== null && child !== undefined && child !== false) node.append(typeof child === "string" ? document.createTextNode(child) : child);
+  return node;
+}
+
+function dur(ms) {
+  if (ms === null || ms === undefined) return "-";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function copyButton(id, command) {
+  const button = el("button", { class: "id", type: "button", title: `Copy: ${command}`, "aria-label": `${id}: copy ${command}`, text: id });
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      button.textContent = "copied";
+      button.classList.add("copied");
+    } catch {
+      window.prompt("Copy this command", command);
+    }
+    setTimeout(() => {
+      button.textContent = id;
+      button.classList.remove("copied");
+    }, 1200);
+  });
+  return button;
+}
+
+function subject(item) {
+  const label = item.for.kind === "task" ? `${item.for.id}` : item.for.title;
+  const title = item.for.kind === "task" && item.for.title !== item.for.id ? item.for.title : null;
+  return el("span", { class: "title", title: title || label }, label, title ? el("span", { class: "mut", text: ` · ${title}` }) : null);
+}
+
+function prLink(url) {
+  if (!url) return null;
+  const number = /\/pull\/(\d+)/.exec(url);
+  return el("a", { href: url, rel: "noreferrer noopener", target: "_blank", text: number ? `PR #${number[1]}` : "PR" });
+}
+
+function sectionBody(data, render, empty) {
+  if (data && !Array.isArray(data) && data.error) return el("p", { class: "error", text: `${data.error} (see the daemon log)` });
+  if (Array.isArray(data) && data.length === 0) return el("p", { class: "empty", text: empty });
+  return render(data);
+}
+
+function etaText(v) {
+  if (!v.eta) return el("span", { class: "eta mut", text: `${dur(v.elapsed_ms)} in · no estimate yet (${v.eta_why})` });
+  const over = v.eta.over_ms > 0 ? el("span", { class: "over", text: ` · ${dur(v.eta.over_ms)} over the usual` }) : null;
+  return el("span", { class: "eta" }, `${dur(v.elapsed_ms)} in · about ${dur(v.eta.left_ms)} left (estimate)`, over);
+}
+
+function stepWord(s) {
+  if (s.state === "running") return s.usual_ms ? `${s.name} (${dur(s.elapsed_ms)} of usually ${dur(s.usual_ms)}${s.approx ? ", approx." : ""})` : `${s.name} (${dur(s.elapsed_ms)}, running)`;
+  if (s.state === "waiting") return `${s.name} (waiting)`;
+  if (s.state === "passed") return `${s.name} ✓ ${dur(s.ms)}`;
+  if (s.state === "skipped") return `${s.name} (skipped)`;
+  return `${s.name} ✗ ${s.state}`;
+}
+
+function verifyCard(v) {
+  const total = v.steps.reduce((sum, s) => sum + Math.max(s.ms || 0, s.usual_ms || 0, s.elapsed_ms || 0, 1000), 0);
+  const strip = el("div", { class: "strip", role: "img", "aria-label": v.steps.map((s) => `${s.name} ${s.state}`).join(", ") },
+    v.steps.map((s) => el("span", { class: `seg ${s.state}`, title: stepWord(s), style: `flex:${Math.max(s.ms || 0, s.usual_ms || 0, s.elapsed_ms || 0, 1000) / total}` })));
+  return el("div", { class: "card" },
+    el("div", { class: "row" },
+      el("span", {}, copyButton(v.id, v.show), " ", subject(v), " ", el("span", { class: "tag", text: v.project }), " ", prLink(v.pr)),
+      etaText(v)),
+    strip,
+    el("ul", { class: "steps" }, v.steps.map((s) => el("li", { class: s.state, text: stepWord(s) }))));
+}
+
+function queueRow(q) {
+  const eta = q.eta.starts_in_ms === null ? `no estimate: ${q.eta.why}` : q.eta.starts_in_ms === 0 ? `starts now, done in about ${dur(q.eta.done_in_ms)} (estimate)` : `starts in about ${dur(q.eta.starts_in_ms)}, done in about ${dur(q.eta.done_in_ms)} (estimate)`;
+  return el("li", {},
+    el("span", { class: "pos", text: `${q.position}.` }),
+    el("span", { class: "what" }, copyButton(q.id, q.show), " ", subject(q), " ", el("span", { class: "tag", text: q.project }), " ", prLink(q.pr)),
+    el("span", { class: "eta mut", text: `waited ${dur(q.waited_ms)}` }),
+    el("span", { class: "why", text: `${eta} · ${q.why}` }));
+}
+
+function landingCard(line) {
+  return el("div", { class: "card" },
+    el("div", { class: "row" }, el("span", { class: "title", text: line.project }), line.batches ? el("span", { class: "tag", text: "lands in batches" }) : null),
+    el("ol", { class: "list" }, line.entries.map((e) => el("li", {},
+      el("span", { class: "pos", text: e.place }),
+      el("span", { class: "what" }, copyButton(e.task, e.show), " ", el("span", { class: "mut", text: e.title !== e.task ? e.title : "" })),
+      el("span", { class: "tag", text: `${e.state} ${dur(e.since_ms)}` }),
+      el("span", { class: "why", text: e.line })))),
+    line.more > 0 ? el("p", { class: "empty", text: `+${line.more} more` }) : null);
+}
+
+function batchCard(b) {
+  return el("div", { class: "card" },
+    el("div", { class: "row" }, el("span", {}, copyButton(b.id, b.show), " ", el("span", { class: "tag", text: b.project })), el("span", { class: "tag", text: b.state })),
+    el("p", { class: "why", text: b.line }),
+    el("ol", { class: "list" }, b.members.map((m) => el("li", {}, el("span", { class: "pos", text: `${m.pos ?? "-"}.` }), el("span", { class: "what" }, copyButton(m.task, `flowryn show ${m.task}`)), el("span", { class: "tag", text: m.state })))));
+}
+
+function waitingList(w) {
+  if (w.runs.length === 0) return el("p", { class: "empty", text: "nothing waits for a slot" });
+  return el("div", {},
+    el("ol", { class: "list" }, w.runs.map((r) => el("li", {},
+      el("span", { class: "what" }, copyButton(r.task, r.show), " ", el("span", { class: "mut", text: r.title !== r.task ? r.title : "" })),
+      el("span", { class: "tag", text: `${r.stage} · needs ${r.needs}` }),
+      el("span", { class: "eta mut", text: `waited ${r.waited}` }),
+      el("span", { class: "why", text: r.why })))),
+    w.more ? el("p", { class: "empty", text: w.more }) : null);
+}
+
+function poolGrid(pools) {
+  return el("div", { class: "pools" }, pools.map((p) => {
+    const pct = p.cap > 0 ? Math.min(100, Math.round((p.used / p.cap) * 100)) : 100;
+    return el("div", { class: "card" }, el("div", { class: "row" }, el("span", { text: p.pool }), el("span", { class: "eta", text: `${p.used} / ${p.cap}` })),
+      el("div", { class: `meter${p.used >= p.cap ? " full" : ""}` }, el("span", { style: `width:${pct}%` })));
+  }));
+}
+
+function render(s) {
+  const main = document.getElementById("main");
+  const count = (data) => (Array.isArray(data) ? ` (${data.length})` : "");
+  main.replaceChildren(
+    el("h2", { text: `Running verifies${count(s.verifies)}` }),
+    sectionBody(s.verifies, (list) => el("div", {}, list.map(verifyCard)), "no verify running"),
+    el("h2", { text: `Verify queue${count(s.verify_queue)}` }),
+    sectionBody(s.verify_queue, (list) => el("div", { class: "card" }, el("ol", { class: "list" }, list.map(queueRow))), "nothing queued"),
+    el("h2", { text: "Landing queues" }),
+    sectionBody(s.landing, (lines) => el("div", {}, lines.map(landingCard)), "no branch waiting to land"),
+    el("h2", { text: `Landing batches${count(s.batches)}` }),
+    sectionBody(s.batches, (list) => el("div", {}, list.map(batchCard)), "no batch in flight"),
+    el("h2", { text: "Waiting for a slot" }),
+    sectionBody(s.waiting, waitingList, ""),
+    el("h2", { text: "Pools and host" }),
+    sectionBody(s.pools, poolGrid, "no pools"),
+    sectionBody(s.host, (h) => el("p", { class: h.ok === false ? "error" : "empty", text: `Host: ${h.line}` }), ""));
+}
+
+async function poll() {
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const status = await response.json();
+    if (build !== null && status.build !== build) {
+      location.reload();
+      return;
+    }
+    build = status.build;
+    lastGood = status.now;
+    document.body.classList.remove("lost");
+    document.getElementById("as-of").textContent = `live · updated ${clock(status.now)}`;
+    render(status);
+  } catch {
+    document.body.classList.add("lost");
+    const since = lastGood === null ? "" : ` Showing what it said at ${clock(lastGood)}.`;
+    document.getElementById("as-of").textContent = "not connected";
+    document.getElementById("banner").textContent = `Cannot reach the Flowryn daemon; retrying every ${POLL_MS / 1000} s.${since}`;
+  }
+}
+
+let timer = null;
+function schedule() {
+  clearTimeout(timer);
+  if (document.visibilityState === "hidden") return;
+  timer = setTimeout(async () => {
+    await poll();
+    schedule();
+  }, POLL_MS);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") poll().then(schedule);
+  else clearTimeout(timer);
+});
+poll().then(schedule);
+</script>
+</body></html>

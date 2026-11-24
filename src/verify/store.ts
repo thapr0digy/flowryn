@@ -30,6 +30,8 @@ export interface VerifyStep {
   group?: number;
   /** The step's own deadline (verify_step_timeout_min or its history); null: only the run's. Absent on older rows. */
   deadline_ms?: number | null;
+  /** When its current attempt began (ms), for the dashboard's elapsed time and estimate. Absent on older rows. */
+  started_at?: number;
   /** How many times it ran: 2 when it hung at its own deadline and was retried. Absent on older rows. */
   attempts?: number;
   /** How many of its attempts were killed at the step's own deadline. Absent on older rows. */

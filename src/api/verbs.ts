@@ -94,6 +94,8 @@ export interface DaemonInfo {
   commit?: string | null;
   socket: string;
   stateDir: string;
+  /** The live build page's address, or why there is none (src/dashboard/server.ts). Absent outside the daemon. */
+  dashboard?: () => { url: string | null; why: string | null };
 }
 
 export interface DaemonServices {

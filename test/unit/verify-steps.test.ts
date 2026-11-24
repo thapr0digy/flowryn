@@ -261,6 +261,9 @@ describe("a hang at a step's own deadline", () => {
       expect(hung!.detail).toBe(`hung once: killed at its 0.7 s deadline (verify_step_timeout_min), process group in ${firstLog}; passed on its retry`);
       expect(v.detail).toContain("passed on its retry");
       expect(next).toMatchObject({ state: "passed", attempts: 1, hangs: 0 });
+      // The dashboard's elapsed time (docs/notes/2026-11-24-a-live-build-t8.md): each step's start, the retry's after a hang.
+      expect(hung!.started_at).toBeGreaterThanOrEqual(began + 700);
+      expect(next!.started_at).toBeGreaterThanOrEqual(hung!.started_at!);
       const ran = events(f.db, "pr.verify_step").filter((e) => e.step === hung!.name);
       expect(ran.map((e) => [e.state, e.attempt])).toEqual([["running", 1], ["running", 2], ["passed", 2]]);
     },

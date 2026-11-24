@@ -15,7 +15,7 @@ import { accountsConfig, harnessAccounts } from "../config/accounts.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { queuedRequests } from "../verify/queue.ts";
 import { waitingOn } from "../verify/start.ts";
-import { lensFor } from "../leader/scope.ts";
+import { lensFor, type ScopeLens } from "../leader/scope.ts";
 
 const MAX_WAITING_ROWS = 20;
 
@@ -27,7 +27,7 @@ function age(now: number, since: number): string {
 }
 
 /** Why a waiting run has no grant yet, as the scheduler would see it now. */
-function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Record<string, number>, hostOk: boolean, signedOut: string[]): string {
+function waitReason(ctx: CapacityFacts, run: RunWithPolicy, needs: string[], caps: Record<string, number>, hostOk: boolean, signedOut: string[]): string {
   const account = run.account ?? run.harness;
   if (run.pending_launch && signedOut.includes(account)) return `${account} signed out`;
   if (usageGate(ctx.db, ctx.now, account, run.id) === "paused") return `${account} usage limit`;
@@ -44,6 +44,80 @@ function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Rec
   if (projectAtLimit(ctx.db, limit, needs)) return `project ${limit!.project} at its worker limit (${projectWorkerHolders(ctx.db, limit!.project).length}/${limit!.max})`;
   if (!hostOk) return "host check";
   return "next pass";
+}
+
+/** What the capacity view reads: the verb's context, or the dashboard's (src/dashboard/status.ts). */
+export type CapacityFacts = Pick<ReadCtx, "db" | "config" | "now">;
+
+export interface CapacityView {
+  data: Record<string, unknown>;
+  hints: string[];
+}
+
+/**
+ * The capacity view through a scope lens: each pool's live leases against its cap, each
+ * project's workers against its limit, the host check, each account's pauses, the verifies
+ * queued for a slot, and the runs waiting for a grant in grant order. `flowryn capacity` reads it
+ * with its caller's lens; the dashboard with every scope's, like the board.
+ */
+export function capacityView(ctx: CapacityFacts, lens: ScopeLens): CapacityView {
+  const cfg = capacityConfig(ctx.config);
+  const counts = liveCounts(ctx.db);
+  const host = hostState(ctx.db);
+  const pauses = usagePauses(ctx.db);
+  const quotas = quotaStates(ctx.db);
+  const signedOut = signedOutAccounts(ctx.db);
+  const rows = ctx.db
+    .query(
+      `SELECT r.*, tp.project_id, tp.kind, tp.delivery_mode, tp.sensitive, COALESCE(p.priority, 2) AS priority
+       FROM runs r JOIN task_policy tp ON tp.task_id = r.task_id LEFT JOIN projects p ON p.id = tp.project_id
+       WHERE r.state NOT IN ('cleaned','failed','cancelled') AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL)
+         AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')`,
+    )
+    .all() as (RunWithPolicy & { priority: number })[];
+  // A scoped leader sees its own scope's waiting runs and project limits; pools and accounts are shared and name no task.
+  const limits = projectWorkerLimits(ctx.config).filter((l) => lens.project(l.project));
+  const waiting = rows
+    .filter((run) => lens.task(run.task_id))
+    .map((run) => {
+      const pos = positionOf(ctx.db, run, run.kind);
+      return { run, pos, needs: neededPools(ctx.db, run, pos), remaining: pos.def.stages.length - 1 - pos.index };
+    })
+    .toSorted((a, b) => a.remaining - b.remaining || a.run.priority - b.run.priority || (a.run.waiting_since ?? 0) - (b.run.waiting_since ?? 0))
+    .map((w) => ({
+      task: w.run.task_id,
+      stage: w.pos.stage.id,
+      needs: w.needs.join(" ") || "-",
+      waited: w.run.waiting_since ? age(ctx.now, w.run.waiting_since) : "-",
+      why: waitReason(ctx, w.run, w.needs, cfg.pools, host?.ok !== false, signedOut),
+      title: sanitizeLine(taskTitle(ctx.db, w.run.task_id), 60),
+    }));
+  const data: Record<string, unknown> = {
+    pools: Object.entries(cfg.pools).map(([pool, cap]) => ({ pool, used: counts[pool] ?? 0, cap })),
+    ...(limits.length > 0 ? { projects: limits.map((l) => ({ project: l.project, workers: projectWorkerHolders(ctx.db, l.project).length, max: l.max })) } : {}),
+    host: host
+      ? `${host.ok ? "ok" : `blocked: ${host.reason}`} (since ${age(ctx.now, host.since)} ago; needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`
+      : `not checked yet (needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`,
+    usage_limit: pauses.size > 0 ? [...pauses].map(([account, pause]) => ({ account, state: usageLine(ctx.now, pause) })) : "-",
+    quota:
+      cfg.quota.floor <= 0
+        ? "off ([capacity.quota] floor = 0)"
+        : quotas.size > 0
+          ? [...quotas].map(([account, quota]) => ({ account, state: `${quotaLine(quota)} (since ${age(ctx.now, quota.since)} ago)` }))
+          : `not read yet (floor ${cfg.quota.floor}%; read for an account before a new run starts on it)`,
+    ...(signedOut.length > 0 ? { signed_out: signedOut } : {}),
+    waiting: waiting.slice(0, MAX_WAITING_ROWS),
+    unresolved: unresolvedLine(ctx.db, ctx.now),
+  };
+  const jobs = liveJobLeases(ctx.db);
+  if (jobs.length > 0) data.jobs = jobs.map((j) => ({ job: j.job_id, kind: j.kind, pool: j.pool, task: j.task_id ?? "-", held: age(ctx.now, j.granted_at) }));
+  // Verifies queued for a validation slot (src/verify/start.ts): granted before any stage, in this order.
+  const queued = queuedRequests(ctx.db);
+  if (queued.length > 0) data.verify_queue = queued.map((r) => ({ request: r.id, pr: r.pr_url, task: r.task_id ?? "-", waited: age(ctx.now, r.requested_at), why: waitingOn(ctx.db, r, cfg.pools, ctx.now) }));
+  if (waiting.length > MAX_WAITING_ROWS) data.more = `${waiting.length - MAX_WAITING_ROWS} more waiting`;
+  const hints = waiting.length > 0 ? ["flowryn show <task>"] : [`every run holds a ${WORKER_POOL} slot while its worker lives`];
+  const held = [...new Set([...pauses.keys(), ...[...quotas].filter(([a]) => quotaHolds(ctx.db, a)).map(([a]) => a)])];
+  return { data, hints: [...held.map(resumeCommand), ...hints] };
 }
 
 /**
@@ -63,64 +137,7 @@ const capacity: VerbSpec = {
   roles: ["leader", "reader", "human"],
   scope: { kind: "list" },
   read(ctx) {
-    const cfg = capacityConfig(ctx.config);
-    const counts = liveCounts(ctx.db);
-    const host = hostState(ctx.db);
-    const pauses = usagePauses(ctx.db);
-    const quotas = quotaStates(ctx.db);
-    const signedOut = signedOutAccounts(ctx.db);
-    const rows = ctx.db
-      .query(
-        `SELECT r.*, tp.project_id, tp.kind, tp.delivery_mode, tp.sensitive, COALESCE(p.priority, 2) AS priority
-         FROM runs r JOIN task_policy tp ON tp.task_id = r.task_id LEFT JOIN projects p ON p.id = tp.project_id
-         WHERE r.state NOT IN ('cleaned','failed','cancelled') AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL)
-           AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')`,
-      )
-      .all() as (RunWithPolicy & { priority: number })[];
-    // A scoped leader sees its own scope's waiting runs and project limits; pools and accounts are shared and name no task.
-    const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
-    const limits = projectWorkerLimits(ctx.config).filter((l) => lens.project(l.project));
-    const waiting = rows
-      .filter((run) => lens.task(run.task_id))
-      .map((run) => {
-        const pos = positionOf(ctx.db, run, run.kind);
-        return { run, pos, needs: neededPools(ctx.db, run, pos), remaining: pos.def.stages.length - 1 - pos.index };
-      })
-      .toSorted((a, b) => a.remaining - b.remaining || a.run.priority - b.run.priority || (a.run.waiting_since ?? 0) - (b.run.waiting_since ?? 0))
-      .map((w) => ({
-        task: w.run.task_id,
-        stage: w.pos.stage.id,
-        needs: w.needs.join(" ") || "-",
-        waited: w.run.waiting_since ? age(ctx.now, w.run.waiting_since) : "-",
-        why: waitReason(ctx, w.run, w.needs, cfg.pools, host?.ok !== false, signedOut),
-        title: sanitizeLine(taskTitle(ctx.db, w.run.task_id), 60),
-      }));
-    const data: Record<string, unknown> = {
-      pools: Object.entries(cfg.pools).map(([pool, cap]) => ({ pool, used: counts[pool] ?? 0, cap })),
-      ...(limits.length > 0 ? { projects: limits.map((l) => ({ project: l.project, workers: projectWorkerHolders(ctx.db, l.project).length, max: l.max })) } : {}),
-      host: host
-        ? `${host.ok ? "ok" : `blocked: ${host.reason}`} (since ${age(ctx.now, host.since)} ago; needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`
-        : `not checked yet (needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`,
-      usage_limit: pauses.size > 0 ? [...pauses].map(([account, pause]) => ({ account, state: usageLine(ctx.now, pause) })) : "-",
-      quota:
-        cfg.quota.floor <= 0
-          ? "off ([capacity.quota] floor = 0)"
-          : quotas.size > 0
-            ? [...quotas].map(([account, quota]) => ({ account, state: `${quotaLine(quota)} (since ${age(ctx.now, quota.since)} ago)` }))
-            : `not read yet (floor ${cfg.quota.floor}%; read for an account before a new run starts on it)`,
-      ...(signedOut.length > 0 ? { signed_out: signedOut } : {}),
-      waiting: waiting.slice(0, MAX_WAITING_ROWS),
-      unresolved: unresolvedLine(ctx.db, ctx.now),
-    };
-    const jobs = liveJobLeases(ctx.db);
-    if (jobs.length > 0) data.jobs = jobs.map((j) => ({ job: j.job_id, kind: j.kind, pool: j.pool, task: j.task_id ?? "-", held: age(ctx.now, j.granted_at) }));
-    // Verifies queued for a validation slot (src/verify/start.ts): granted before any stage, in this order.
-    const queued = queuedRequests(ctx.db);
-    if (queued.length > 0) data.verify_queue = queued.map((r) => ({ request: r.id, pr: r.pr_url, task: r.task_id ?? "-", waited: age(ctx.now, r.requested_at), why: waitingOn(ctx.db, r, cfg.pools, ctx.now) }));
-    if (waiting.length > MAX_WAITING_ROWS) data.more = `${waiting.length - MAX_WAITING_ROWS} more waiting`;
-    const hints = waiting.length > 0 ? ["flowryn show <task>"] : [`every run holds a ${WORKER_POOL} slot while its worker lives`];
-    const held = [...new Set([...pauses.keys(), ...[...quotas].filter(([a]) => quotaHolds(ctx.db, a)).map(([a]) => a)])];
-    return { data, hints: [...held.map(resumeCommand), ...hints] };
+    return capacityView(ctx, lensFor(ctx.db, ctx.config, ctx.caller.scope));
   },
 };
 
