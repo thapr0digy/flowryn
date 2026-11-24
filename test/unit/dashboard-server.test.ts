@@ -140,9 +140,116 @@ describe("DashboardServer", () => {
     expect(server.state()).toEqual({ url: null, why: "FLOWRYN_DASHBOARD_PORT=off" });
   });
 
-  test("the page renders only through textContent", () => {
-    expect(PAGE_HTML).not.toContain("innerHTML");
-    expect(PAGE_HTML).not.toContain("insertAdjacentHTML");
-    expect(PAGE_HTML).not.toMatch(/<script[^>]+src=|<link[^>]+href=|https?:\/\/(?!127)/);
+});
+
+/**
+ * The page's own script, run against a recording stand-in for the browser's document: any HTML
+ * sink (innerHTML, outerHTML, insertAdjacentHTML, document.write) throws, and every element it
+ * creates is recorded. HTML in the status must come out as text, never as an element.
+ */
+const HOSTILE = `<img src=x onerror="alert(1)">`;
+
+interface FakeText {
+  textContent: string;
+}
+
+class FakeElement {
+  readonly children: (FakeElement | FakeText)[] = [];
+  readonly attributes: Record<string, string> = {};
+  readonly style = { cssText: "" };
+  readonly classList = { add: () => {}, remove: () => {} };
+  className = "";
+  #text: string | null = null;
+  constructor(readonly tag: string) {}
+  get textContent(): string {
+    return this.#text ?? this.children.map((c) => c.textContent).join("");
+  }
+  set textContent(value: string) {
+    this.children.length = 0;
+    this.#text = String(value);
+  }
+  set innerHTML(_: string) {
+    throw new Error("innerHTML set");
+  }
+  set outerHTML(_: string) {
+    throw new Error("outerHTML set");
+  }
+  insertAdjacentHTML(): never {
+    throw new Error("insertAdjacentHTML called");
+  }
+  setAttribute(name: string, value: string): void {
+    this.attributes[name] = String(value);
+  }
+  append(...nodes: (FakeElement | FakeText | string)[]): void {
+    for (const node of nodes) {
+      if (typeof node === "string") throw new Error("a raw string appended");
+      this.#text = null;
+      this.children.push(node);
+    }
+  }
+  replaceChildren(...nodes: (FakeElement | FakeText)[]): void {
+    this.children.length = 0;
+    this.append(...nodes);
+  }
+  addEventListener(): void {}
+}
+
+async function renderPage(status: unknown): Promise<{ created: FakeElement[]; main: FakeElement }> {
+  const script = /<script>([\s\S]*?)<\/script>/.exec(PAGE_HTML)![1]!;
+  const created: FakeElement[] = [];
+  const byId = Object.fromEntries(["main", "as-of", "banner", "live"].map((id) => [id, new FakeElement("div")]));
+  const document = {
+    visibilityState: "hidden",
+    body: new FakeElement("body"),
+    createElement: (tag: string) => {
+      const node = new FakeElement(tag);
+      created.push(node);
+      return node;
+    },
+    createTextNode: (text: string): FakeText => ({ textContent: String(text) }),
+    getElementById: (id: string) => byId[id] ?? null,
+    addEventListener: () => {},
+    write: () => {
+      throw new Error("document.write called");
+    },
+  };
+  const fetch = async () => ({ ok: true, status: 200, json: async () => status });
+  const run = new Function("document", "window", "navigator", "location", "fetch", "setTimeout", "clearTimeout", script);
+  run(document, {}, {}, { reload: () => {} }, fetch, () => 0, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return { created, main: byId.main! };
+}
+
+describe("the page", () => {
+  test("renders HTML in the status as text, never as an element", async () => {
+    const subject = { kind: "task", id: "t1", title: HOSTILE };
+    const status = {
+      build: "b1",
+      now: 0,
+      verifies: [
+        {
+          id: "v1",
+          project: HOSTILE,
+          for: subject,
+          pr: null,
+          elapsed_ms: 60_000,
+          eta: null,
+          eta_why: HOSTILE,
+          steps: [{ name: HOSTILE, group: 0, state: "running", ms: null, elapsed_ms: 1_000, usual_ms: null, approx: false }],
+          show: "flowryn verify show v1",
+        },
+      ],
+      verify_queue: [{ id: "vq1", project: "web", for: subject, pr: null, position: 1, waited_ms: 0, why: HOSTILE, eta: { starts_in_ms: null, why: HOSTILE }, show: "flowryn verify show vq1" }],
+      landing: [{ project: "web", batches: false, entries: [{ id: "lq1", task: "t2", title: HOSTILE, state: "waiting", place: "1.", cell: "", line: HOSTILE, since_ms: 0, show: "flowryn show t2" }], more: 0 }],
+      batches: [{ id: "lb1", project: "web", state: "verifying", line: HOSTILE, verify: null, members: [{ task: "t3", pos: 1, state: "landing" }], show: "flowryn show lb1" }],
+      waiting: { runs: [{ task: "t4", title: HOSTILE, stage: "work", needs: "worker", waited: "1 min", why: HOSTILE, show: "flowryn show t4" }], more: null },
+      pools: [{ pool: "validation", used: 1, cap: 2 }],
+      host: { ok: false, line: HOSTILE },
+    };
+    const { created, main } = await renderPage(status);
+    expect(created.length).toBeGreaterThan(0);
+    expect(created.map((node) => node.tag)).not.toContain("img");
+    expect(created.flatMap((node) => Object.keys(node.attributes)).filter((name) => name.startsWith("on") || name === "srcdoc")).toEqual([]);
+    expect(main.textContent.split(HOSTILE).length - 1).toBeGreaterThanOrEqual(8);
   });
 });
