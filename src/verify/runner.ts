@@ -19,7 +19,7 @@ import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
-import { finishVerification, getVerification, interruptedByStop, newestAt, recordSteps, runningVerifications, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
+import { finishVerification, getVerification, interruptedByStop, newestAt, recordSteps, runningVerifications, startedAStep, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
 /**
@@ -449,7 +449,8 @@ type Removed = Pick<Verification, "id" | "worktree_path" | "project_path" | "pro
 /**
  * The end of a verification's use of its checkout: a slot's services are released and its
  * untracked and ignored files removed, so it waits holding only the tracked tree; a verification's
- * own checkout (v<n>/wt: a fallback, or an older row) is removed.
+ * own checkout (v<n>/wt: a fallback, or an older row) is removed. A slot whose release failed keeps
+ * its tree, so the next use's start release runs where the services started.
  */
 export async function endCheckout(deps: RemoveDeps, v: Removed): Promise<void> {
   if (!isSlotPath(deps.root, v.worktree_path)) return removeWorktree(deps, v);
@@ -458,7 +459,10 @@ export async function endCheckout(deps: RemoveDeps, v: Removed): Promise<void> {
     deps.log(`verify ${v.id}: not cleaning ${v.worktree_path}: it is not a verification checkout`);
     return;
   }
-  await release(deps, v);
+  if (!(await release(deps, v))) {
+    deps.log(`verify ${v.id}: release failed; slot ${v.worktree_path} keeps its tree for the next use's release`);
+    return;
+  }
   const cleaned = await deps.git(["clean", "-ffdxq"], v.worktree_path);
   if (cleaned.code !== 0) deps.log(`verify ${v.id}: cleaning slot ${v.worktree_path} failed (${cleaned.stderr.trim() || `exit ${cleaned.code}`}); its next use resets it`);
 }
@@ -539,6 +543,7 @@ async function recreateSlot(deps: RemoveDeps, v: Removed & { head_sha: string })
 /**
  * Whether the slot's previous user may have left services running: it did not end through
  * endCheckout with its release passing (none recorded, still running, cut off by a stop, or its release failed).
+ * The previous user is the newest one that started a step there (newestAt).
  */
 function previousMayRun(db: Db, v: Verification): boolean {
   const previous = newestAt(db, v.worktree_path, v.id);
@@ -901,7 +906,9 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
     finish({ state: "error", detail: `verify failed: ${(error as Error).message}`, binary: null });
   } finally {
     try {
-      if (interrupted && worktreeAdded && isSlotPath(deps.root, v.worktree_path)) deps.log(`verify ${v.id}: interrupted; its worktree stays for a resume`);
+      const slot = isSlotPath(deps.root, v.worktree_path);
+      if (interrupted && worktreeAdded && slot) deps.log(`verify ${v.id}: interrupted; its worktree stays for a resume`);
+      else if (slot && !worktreeAdded) deps.log(`verify ${v.id}: ended before preparing slot ${v.worktree_path}; it stays as its last user left it`);
       else if (worktreeAdded || existsSync(v.worktree_path)) await endCheckout(deps, v);
       pruneDirs(deps, v.project_id);
     } catch (error) {
@@ -988,8 +995,8 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
     });
   }
   if (!stepGone) return recorded;
-  // A slot just recorded as interrupted keeps its checkout for a resume; anything else left behind goes.
-  if (v && !(recorded && isSlotPath(deps.root, v.worktree_path))) await endCheckout(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
+  // A slot just recorded as interrupted keeps its checkout for a resume, and one its row never ran a step in stays as its last user left it; anything else left behind goes.
+  if (v && !(isSlotPath(deps.root, v.worktree_path) && (recorded || !startedAStep(v)))) await endCheckout(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
   if (lease) {
     const job = { kind: "verify" as const, id, taskId: lease.task_id };
     tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));

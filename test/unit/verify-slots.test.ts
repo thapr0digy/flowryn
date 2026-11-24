@@ -9,7 +9,7 @@ import { grantJobLease } from "../../src/sched/pools.ts";
 import type { VerifyConfig } from "../../src/verify/config.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { insertRequest } from "../../src/verify/queue.ts";
-import { initialSteps, ownPath, pruneDirs, recoverVerifications, runVerification, slotPath, type VerifyDeps } from "../../src/verify/runner.ts";
+import { initialSteps, ownPath, pruneDirs, recoverVerifications, runVerification, slotPath, stopVerifications, type VerifyDeps } from "../../src/verify/runner.ts";
 import { admitRequest } from "../../src/verify/start.ts";
 import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
 
@@ -208,18 +208,55 @@ describe("slot checkouts", () => {
     expect(events(f.db, "verify.slot_fallback")).toEqual([]);
   }, 30_000);
 
-  test("after a failed end release the next use releases at the start, in the previous tree", async () => {
+  test("after a failed end release the slot keeps its tree, and the next use's start release runs there and keeps the slot", async () => {
     const f = fixture();
     const out = tempDir();
     const seen = join(out, "seen.log");
     const failing = join(out, "fail");
     writeFileSync(failing, "");
-    releasing(f, [script(join(out, "release"), `echo "$(git rev-parse HEAD)" >> ${seen}; test ! -e ${failing}`)]);
-    await f.run(f.admit(["true"], f.one));
+    releasing(f, [script(join(out, "release"), `echo "$(git rev-parse HEAD)" >> ${seen}; test -f .env && test ! -e ${failing}`)]);
+    const first = await f.run(f.admit(["echo built > .env"], f.one));
+    expect(readFileSync(join(first.worktree_path, ".env"), "utf8")).toBe("built\n");
     rmSync(failing);
-    const v = await f.run(f.admit(["true"], f.two, 2));
-    expect(v.worktree_path).toBe(slotPath(f.root, "web", 0));
+    const v = await f.run(f.admit([`${SEES_NOTHING} && echo built > .env`], f.two, 2));
+    expect(v).toMatchObject({ state: "passed", worktree_path: slotPath(f.root, "web", 0) });
     expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([f.one, f.one, f.two]);
+    expect(events(f.db, "verify.slot_fallback")).toEqual([]);
+  }, 30_000);
+
+  test("a daemon stop before the slot is prepared leaves it as it was: the next verify uses it without a start release", async () => {
+    const f = fixture();
+    const out = tempDir();
+    releasing(f, [script(join(out, "release"), "test -f .env")]);
+    await f.run(f.admit(["echo built > .env"], f.one));
+    const realGit = f.deps.git;
+    f.deps.git = async (args, cwd) => {
+      if (args[0] === "fetch") stopVerifications();
+      return realGit(args, cwd);
+    };
+    const stopped = await f.run(f.admit(["echo built > .env"], "0".repeat(40), 2));
+    f.deps.git = realGit;
+    expect(stopped.state).toBe("error");
+    const next = await f.run(f.admit([`${SEES_NOTHING} && echo built > .env`], f.two, 3));
+    expect(next).toMatchObject({ state: "passed", worktree_path: slotPath(f.root, "web", 0) });
+    expect(events(f.db, "verify.release_failed")).toEqual([]);
+    expect(events(f.db, "verify.slot_fallback")).toEqual([]);
+  }, 30_000);
+
+  test("a crashed verify that ran no step neither cleans the slot at recovery nor forces a start release", async () => {
+    const f = fixture();
+    const out = tempDir();
+    releasing(f, [script(join(out, "release"), "test -f .env")]);
+    const first = await f.run(f.admit(["echo built > .env"], f.one));
+    tx(f.db, () => {
+      const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/2", task_id: null, head_sha: f.two, steps: initialSteps(["true"]), policy_id: verifyPolicyId({ steps: ["true"], binary: null }), dir: (id) => join(f.root, id), worktree: () => first.worktree_path, project_path: f.repo, source: "cli", now: Date.now() });
+      grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", CAPS, Date.now());
+    });
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    const next = await f.run(f.admit([`${SEES_NOTHING} && echo built > .env`], f.two, 3));
+    expect(next).toMatchObject({ state: "passed", worktree_path: first.worktree_path });
+    expect(events(f.db, "verify.release_failed")).toEqual([]);
+    expect(events(f.db, "verify.slot_fallback")).toEqual([]);
   }, 30_000);
 
   test("a release that fails at the start bypasses the slot: the verify runs in its own checkout, with verify.slot_fallback", async () => {
