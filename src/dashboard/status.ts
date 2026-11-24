@@ -203,8 +203,12 @@ export function buildStatus(facts: StatusFacts): DashboardStatus {
   const verifyQueue = section(facts, "the verify queue", () => {
     const queued = queuedRequests(db).slice(0, MAX_ROWS);
     const items = Array.isArray(verifies) ? verifies : [];
-    // A running verify's slot frees at its time left; without one, at its project's typical length less what it has run.
-    const busy = items.map((item) => item.eta?.left_ms ?? (typical(item.project) === null ? null : Math.max(0, typical(item.project)! - item.elapsed_ms)));
+    // A running verify's slot frees at its time left; without one, at its project's typical length less what it has run. Past either, unknown.
+    const busy = items.map((item) => {
+      if (item.eta) return item.eta.over_ms > 0 ? null : item.eta.left_ms;
+      const length = typical(item.project);
+      return length === null || item.elapsed_ms > length ? null : length - item.elapsed_ms;
+    });
     const free = Math.max(0, (caps[VERIFY_POOL] ?? 0) - (liveCounts(db)[VERIFY_POOL] ?? 0));
     const held = queueHeldBy(db, now, items.length, free);
     const etas = queueEtas(

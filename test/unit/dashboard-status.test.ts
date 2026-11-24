@@ -78,6 +78,15 @@ describe("buildStatus", () => {
     expect(queue[0]!.show).toBe("flowryn verify show vq2");
   });
 
+  test("a running verify past its usual time holds the only slot: the queue head has no estimate", () => {
+    // At NOW + 6 min, v4's tests have run 11 min of their usual 10; with one validation slot, vq2 cannot start until v4 ends, whenever that is.
+    const later = buildStatus({ db, config: parseConfig("[capacity]\nvalidation = 1\n", dir), now: NOW + 6 * MIN, build: "b1", log: (line) => logged.push(line) });
+    expect((later.verifies as VerifyItem[])[0]!.eta).toMatchObject({ over_ms: MIN });
+    const queue = later.verify_queue as QueueItem[];
+    expect(queue[0]!.eta).toEqual({ starts_in_ms: null, why: "a running verify has no estimate" });
+    expect(queue[1]!.eta).toEqual({ starts_in_ms: null, why: "a running verify has no estimate" });
+  });
+
   test("a request waiting on its own PR gets its reason, not an estimate", () => {
     db.query("UPDATE verify_queue SET wait_reason = 'forge_outage', wait_ref = 'unavailable 502', wait_since = ?1 WHERE id = 'vq2'").run(NOW);
     const queue = status().verify_queue as QueueItem[];
