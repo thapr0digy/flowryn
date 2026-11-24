@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import type { Db } from "../db/db.ts";
@@ -11,6 +11,7 @@ import { readIdentity, terminate, type ProcIdentity, type PsRunner, type Termina
 import { withRepoLock } from "../runtime/repo-lock.ts";
 import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
 import { appendEvent } from "../db/events.ts";
+import { PROJECT_ID } from "../lifecycle/projects.ts";
 import { failedReleases, projectRelease, runRelease } from "../lifecycle/release.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { anyMatches, changedSinceBase, type ChangedFiles } from "./changed.ts";
@@ -23,18 +24,19 @@ import { parseBunSummary, type TestCounts } from "./summary.ts";
 
 /**
  * One `flowryn verify` job, run by the daemon (outside every sandbox): make
- * sure the PR head is in the project's object store, add a detached worktree
- * at it, run the configured steps in order through /bin/sh with a scrubbed
- * environment (the steps of a parallel group at once), parse bun's test
- * summary from each step's output, copy the built binary out, record the
- * outcome, and remove the worktree. As many jobs run at once as the
+ * sure the PR head is in the project's object store, reset its slot checkout
+ * to exactly that head (a reused detached worktree at a stable path:
+ * docs/notes/2026-11-24-verifies-reuse-one-a6.md), run the configured steps in
+ * order through /bin/sh with a scrubbed environment (the steps of a parallel
+ * group at once), parse bun's test summary from each step's output, copy the
+ * built binary out, record the outcome, and clean the checkout. As many jobs run at once as the
  * validation pool allows (src/verify/start.ts); their worktree adds and removals in one
  * repository take turns (src/runtime/repo-lock.ts). Besides the run's deadline, each step has
  * its own (src/verify/deadline.ts): at either, the step's process group is
  * listed into its log and killed, and a step killed at its own deadline runs
  * once more (docs/notes/2026-10-22-verify-reliability-per-xe.md). The job
  * holds a validation slot (a job lease the verb took with the row), released
- * only once its steps' process groups are gone and its worktree removed.
+ * only once its steps' process groups are gone and its checkout cleaned (or removed).
  */
 
 export interface VerifyDeps {
@@ -394,36 +396,176 @@ export function keepBinary(worktree: string, binary: string, dir: string): strin
   return dest;
 }
 
-/** Only ever remove a verification's own worktree or directory: <root>/v<n>[/wt]. */
-function ownPath(root: string, path: string, leaf: "dir" | "wt"): boolean {
-  const pattern = leaf === "dir" ? /^v\d+$/ : /^v\d+\/wt$/;
-  return path.startsWith(root + sep) && pattern.test(path.slice(root.length + 1));
+/**
+ * A project's reusable verify checkouts (docs/notes/2026-11-24-verifies-reuse-one-a6.md):
+ * <root>/slots/<project>/<k>. The same absolute path from one verify to the next, so caches keyed
+ * on it (Go's compile cache without -trimpath) hit; each use resets it to exactly its head.
+ */
+export function slotPath(root: string, projectId: string, k: number): string {
+  return join(root, "slots", projectId, String(k));
+}
+
+/** <root>-relative "slots/<project>/<k>", by its parts: no "..", a valid project id, digits only. */
+function slotRelative(rel: string): boolean {
+  const parts = rel.split("/");
+  return parts.length === 3 && parts[0] === "slots" && PROJECT_ID.test(parts[1]!) && /^\d+$/.test(parts[2]!);
+}
+
+/** Whether `path` names a slot checkout under `root` (by its spelling alone). */
+export function isSlotPath(root: string, path: string): boolean {
+  return path.startsWith(root + sep) && slotRelative(path.slice(root.length + 1));
+}
+
+/** Every component of `rel` below `root` that exists is a real directory, never a symlink (a missing one ends the walk). */
+function noLinkBelow(root: string, rel: string): boolean {
+  let at = root;
+  for (const part of rel.split("/")) {
+    at = join(at, part);
+    let stat;
+    try {
+      stat = lstatSync(at);
+    } catch {
+      return true;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+  }
+  return true;
+}
+
+/**
+ * Only ever remove or clean a verification's own directory (<root>/v<n>) or checkout
+ * (<root>/v<n>/wt, or a slot <root>/slots/<project>/<k>), and never through a symlink.
+ */
+export function ownPath(root: string, path: string, leaf: "dir" | "wt"): boolean {
+  if (!path.startsWith(root + sep)) return false;
+  const rel = path.slice(root.length + 1);
+  const named = leaf === "dir" ? /^v\d+$/.test(rel) : /^v\d+\/wt$/.test(rel) || slotRelative(rel);
+  return named && noLinkBelow(root, rel);
 }
 
 type RemoveDeps = Pick<VerifyDeps, "db" | "git" | "root" | "log" | "now" | "config">;
 type Removed = Pick<Verification, "id" | "worktree_path" | "project_path" | "project_id" | "task_id">;
 
 /**
+ * The end of a verification's use of its checkout: a slot's services are released and its
+ * untracked and ignored files removed, so it waits holding only the tracked tree; a verification's
+ * own checkout (v<n>/wt: a fallback, or an older row) is removed.
+ */
+export async function endCheckout(deps: RemoveDeps, v: Removed): Promise<void> {
+  if (!isSlotPath(deps.root, v.worktree_path)) return removeWorktree(deps, v);
+  if (!existsSync(v.worktree_path)) return;
+  if (!ownPath(deps.root, v.worktree_path, "wt")) {
+    deps.log(`verify ${v.id}: not cleaning ${v.worktree_path}: it is not a verification checkout`);
+    return;
+  }
+  await release(deps, v);
+  const cleaned = await deps.git(["clean", "-ffdxq"], v.worktree_path);
+  if (cleaned.code !== 0) deps.log(`verify ${v.id}: cleaning slot ${v.worktree_path} failed (${cleaned.stderr.trim() || `exit ${cleaned.code}`}); its next use resets it`);
+}
+
+/**
  * Under the repository's worktree lock (src/runtime/repo-lock.ts), like the add. The project's release
  * commands run first, outside the lock (they may take a minute each), so the steps' services go with it.
  */
-export async function removeWorktree(deps: RemoveDeps, v: Removed): Promise<void> {
+async function removeWorktree(deps: RemoveDeps, v: Removed): Promise<void> {
   if (existsSync(v.worktree_path) && ownPath(deps.root, v.worktree_path, "wt")) await release(deps, v);
   await withRepoLock(v.project_path, () => removeWorktreeLocked(deps, v));
 }
 
-/** Free the worktree's own services; a failure appends verify.release_failed and the removal goes on. */
-async function release(deps: RemoveDeps, v: Removed): Promise<void> {
+/** Free the checkout's own services; a failure appends verify.release_failed (the caller goes on). True when none failed. */
+async function release(deps: RemoveDeps, v: Removed): Promise<boolean> {
   const label = `verify ${v.id}`;
   const commands = projectRelease(deps.config?.() ?? null, v.project_id, (line) => deps.log(`${label}: ${line}`));
-  if (commands.length === 0) return;
+  if (commands.length === 0) return true;
   const failed = failedReleases(await runRelease(commands, { cwd: v.worktree_path, env: releaseEnv(deps.db, v.project_id), label, log: deps.log }));
-  if (failed.length === 0) return;
+  if (failed.length === 0) return true;
   try {
     tx(deps.db, () => appendEvent(deps.db, { source: "daemon", kind: "verify.release_failed", taskId: v.task_id, payload: { verification: v.id, worktree: v.worktree_path, failed }, ts: deps.now() }));
   } catch (error) {
     deps.log(`${label}: could not record the failed release: ${(error as Error).message}`);
   }
+  return false;
+}
+
+/** The checkout is git's top level at `path` and shares the project's repository (its common dir). */
+async function checkoutOf(git: GitRunner, path: string, projectPath: string): Promise<boolean> {
+  const args = ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"];
+  const [own, project] = await Promise.all([git(args, path), git(["rev-parse", "--path-format=absolute", "--git-common-dir"], projectPath)]);
+  if (own.code !== 0 || project.code !== 0) return false;
+  const [top, common] = own.stdout.trim().split("\n");
+  try {
+    return realpathSync(top!) === realpathSync(path) && realpathSync(common!) === realpathSync(project.stdout.trim());
+  } catch {
+    return false;
+  }
+}
+
+/** Exactly a fresh checkout of `head`: HEAD there, and git sees no change, no untracked and no ignored file. */
+async function cleanAt(git: GitRunner, path: string, head: string): Promise<boolean> {
+  const [at, status] = await Promise.all([git(["rev-parse", "HEAD"], path), git(["status", "--porcelain", "--ignored", "--untracked-files=all"], path)]);
+  return at.code === 0 && at.stdout.trim() === head && status.code === 0 && status.stdout.trim() === "";
+}
+
+/** Make a tree writable for its removal (a read-only directory defeats both git clean and rm), never following a symlink. */
+function makeWritable(path: string): void {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return;
+  if ((stat.mode & 0o200) === 0) chmodSync(path, (stat.mode & 0o777) | 0o200);
+  if (stat.isDirectory()) for (const entry of readdirSync(path)) makeWritable(join(path, entry));
+}
+
+/** Remove whatever is at the slot and check the head out there afresh, under the repository's worktree lock. Null when added; else why not. */
+async function recreateSlot(deps: RemoveDeps, v: Removed & { head_sha: string }): Promise<string | null> {
+  const slot = v.worktree_path;
+  return withRepoLock(v.project_path, async () => {
+    if (existsSync(slot)) {
+      await deps.git(["worktree", "remove", "--force", slot], v.project_path);
+      if (existsSync(slot)) {
+        try {
+          makeWritable(slot);
+          rmSync(slot, { recursive: true, force: true });
+        } catch (error) {
+          return `removing it failed: ${(error as Error).message}`;
+        }
+      }
+    }
+    await deps.git(["worktree", "prune"], v.project_path);
+    mkdirSync(dirname(slot), { recursive: true, mode: 0o700 });
+    const added = await deps.git(["worktree", "add", "--detach", slot, v.head_sha], v.project_path);
+    return added.code === 0 ? null : `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`;
+  });
+}
+
+/**
+ * Make the verification's slot exactly a fresh checkout of its head. A slot of this project:
+ * its previous use's services are released (by the commands of the tree that started them), then
+ * a forced checkout of the head and `git clean -ffdx`; anything else there, or a reset that does
+ * not come out clean, is recreated once. Null when the slot is ready and proven clean; else why
+ * the verification must not use it.
+ */
+async function prepareSlot(deps: VerifyDeps, v: Verification): Promise<string | null> {
+  const slot = v.worktree_path;
+  if (!ownPath(deps.root, slot, "wt")) return `${slot} is not a verification checkout (a symlink in its path?)`;
+  if (existsSync(slot) && (await checkoutOf(deps.git, slot, v.project_path))) {
+    if (!(await release(deps, v))) return "its release commands failed, so the previous verify's services may still run";
+    const checkedOut = await deps.git(["checkout", "--quiet", "--force", "--detach", v.head_sha], slot);
+    if (checkedOut.code === 0) await deps.git(["clean", "-ffdxq"], slot);
+    if (checkedOut.code === 0 && (await cleanAt(deps.git, slot, v.head_sha))) return null;
+  }
+  const failed = await recreateSlot(deps, v);
+  if (failed) return failed;
+  return (await cleanAt(deps.git, slot, v.head_sha)) ? null : "a fresh checkout there is not clean";
+}
+
+/** A slot that cannot be made clean: this verification checks out into its own directory (v<n>/wt), as before slots, with an event saying why. */
+function fallBack(deps: VerifyDeps, v: Verification, why: string): Verification {
+  const own = join(v.dir, "wt");
+  deps.log(`verify ${v.id}: not using slot ${v.worktree_path}: ${why}; checking out into ${own}`);
+  tx(deps.db, () => {
+    deps.db.query("UPDATE verifications SET worktree_path = ?2 WHERE id = ?1").run(v.id, own);
+    appendEvent(deps.db, { source: "daemon", kind: "verify.slot_fallback", taskId: v.task_id, payload: { verification: v.id, slot: v.worktree_path, why }, ts: deps.now() });
+  });
+  return { ...v, worktree_path: own };
 }
 
 async function removeWorktreeLocked(deps: RemoveDeps, v: Removed): Promise<void> {
@@ -574,28 +716,23 @@ function dropResume(deps: VerifyDeps, v: Verification, steps: VerifyStep[], from
 }
 
 /**
- * A resumed verification takes over the worktree of the one it resumes (a `git worktree move`
- * into its own directory), so the steps it keeps keep what they built, and copies their logs.
- * True when it did; false (the kept steps reset, an event saying why) when the source's worktree
- * is gone, will not move, or is not at the head: then it starts fresh.
+ * A resumed verification runs in the slot of the one it resumes (admission gave it that slot, and
+ * only while nothing used it since: src/verify/start.ts resumableFrom), untouched, so the steps it
+ * keeps keep what they built, and copies their logs. True when it does; false (the kept steps reset,
+ * an event saying why) when that checkout is gone or not at the head: then the slot is prepared afresh.
  */
-async function takeOverWorktree(deps: VerifyDeps, v: Verification, steps: VerifyStep[]): Promise<boolean> {
+async function resumeInSlot(deps: VerifyDeps, v: Verification, steps: VerifyStep[]): Promise<boolean> {
   const fromId = steps.find((s) => s.resumed_from)?.resumed_from;
   if (!fromId) return false;
   const from = getVerification(deps.db, fromId);
-  if (!from || !existsSync(from.worktree_path) || !ownPath(deps.root, from.worktree_path, "wt")) {
+  const usable = from !== null && from.worktree_path === v.worktree_path && ownPath(deps.root, v.worktree_path, "wt") && existsSync(v.worktree_path);
+  if (!usable || !(await checkoutOf(deps.git, v.worktree_path, v.project_path))) {
     dropResume(deps, v, steps, fromId, `the worktree of ${fromId} is gone`);
-    return false;
-  }
-  const moved = await withRepoLock(v.project_path, () => deps.git(["worktree", "move", from.worktree_path, v.worktree_path], v.project_path));
-  if (moved.code !== 0) {
-    dropResume(deps, v, steps, fromId, `git worktree move failed: ${moved.stderr.trim() || moved.stdout.trim()}`);
     return false;
   }
   const head = await deps.git(["rev-parse", "HEAD"], v.worktree_path);
   if (head.code !== 0 || head.stdout.trim() !== v.head_sha) {
     dropResume(deps, v, steps, fromId, `the worktree of ${fromId} is at ${head.stdout.trim().slice(0, 8) || "an unknown head"}, not ${v.head_sha.slice(0, 8)}`);
-    await removeWorktree(deps, v);
     return false;
   }
   copyKeptLogs(from, v, steps);
@@ -603,8 +740,10 @@ async function takeOverWorktree(deps: VerifyDeps, v: Verification, steps: Verify
 }
 
 /** Run a verification to its end. Never throws: whatever happens is recorded on its row. */
-export async function runVerification(deps: VerifyDeps, v: Verification, plan: VerifyPlan, env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  if (active.has(v.id)) return;
+export async function runVerification(deps: VerifyDeps, admitted: Verification, plan: VerifyPlan, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if (active.has(admitted.id)) return;
+  // Its checkout moves to its own directory when its slot cannot be made clean (fallBack).
+  let v = admitted;
   const job: Job = { aborted: false, children: new Set(), calls: new Set() };
   active.set(v.id, job);
   const runDeadline = Date.now() + plan.timeoutMs;
@@ -633,8 +772,14 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
     if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
-    worktreeAdded = await takeOverWorktree(deps, v, steps);
+    worktreeAdded = await resumeInSlot(deps, v, steps);
     if (job.aborted) return stoppedMidRun();
+    if (!worktreeAdded && isSlotPath(deps.root, v.worktree_path)) {
+      const unusable = await prepareSlot(deps, v);
+      if (job.aborted) return stoppedMidRun();
+      if (unusable === null) worktreeAdded = true;
+      else v = fallBack(deps, v, unusable);
+    }
     if (!worktreeAdded) {
       // One worktree change at a time per repository: concurrent adds collide in git itself.
       const added = await withRepoLock(v.project_path, () => deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path));
@@ -747,12 +892,12 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
   } finally {
     try {
       if (interrupted && worktreeAdded) deps.log(`verify ${v.id}: interrupted; its worktree stays for a resume`);
-      else if (worktreeAdded || existsSync(v.worktree_path)) await removeWorktree(deps, v);
+      else if (worktreeAdded || existsSync(v.worktree_path)) await endCheckout(deps, v);
       pruneDirs(deps, v.project_id);
     } catch (error) {
       deps.log(`verify ${v.id}: cleanup failed: ${(error as Error).message}`);
     }
-    // After the steps' groups are killed (runStep) and the worktree is gone: a failed removal is logged above,
+    // After the steps' groups are killed (runStep) and the checkout is cleaned or gone: a failure is logged above,
     // and the slot still freed, since nothing of the job runs any more.
     releaseSlot(deps, v, `verification ${v.id} ended`);
     active.delete(v.id);
@@ -834,7 +979,7 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
   }
   if (!stepGone) return recorded;
   // One just recorded as interrupted keeps its worktree for a resume; anything else left behind goes.
-  if (v && !recorded) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
+  if (v && !recorded) await endCheckout(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
   if (lease) {
     const job = { kind: "verify" as const, id, taskId: lease.task_id };
     tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));
@@ -846,8 +991,8 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
  * Daemon startup: a verification still running, or a verify slot still held,
  * belongs to a daemon that is gone. Its recorded steps are ended by identity
  * (its whole group; a reused pid is never signalled), a running row is
- * recorded as an error (and requeued once, at the front), its worktree
- * removed, and then its slot released
+ * recorded as an error (and requeued once, at the front; its checkout kept
+ * for a resume), any other's checkout cleaned or removed, and then its slot released
  * (a member of the group that outlived its leader is SIGKILLed first). A
  * step that will not exit keeps its slot (the next startup tries again): the
  * slot is not free while its work still runs. Returns the rows recorded as errors.

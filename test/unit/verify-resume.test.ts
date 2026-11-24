@@ -8,7 +8,7 @@ import { grantJobLease } from "../../src/sched/pools.ts";
 import type { VerifyConfig } from "../../src/verify/config.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { insertRequest } from "../../src/verify/queue.ts";
-import { initialSteps, recoverVerifications, runVerification, stopVerifications, type VerifyDeps } from "../../src/verify/runner.ts";
+import { initialSteps, recoverVerifications, runVerification, slotPath, stopVerifications, type VerifyDeps } from "../../src/verify/runner.ts";
 import { admitRequest } from "../../src/verify/start.ts";
 import { getVerification, insertVerification, STOPPED_MID_RUN, type Verification } from "../../src/verify/store.ts";
 
@@ -132,16 +132,17 @@ describe("a verification a stop cut off", () => {
     // The first step did not run again, and the second found what it built.
     expect(ranCount(f)).toBe(1);
     expect(readFileSync(join(done.dir, done.steps[0]!.log), "utf8")).toBe(readFileSync(join(first.dir, first.steps[0]!.log), "utf8"));
-    expect(existsSync(first.worktree_path)).toBe(false);
-    expect(existsSync(done.worktree_path)).toBe(false);
-    expect(git(f.repo, ["worktree", "list", "--porcelain"])).not.toContain(f.root);
+    // It ran in the slot it resumed, which stays, cleaned of what the steps built.
+    expect(done.worktree_path).toBe(first.worktree_path);
+    expect(existsSync(join(done.worktree_path, "built"))).toBe(false);
+    expect(git(f.repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree ") && l.endsWith("/slots/web/0"))).toHaveLength(1);
   }, 30_000);
 
   test("one a dead daemon left running keeps its worktree through startup recovery and resumes", async () => {
     const f = fixture();
     // As the last daemon left it: the first step passed, the second was running, the slot held.
     const v = tx(f.db, () => {
-      const row = insertVerification(f.db, { project_id: "web", pr_url: PR, task_id: null, head_sha: f.head, steps: initialSteps(f.steps), policy_id: verifyPolicyId(configOf(f.steps)), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "daemon", now: Date.now() });
+      const row = insertVerification(f.db, { project_id: "web", pr_url: PR, task_id: null, head_sha: f.head, steps: initialSteps(f.steps), policy_id: verifyPolicyId(configOf(f.steps)), dir: (id) => join(f.root, id), worktree: () => slotPath(f.root, "web", 0), project_path: f.repo, source: "daemon", now: Date.now() });
       grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", CAPS, Date.now());
       const steps = row.steps.map((s, i) => (i === 0 ? { ...s, state: "passed" as const, exit: 0, ms: 5 } : { ...s, state: "running" as const }));
       f.db.query("UPDATE verifications SET steps = ?2 WHERE id = ?1").run(row.id, JSON.stringify(steps));
@@ -227,5 +228,33 @@ describe("a verification a stop cut off", () => {
     expect(getVerification(f.db, v.id)!.state).toBe("failed");
     const again = admit(f, [`echo ran >> ${f.counter}`, "exit 3"]);
     expect(again.steps.every((s) => s.resumed_from === undefined)).toBe(true);
+  }, 30_000);
+
+  test("a slot another verification used since the interrupt is never resumed: it was reset to that one's tree", async () => {
+    const f = fixture();
+    const first = await interrupted(f);
+    const other = admit(f, ["true"]);
+    expect(other.worktree_path).toBe(first.worktree_path);
+    await run(f, other);
+    writeFileSync(f.go, "");
+    const fresh = admit(f);
+    expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
+    await run(f, fresh);
+    expect(getVerification(f.db, fresh.id)!.state).toBe("passed");
+    expect(ranCount(f)).toBe(2);
+  }, 30_000);
+
+  test("an interrupted one in its own v<n>/wt checkout (before slots) is never resumed", async () => {
+    const f = fixture();
+    const v = tx(f.db, () => {
+      const row = insertVerification(f.db, { project_id: "web", pr_url: PR, task_id: null, head_sha: f.head, steps: initialSteps(f.steps), policy_id: verifyPolicyId(configOf(f.steps)), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "daemon", now: Date.now() });
+      const steps = row.steps.map((s, i) => (i === 0 ? { ...s, state: "passed" as const, exit: 0, ms: 5 } : s));
+      f.db.query("UPDATE verifications SET steps = ?2, state = 'error', detail = ?3, finished_at = 1 WHERE id = ?1").run(row.id, JSON.stringify(steps), STOPPED_MID_RUN);
+      return row;
+    });
+    git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
+    const fresh = admit(f);
+    expect(fresh.steps.every((s) => s.resumed_from === undefined)).toBe(true);
+    expect(fresh.worktree_path).toBe(slotPath(f.root, "web", 0));
   }, 30_000);
 });
