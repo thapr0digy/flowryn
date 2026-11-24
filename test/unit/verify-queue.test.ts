@@ -263,7 +263,7 @@ describe("draining the queue", () => {
     // The detail names git's error when a job collides (concurrent worktree adds: src/runtime/repo-lock.ts).
     expect(["v1", "v2", "v3", "v4"].map((id) => [getVerification(f.db, id)!.state, getVerification(f.db, id)!.head_sha, getVerification(f.db, id)!.detail])).toEqual(heads.map((h) => ["passed", h, null]));
     // Four at once took four slots, which stay for the next ones (docs/notes/2026-11-24-verifies-reuse-one-a6.md).
-    expect(["v1", "v2", "v3", "v4"].map((id) => getVerification(f.db, id)!.worktree_path).sort()).toEqual([0, 1, 2, 3].map((k) => join(f.root, "slots", "web", String(k))));
+    expect(["v1", "v2", "v3", "v4"].map((id) => getVerification(f.db, id)!.worktree_path).toSorted()).toEqual([0, 1, 2, 3].map((k) => join(f.root, "slots", "web", String(k))));
     expect(git(f.repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree ")).length).toBe(5);
   }, 30_000);
 
