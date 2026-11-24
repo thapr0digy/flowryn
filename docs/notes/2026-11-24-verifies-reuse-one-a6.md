@@ -22,7 +22,7 @@ Before any step runs (`prepareSlot`, `src/verify/runner.ts`):
 
 There is no keep-list: what is worth keeping (Go's build cache, bun's install cache, module caches) lives outside the checkout.
 
-At the end of a use (`endCheckout`): the release commands run, then `git clean -ffdx`, so an idle slot holds only the tracked tree; then the slot lease is released. A verification a daemon stop cuts off keeps its slot untouched for a resume, as before.
+At the end of a use (`endCheckout`): the release commands run, then `git clean -ffdx`, so an idle slot holds only the tracked tree; then the slot lease is released. A verification a daemon stop cuts off keeps its slot untouched for a resume, as before; a fallback `v<N>/wt` checkout is never resumed, so it is removed.
 
 ## Fallback
 
@@ -38,7 +38,7 @@ A verification a daemon stop cut off resumes (docs/notes/2026-11-07-faster-landi
 
 ## Startup recovery
 
-A crashed verification recorded as interrupted keeps its slot for a resume; any other's slot gets the end-of-use release and clean, and an old `v<N>/wt` is removed. Either way the next user of the slot resets it.
+A crashed verification recorded as interrupted keeps its slot for a resume (a fallback `v<N>/wt` is removed); any other's slot gets the end-of-use release and clean, and an old `v<N>/wt` is removed. Either way the next user of the slot resets it.
 
 ## Tests
 

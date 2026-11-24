@@ -891,7 +891,7 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
     finish({ state: "error", detail: `verify failed: ${(error as Error).message}`, binary: null });
   } finally {
     try {
-      if (interrupted && worktreeAdded) deps.log(`verify ${v.id}: interrupted; its worktree stays for a resume`);
+      if (interrupted && worktreeAdded && isSlotPath(deps.root, v.worktree_path)) deps.log(`verify ${v.id}: interrupted; its worktree stays for a resume`);
       else if (worktreeAdded || existsSync(v.worktree_path)) await endCheckout(deps, v);
       pruneDirs(deps, v.project_id);
     } catch (error) {
@@ -978,8 +978,8 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
     });
   }
   if (!stepGone) return recorded;
-  // One just recorded as interrupted keeps its worktree for a resume; anything else left behind goes.
-  if (v && !recorded) await endCheckout(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
+  // A slot just recorded as interrupted keeps its checkout for a resume; anything else left behind goes.
+  if (v && !(recorded && isSlotPath(deps.root, v.worktree_path))) await endCheckout(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
   if (lease) {
     const job = { kind: "verify" as const, id, taskId: lease.task_id };
     tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));
@@ -991,7 +991,7 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
  * Daemon startup: a verification still running, or a verify slot still held,
  * belongs to a daemon that is gone. Its recorded steps are ended by identity
  * (its whole group; a reused pid is never signalled), a running row is
- * recorded as an error (and requeued once, at the front; its checkout kept
+ * recorded as an error (and requeued once, at the front; a slot's checkout kept
  * for a resume), any other's checkout cleaned or removed, and then its slot released
  * (a member of the group that outlived its leader is SIGKILLed first). A
  * step that will not exit keeps its slot (the next startup tries again): the

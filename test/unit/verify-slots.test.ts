@@ -170,6 +170,21 @@ describe("slot checkouts", () => {
     expect(next).toMatchObject({ state: "passed", worktree_path: slot });
   }, 30_000);
 
+  test("a crashed verify that had fallen back to its own checkout has it removed at recovery: only a slot is resumed", async () => {
+    const f = fixture();
+    const v = tx(f.db, () => {
+      const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.one, steps: initialSteps(["sleep 30"]), policy_id: verifyPolicyId({ steps: ["sleep 30"], binary: null }), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() });
+      grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", CAPS, Date.now());
+      return row;
+    });
+    mkdirSync(v.dir, { recursive: true });
+    git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.one]);
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(getVerification(f.db, v.id)!.state).toBe("error");
+    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(git(f.repo, ["worktree", "list", "--porcelain"])).not.toContain(v.worktree_path);
+  }, 30_000);
+
   test("assumption: the release runs at the start in the previous tree, and at the end", async () => {
     const f = fixture();
     const out = tempDir();
