@@ -1,4 +1,4 @@
-# Flakes earn one rerun: a red landing batch reruns its failing tests before fixing forward
+# Flakes earn one rerun: a red landing batch reruns its failing tests before it splits
 
 - Status: done
 - Open: not run live. appsec-signal needs `rerun_failed` on its test step before any batch reruns (see "Turning it on"); until then nothing changes
@@ -24,7 +24,7 @@ Put it only on a step that runs tests and nothing else. If the step also lints o
 
 ## What happens
 
-1. A batch's full verify fails at a step (a non-zero exit, not a timeout or an error) that has `rerun_failed`, and the batch has neither a fix task nor a rerun at this head yet.
+1. A batch's full verify fails at a step (a non-zero exit, not a timeout or an error) that has `rerun_failed`, and the batch has had no rerun at this head yet.
 2. **The failing tests.** `failedTests` (`src/verify/flake.ts`) reads the step's log, with control characters stripped and secrets redacted. A log longer than 256 KiB earns no rerun, because a failure early in it would go unread and the batch could land with it still broken:
    - Go: each top-level `--- FAIL: TestX` belongs to the next `FAIL <package>` line, and the test is `<package> TestX`. A package with no test named (a panic, a timeout) is itself the test. Subtests and `ok` packages are ignored.
    - bun: each `(fail) name` belongs to the `<file>.test.ts:` header above it, and the test is `<file> > name`. The `N tests failed:` summary at the end is not attributed to the last file. The next file header ends the summary, so a step that runs bun more than once (`bun test test/unit; bun test test/integration`) has every run's failures read.
