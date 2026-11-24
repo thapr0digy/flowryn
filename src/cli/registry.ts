@@ -5,6 +5,7 @@ import { SETUP_VERBS } from "./commands/setup.ts";
 import { HOOK_CLI_VERBS } from "./commands/hook.ts";
 import { LEAD_VERBS } from "./commands/lead.ts";
 import { BOARD_VERBS } from "./commands/board.ts";
+import { DASHBOARD_VERBS } from "../dashboard/verbs.ts";
 import { APPROVE_VERBS } from "./commands/approve.ts";
 import { AWAY_CLI_VERBS } from "./commands/away.ts";
 import { LEADER_REPIN_VERBS } from "./commands/leader-repin.ts";
@@ -26,6 +27,7 @@ export const CLI_VERBS: readonly VerbSpec[] = [
   ...HOOK_CLI_VERBS,
   ...LEAD_VERBS,
   ...BOARD_VERBS,
+  ...DASHBOARD_VERBS,
   ...APPROVE_VERBS,
   ...LEADER_REPIN_VERBS,
   ...VERIFY_CLI_VERBS,

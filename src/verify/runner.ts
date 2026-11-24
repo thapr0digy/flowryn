@@ -672,6 +672,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
         step.attempts = attempt;
         step.log = attempt === 1 ? firstLog : retryLogName(firstLog);
         step.state = "running";
+        step.started_at = deps.now();
         record(step);
         if (step.name === REVIEW_STEP) {
           result = await reviewStep(deps, job, v, plan, join(v.dir, step.log), runDeadline);

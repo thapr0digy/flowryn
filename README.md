@@ -73,6 +73,7 @@ flowryn fleet                # every worker and queued task: state, what it need
 flowryn show <id>            # one task, run, item, decision or plan; --full for whole text
 flowryn steer <task> --body-file -   # words for a worker; --urgent cuts in
 flowryn board                # live read-only view; `a` approves
+flowryn dashboard            # live build page at http://127.0.0.1:47820/: verifies with estimates, queues, batches
 flowryn approve <task>       # your word for a merge (code from /dev/tty); --gate design passes a review gate
 flowryn merge <task>         # through the merge gate
 flowryn cleanup <task>       # remove a landed task's worktree through the cleanup guard
