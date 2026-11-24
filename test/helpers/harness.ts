@@ -49,8 +49,13 @@ export function waitForFileShell(path: string, options: WaitFileOptions = {}): s
 export async function reapOwned(h: Pick<TestHome, "stateDir">): Promise<void> {
   const dir = join(h.stateDir, "owned");
   if (!existsSync(dir)) return;
-  const found = await recoverOwnedProcesses(dir, { graceMs: 1_000 });
-  if (found.failed.length > 0) throw new Error(`could not end the daemon's leftover process groups: ${JSON.stringify(found.failed)}`);
+  // A call that exits while recovery reads its group reads as "cannot check it": the next pass drops its entry.
+  let failed: { pid: number; label: string; detail: string }[] = [];
+  for (let pass = 0; pass < 3; pass++) {
+    failed = (await recoverOwnedProcesses(dir, { graceMs: 1_000 })).failed;
+    if (failed.length === 0) return;
+  }
+  throw new Error(`could not end the daemon's leftover process groups: ${JSON.stringify(failed)}`);
 }
 
 /**

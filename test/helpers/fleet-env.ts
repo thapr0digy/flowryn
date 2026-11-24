@@ -275,11 +275,15 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
     async cleanup() {
       await daemon.kill9().catch(() => {});
       killNextDaemon(h);
-      // The daemon's verify steps and tool calls lead their own process groups: a kill -9 leaves them running.
-      await reapOwned(h);
-      if (herdrUp) await herdr.stop().catch(() => {});
-      if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
-      else h.cleanup();
+      try {
+        // The daemon's verify steps and tool calls lead their own process groups: a kill -9 leaves them running.
+        await reapOwned(h);
+      } finally {
+        // Even when a group would not end: Herdr's harnesses and the home still go.
+        if (herdrUp) await herdr.stop().catch(() => {});
+        if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
+        else h.cleanup();
+      }
     },
   };
   return fleet;
