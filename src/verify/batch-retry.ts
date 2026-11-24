@@ -75,9 +75,9 @@ export function splitStack(batch: Pick<BatchRow, "split_rest">): SplitStack | nu
   }
 }
 
-/** The JSON a batch row keeps, or null for an empty stack. */
+/** The JSON a batch row keeps, or null for no stack. A spent stack (no halves) is kept for its `since`. */
 export function stackJson(stack: SplitStack | null): string | null {
-  return stack && stack.halves.length > 0 ? JSON.stringify(stack) : null;
+  return stack ? JSON.stringify(stack) : null;
 }
 
 /** A red batch's members in line order, split: the first half (rounded up) and the rest. */

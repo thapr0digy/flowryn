@@ -39,7 +39,7 @@ import { finishedAtHead, getVerification, interruptedByStop, runningVerification
  * - Light check: each waiting, non-sensitive entry's delivered head is verified alone with
  *   `light_verify` (its own policy) in the verify runner's fresh worktree. A failing step sends the
  *   work back once per head, a timeout runs it once more, the rest holds the entry for the leader.
- * - Build: with no batch live, every eligible entry (delivery order, at most MAX_BATCH) is merged
+ * - Build: with no batch live, the next half of the split stack, else every eligible entry (delivery order, up to `batch_max`), is merged
  *   onto local main's tip in the object store, the batch so far as first parent and the branch as
  *   second, so main's first-parent history reads one merge commit per task. A member adding the
  *   same numbered migration as one already taken goes back to renumber. A member that conflicts with main

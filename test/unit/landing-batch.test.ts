@@ -382,6 +382,7 @@ describe("split on red (docs/notes/2026-11-21-landing-batches-one-27.md \"Split 
   async function bisect(lq: LandingQueue, bad: Set<string>, opts: { mainRed?: boolean } = {}): Promise<string[][]> {
     const verified: string[][] = [];
     for (let i = 0; i < 40; i++) {
+      now += 60_000;
       const base = queuedBaseline();
       if (base) runVerify(base.pr_url, base.head_sha, basePolicy(), opts.mainRed ? "failed" : "passed", opts.mainRed ? failedStep("bun test", "FAIL\texample.com/app/pkg/main\t0.01s\n") : []);
       else {
@@ -445,6 +446,16 @@ describe("split on red (docs/notes/2026-11-21-landing-batches-one-27.md \"Split 
     expect(all.map((s) => runState(s))).toEqual(["running", "running", "running", "running"]);
     expect(events("landing.batch_baseline")).toHaveLength(1);
     expect(openHeld()).toEqual([]);
+  });
+
+  test("the last half of a split keeps when the split began: main shown green by an earlier half needs no baseline", async () => {
+    const all = ships(4);
+    const lq = queue();
+    await lq.pass();
+    const verified = await bisect(lq, new Set(["t3", "t4"]));
+    expect(verified).toEqual([["t1", "t2", "t3", "t4"], ["t1", "t2"], ["t3", "t4"], ["t3"], ["t4"]]);
+    expect(all.map((s) => runState(s))).toEqual(["landed", "landed", "running", "running"]);
+    expect(events("landing.batch_baseline")).toEqual([]);
   });
 
   test("main itself red: the lone branch is not sent back; the batch is held for the leader with main's verify", async () => {

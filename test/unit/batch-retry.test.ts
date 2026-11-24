@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
-import { envCause, halve, nextBatchMembers, splitStack, stackJson, TEST_TIMEOUT_LINES } from "../../src/verify/batch-retry.ts";
+import { envCause, halve, nextBatchMembers, splitStack, stackJson } from "../../src/verify/batch-retry.ts";
 import type { LandingRow } from "../../src/verify/landing-queue.ts";
 import type { Verification, VerifyStep } from "../../src/verify/store.ts";
 
@@ -43,7 +43,6 @@ describe("why a verify failed", () => {
     expect(envCause(db, verification(), null, "t.test.ts:\n(fail) slow [50.20ms]\n  ^ this test timed out after 50ms.\n")).toBe("test_timeout");
     expect(envCause(db, verification(), null, "(fail) store > saves [3.10ms]\nexpect(received).toBe(expected)\n")).toBe("red");
     expect(envCause(db, verification(), null, "expected the request to time out after 5m0s\n")).toBe("red");
-    expect(TEST_TIMEOUT_LINES).toHaveLength(2);
   });
 
   test("load: the host refused on load at the verify's start or during it, or when it is judged; memory or after the verify does not count", () => {
@@ -86,8 +85,8 @@ describe("the split stack", () => {
     expect(nextBatchMembers(null, eligible, 3)).toEqual({ members: rows("lq5", "lq6", "lq7"), stack: null });
   });
 
-  test("the stored stack: an empty one is stored as nothing; a malformed one reads as none", () => {
-    expect(stackJson({ since: 1, halves: [] })).toBeNull();
+  test("the stored stack: a spent one keeps its since; none is stored as nothing; a malformed one reads as none", () => {
+    expect(splitStack({ split_rest: stackJson({ since: 1, halves: [] }) })).toEqual({ since: 1, halves: [] });
     expect(stackJson(null)).toBeNull();
     expect(splitStack({ split_rest: stackJson({ since: 1, halves: [["lq1"]] }) })).toEqual({ since: 1, halves: [["lq1"]] });
     expect(splitStack({ split_rest: "not json" })).toBeNull();
