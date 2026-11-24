@@ -56,7 +56,7 @@ export function freeSlot(db: Db, root: string, projectId: string): string {
 /**
  * The interrupted verification a new one of this PR, head and policy resumes
  * (docs/notes/2026-11-07-faster-landing-test-q7.md): the newest one a daemon
- * stop cut off, in a slot checkout still there that nothing used since and no
+ * stop cut off, in a slot checkout still there that nothing used or cleaned since and no
  * live verification holds (its own or one just admitted there), with exactly these steps.
  */
 export function resumableFrom(db: Db, root: string, prUrl: string, head: string, policy: string, steps: readonly VerifyStep[]): Verification | null {
@@ -65,9 +65,15 @@ export function resumableFrom(db: Db, root: string, prUrl: string, head: string,
       .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state = 'error' ORDER BY started_at DESC, rowid DESC LIMIT 5")
       .all(prUrl, head, policy) as VerificationRow[]
   ).map(parseVerification);
-  const source = rows.find((v) => interruptedByStop(v) && !heldCheckouts(db, v.project_id).has(v.worktree_path) && isSlotPath(root, v.worktree_path) && existsSync(v.worktree_path) && slotState(db, v.worktree_path)?.verification === v.id);
+  const source = rows.find((v) => interruptedByStop(v) && !heldCheckouts(db, v.project_id).has(v.worktree_path) && isSlotPath(root, v.worktree_path) && existsSync(v.worktree_path) && leftAsStepsLeftIt(db, v));
   if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name || s.rerun?.command !== steps[i]!.rerun?.command)) return null;
   return source;
+}
+
+/** Whether the slot's newest recorded state is the one `v`'s steps left: nothing, `v` itself included, released or cleaned it since. */
+function leftAsStepsLeftIt(db: Db, v: Verification): boolean {
+  const state = slotState(db, v.worktree_path);
+  return state?.verification === v.id && state.services === "may_run";
 }
 
 /** The new steps with every step that passed or was skipped in `from` kept, its log named as there; null when none did. */

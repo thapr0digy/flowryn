@@ -264,6 +264,21 @@ describe("a verification a stop cut off", () => {
     expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
   }, 30_000);
 
+  test("a slot startup recovery released and cleaned after the interrupt is never resumed: its build outputs are gone", async () => {
+    const f = fixture();
+    const first = await interrupted(f);
+    // As a daemon that died before releasing the slot left it: the row already recorded, its lease still live.
+    tx(f.db, () => grantJobLease(f.db, { kind: "verify", id: first.id, taskId: null }, "validation", CAPS, Date.now()));
+    await recoverVerifications(f.deps);
+    expect(existsSync(join(first.worktree_path, "built"))).toBe(false);
+    writeFileSync(f.go, "");
+    const fresh = admit(f);
+    expect(fresh.steps.every((s) => s.state === "waiting" && s.resumed_from === undefined)).toBe(true);
+    await run(f, fresh);
+    expect(getVerification(f.db, fresh.id)!.state).toBe("passed");
+    expect(ranCount(f)).toBe(2);
+  }, 30_000);
+
   test("a slot another PR's verification was just admitted into is never resumed: the same-head verify takes another slot", async () => {
     const f = fixture();
     const first = await interrupted(f);
