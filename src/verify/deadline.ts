@@ -28,7 +28,7 @@ export interface StepDeadline {
 /** The slowest of each step's last clean passes in the project, by normalized step. */
 export function recentPasses(db: Db, projectId: string): Map<string, number[]> {
   const rows = db
-    .query("SELECT steps FROM verifications WHERE project_id = ?1 AND state <> 'running' ORDER BY started_at DESC, rowid DESC LIMIT ?2")
+    .query("SELECT steps FROM verifications WHERE project_id = ?1 AND state <> 'running' AND reused_from IS NULL ORDER BY started_at DESC, rowid DESC LIMIT ?2")
     .all(projectId, HISTORY_ROWS) as { steps: string }[];
   const passes = new Map<string, number[]>();
   for (const row of rows) {

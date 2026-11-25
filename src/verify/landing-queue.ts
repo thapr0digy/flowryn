@@ -24,7 +24,7 @@ import type { DeliveryServices } from "../policy/services.ts";
 import type { HostVerdict } from "../sched/host.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
 import { routeVerifyOutcome, SENT_BACK_KIND, sendBackText, sentBackPayload } from "./route.ts";
-import { finishedAtHead, getVerification, interruptedByStop, type Verification } from "./store.ts";
+import { finishedAtHead, getVerification, interruptedByStop, verifyStatus, type Verification } from "./store.ts";
 
 /**
  * The landing queue (docs/notes/2026-10-30-landing-queue-the-65.md): on a
@@ -173,7 +173,7 @@ function candidateVerify(db: Db, row: LandingRow): string | null {
   const request = row.train_request ? getRequest(db, row.train_request) : null;
   if (!request) return null;
   const v = request.verification_id ? getVerification(db, request.verification_id) : null;
-  if (v) return v.state === "running" ? `verifying ${v.id}` : `verify ${v.id} ${v.state}`;
+  if (v) return verifyStatus(v);
   return request.state === "queued" ? `verify queued (${request.id})` : null;
 }
 

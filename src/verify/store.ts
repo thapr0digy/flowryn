@@ -74,6 +74,12 @@ export interface VerificationRow {
   finished_at: number | null;
   /** The verify policy it ran under (src/verify/policy.ts); null on a row from before migration 24. */
   policy_id: string | null;
+  /** Its head's tree, recorded at its end when it and the base held still through the run (migration 71); else null. */
+  tree_sha: string | null;
+  /** What its steps could read of the base (src/verify/changed.ts baseKey), recorded with `tree_sha`. */
+  base_key: string | null;
+  /** The passed verification whose result it reused instead of running its steps (src/verify/runner.ts); null when it ran them. */
+  reused_from: string | null;
 }
 
 export interface Verification extends Omit<VerificationRow, "steps" | "tests"> {
@@ -129,6 +135,26 @@ export function finishedAtHeadUnderOther(db: Db, prUrl: string, head: string, po
     .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND (?3 IS NULL OR policy_id IS NULL OR policy_id <> ?3) AND state <> 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1")
     .get(prUrl, head, policy) as VerificationRow | null;
   return row ? parseVerification(row) : null;
+}
+
+/** What a verification's pass proved: its head's tree, the base its steps could read, and the policy it ran under. */
+export interface ReuseKey {
+  tree: string;
+  base: string;
+}
+
+/**
+ * The newest pass of the project under exactly this policy at exactly this tree and base
+ * (docs/notes/2026-11-25-skip-a-batch-z7.md) that ran every step as configured: none was a
+ * flake rerun of only the failed tests. `except`: the verification asking.
+ */
+export function passedAtTree(db: Db, projectId: string, policy: string, key: ReuseKey, except: string): Verification | null {
+  const rows = (
+    db
+      .query("SELECT * FROM verifications WHERE project_id = ?1 AND tree_sha = ?2 AND base_key = ?3 AND policy_id = ?4 AND state = 'passed' AND id <> ?5 ORDER BY finished_at DESC, rowid DESC LIMIT 10")
+      .all(projectId, key.tree, key.base, policy, except) as VerificationRow[]
+  ).map(parseVerification);
+  return rows.find((v) => v.steps.every((s) => !s.rerun)) ?? null;
 }
 
 /** The newest passing verification of this PR, at any head. */
@@ -214,13 +240,19 @@ export interface VerificationOutcome {
   tests: TestCounts | null;
   detail: string | null;
   binary: string | null;
+  /** The tree and base its steps saw, when both held still through the run: a later verification may reuse a pass by it. */
+  key?: ReuseKey | null;
+  /** The passed verification whose result this one reused. */
+  reused_from?: string | null;
 }
 
 /** Finish a verification with its `pr.verified` event. Call inside a transaction; a row already finished is left alone. */
 export function finishVerification(db: Db, v: Verification, outcome: VerificationOutcome, now: number): boolean {
+  const key = outcome.key ?? null;
+  const reused = outcome.reused_from ?? null;
   const changed = db
-    .query("UPDATE verifications SET state = ?2, steps = ?3, tests = ?4, detail = ?5, binary_path = ?6, finished_at = ?7 WHERE id = ?1 AND state = 'running'")
-    .run(v.id, outcome.state, JSON.stringify(outcome.steps), outcome.tests ? JSON.stringify(outcome.tests) : null, outcome.detail, outcome.binary, now).changes;
+    .query("UPDATE verifications SET state = ?2, steps = ?3, tests = ?4, detail = ?5, binary_path = ?6, finished_at = ?7, tree_sha = ?8, base_key = ?9, reused_from = ?10 WHERE id = ?1 AND state = 'running'")
+    .run(v.id, outcome.state, JSON.stringify(outcome.steps), outcome.tests ? JSON.stringify(outcome.tests) : null, outcome.detail, outcome.binary, now, key?.tree ?? null, key?.base ?? null, reused).changes;
   if (changed === 0) return false;
   appendEvent(db, {
     source: "daemon",
@@ -239,14 +271,23 @@ export function finishVerification(db: Db, v: Verification, outcome: Verificatio
       duration_ms: now - v.started_at,
       binary: outcome.binary,
       detail: outcome.detail,
+      tree: key?.tree ?? null,
+      ...(reused ? { reused_from: reused } : {}),
     },
     ts: now,
   });
   return true;
 }
 
-/** "v4 passed at fc2f76d7 (1843 pass, 0 fail)", for `show` and the gate's messages. */
+/** "verifying v4", "verify v4 failed", "verify v4 passed, reused v2": a batch's or a train candidate's verify in a line. */
+export function verifyStatus(v: Verification): string {
+  if (v.state === "running") return `verifying ${v.id}`;
+  return `verify ${v.id} ${v.state}${v.reused_from ? `, reused ${v.reused_from}` : ""}`;
+}
+
+/** "v4 passed at fc2f76d7 (1843 pass, 0 fail)", for `show` and the gate's messages; a reused pass adds "reused v2". */
 export function verificationLine(v: Verification): string {
   const tests = v.tests ? ` (${v.tests.pass} pass, ${v.tests.fail} fail)` : "";
-  return `${v.id} ${v.state} at ${v.head_sha.slice(0, 8)}${tests}`;
+  const reused = v.reused_from ? `, reused ${v.reused_from}` : "";
+  return `${v.id} ${v.state} at ${v.head_sha.slice(0, 8)}${tests}${reused}`;
 }

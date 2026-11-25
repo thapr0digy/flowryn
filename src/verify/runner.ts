@@ -14,12 +14,12 @@ import { appendEvent } from "../db/events.ts";
 import { PROJECT_ID } from "../lifecycle/projects.ts";
 import { failedReleases, projectRelease, runRelease } from "../lifecycle/release.ts";
 import type { FlowrynConfig } from "../config/config.ts";
-import { anyMatches, changedSinceBase, type ChangedFiles } from "./changed.ts";
+import { anyMatches, baseKey, changedSinceBase, commitTree, type ChangedFiles } from "./changed.ts";
 import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
-import { finishVerification, getVerification, recordSlotState, recordSteps, runningVerifications, slotState, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
+import { finishVerification, getVerification, passedAtTree, recordSlotState, recordSteps, runningVerifications, slotState, STOPPED_MID_RUN, type ReuseKey, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
 /**
@@ -702,9 +702,9 @@ function kept(step: VerifyStep): boolean {
   return step.resumed_from !== undefined && (step.state === "passed" || step.state === "skipped");
 }
 
-/** The logs of the kept steps, copied from the resumed verification's directory into this one's (a missing one is noted on its step). */
-function copyKeptLogs(from: Verification, v: Verification, steps: VerifyStep[]): void {
-  for (const step of steps.filter((s) => kept(s) && s.state === "passed")) {
+/** The logs of the passed steps, copied from `from`'s directory into this one's (a missing one is noted on its step). */
+function copyLogs(from: Verification, v: Verification, steps: VerifyStep[]): void {
+  for (const step of steps.filter((s) => s.state === "passed")) {
     const logs = (step.attempts ?? 1) > 1 ? [step.log.replace(/\.retry\.log$/, ".log"), step.log] : [step.log];
     for (const log of logs) {
       try {
@@ -751,8 +751,48 @@ async function resumeInSlot(deps: VerifyDeps, v: Verification, steps: VerifyStep
     dropResume(deps, v, steps, fromId, `the worktree of ${fromId} is at ${head.stdout.trim().slice(0, 8) || "an unknown head"}, not ${v.head_sha.slice(0, 8)}`);
     return false;
   }
-  copyKeptLogs(from, v, steps);
+  copyLogs(from, v, steps.filter(kept));
   return true;
+}
+
+/** The head's tree and what its steps can read of the base, from the project's repository; null when git cannot say. */
+async function reuseKey(deps: VerifyDeps, v: Verification, plan: VerifyPlan): Promise<ReuseKey | null> {
+  const tree = await commitTree(deps.git, v.project_path, v.head_sha);
+  if (tree === null) return null;
+  const base = await baseKey(deps.git, v.project_path, v.head_sha, plan.base ?? null);
+  return base === null ? null : { tree, base };
+}
+
+function sameKey(a: ReuseKey | null, b: ReuseKey | null): boolean {
+  return a !== null && b !== null && a.tree === b.tree && a.base === b.base;
+}
+
+/**
+ * A pass this verification may take instead of running its steps (docs/notes/2026-11-25-skip-a-batch-z7.md):
+ * one of the same project under the same policy at the same tree and base that ran every step.
+ * Its steps, logs and binary are copied here and the outcome names the verification that ran them;
+ * null (run the steps) when there is none, this one is a flake rerun, or its binary is gone.
+ */
+function reusedPass(deps: VerifyDeps, v: Verification, steps: VerifyStep[], plan: VerifyPlan, key: ReuseKey): Omit<VerificationOutcome, "steps" | "tests"> | null {
+  if (v.policy_id === null || steps.some((s) => s.rerun)) return null;
+  const source = passedAtTree(deps.db, v.project_id, v.policy_id, key, v.id);
+  if (!source) return null;
+  const ran = source.reused_from ?? source.id;
+  let binary: string | null = null;
+  if (plan.binary) {
+    if (!source.binary_path) return null;
+    try {
+      binary = keepBinary(dirname(source.binary_path), basename(source.binary_path), v.dir);
+    } catch (error) {
+      deps.log(`verify ${v.id}: not reusing ${ran}: ${(error as Error).message}`);
+      return null;
+    }
+  }
+  const taken = source.steps.map((s) => ({ ...s, detail: `reused from ${ran}${s.detail ? `; ${s.detail}` : ""}` }));
+  copyLogs(source, v, taken);
+  steps.splice(0, steps.length, ...taken);
+  deps.log(`verify ${v.id}: tree ${key.tree.slice(0, 8)} passed in ${ran} under the same steps and base; reusing it`);
+  return { state: "passed", detail: `reused ${ran}: it passed the same tree ${key.tree.slice(0, 8)} with the same steps and base`, binary, key, reused_from: ran };
 }
 
 /** Run a verification to its end. Never throws: whatever happens is recorded on its row. */
@@ -788,6 +828,11 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
     // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
     if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
+    // Before the slot is touched: a reused pass runs nothing there.
+    const key = await reuseKey(deps, v, plan);
+    if (job.aborted) return stoppedMidRun();
+    const reused = key ? reusedPass(deps, v, steps, plan, key) : null;
+    if (reused) return finish(reused);
     worktreeAdded = await resumeInSlot(deps, v, steps);
     if (job.aborted) return stoppedMidRun();
     if (!worktreeAdded && isSlotPath(deps.root, v.worktree_path)) {
@@ -903,7 +948,9 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
     }
     // A pass that needed a retry says so: the hang is worth knowing about even when it cleared.
     const recovered = steps.filter((s) => (s.hangs ?? 0) > 0).map((s) => `${s.name}: ${s.detail}`);
-    return finish({ state: "passed", detail: recovered.length > 0 ? recovered.join("; ") : null, binary });
+    // Reusable later only when the base its steps read did not move under them.
+    const after = key ? await reuseKey(deps, v, plan) : null;
+    return finish({ state: "passed", detail: recovered.length > 0 ? recovered.join("; ") : null, binary, key: sameKey(key, after) ? key : null });
   } catch (error) {
     deps.log(`verify ${v.id}: ${(error as Error).stack ?? String(error)}`);
     finish({ state: "error", detail: `verify failed: ${(error as Error).message}`, binary: null });

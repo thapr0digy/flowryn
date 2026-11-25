@@ -1101,6 +1101,18 @@ ALTER TABLE landing_batches ADD COLUMN retry_at INTEGER;
 ALTER TABLE landing_batches ADD COLUMN split_rest TEXT;
 `;
 
+/**
+ * Migration 71, a verify reuses a pass at the same tree (docs/notes/2026-11-25-skip-a-batch-z7.md):
+ * the head's tree and the base it was diffed against, recorded when both held still through the
+ * run, and the verification a reused pass took its result from.
+ */
+const VERIFY_REUSE_SQL = /* sql */ `
+ALTER TABLE verifications ADD COLUMN tree_sha TEXT;
+ALTER TABLE verifications ADD COLUMN base_key TEXT;
+ALTER TABLE verifications ADD COLUMN reused_from TEXT;
+CREATE INDEX verifications_tree ON verifications(project_id, tree_sha);
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1401,6 +1413,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 68, name: "lesson-correction", sql: LESSON_CORRECTION_SQL },
   { version: 69, name: "evidence-gates", sql: EVIDENCE_GATES_SQL, rebuildsReferencedTable: true },
   { version: 70, name: "batch-split", sql: BATCH_SPLIT_SQL },
+  { version: 71, name: "verify-reuse", sql: VERIFY_REUSE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

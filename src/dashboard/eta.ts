@@ -31,7 +31,7 @@ export function stepUsual(db: Db, projectId: string): (step: string) => number |
 /** The median length of the project's last passed verifications, or null with none. */
 export function typicalVerify(db: Db, projectId: string): number | null {
   const rows = db
-    .query("SELECT finished_at - started_at AS ms FROM verifications WHERE project_id = ?1 AND state = 'passed' AND finished_at IS NOT NULL ORDER BY started_at DESC, rowid DESC LIMIT ?2")
+    .query("SELECT finished_at - started_at AS ms FROM verifications WHERE project_id = ?1 AND state = 'passed' AND finished_at IS NOT NULL AND reused_from IS NULL ORDER BY started_at DESC, rowid DESC LIMIT ?2")
     .all(projectId, TYPICAL_VERIFIES) as { ms: number }[];
   return median(rows.map((r) => r.ms));
 }
