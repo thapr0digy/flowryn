@@ -32,8 +32,8 @@ export type FailureCause = "timeout" | "error" | "test_timeout" | "load" | "red"
  */
 export const TEST_TIMEOUT_LINES: readonly RegExp[] = [/^panic: test timed out after \S+/m, /^\s*\^ this test timed out after \d+m?s\./m];
 
-/** The host check's reason when load, not memory or a probe, refused it (src/sched/host.ts judgeHost). */
-const LOAD_REASON = /\bload [\d.]+ per core, over\b/;
+/** The host check's reason when CPU load (the host's, or the Docker VM's pressure), not memory or a probe, refused it (src/sched/host.ts judgeHost). */
+const LOAD_REASON = /\bload [\d.]+ per core, over\b|\bDocker VM CPU pressure [\d.]+%/;
 
 /** Whether the host check refused on load at any moment of the verification: the state at its start, or a flip during it. */
 function loadDuring(db: Db, v: Verification): boolean {

@@ -527,7 +527,7 @@ describe("split on red (docs/notes/2026-11-21-landing-batches-one-27.md \"Split 
     // Memory, not load, does not count; a host check refusing on load as the red is judged does.
     hostOk(now);
     now += RETRY_BACKOFF_MS[0];
-    lq = queue(config(), async () => ({ ok: false, sample: null, reason: "load 3.00 per core, over 1.5" }));
+    lq = queue(config(), async () => ({ ok: false, sample: null, reason: "load 3.00 per core, over 1.5", holds: ["load"] }));
     await lq.pass();
     b = batchOf();
     blocked(now + 1, "2.0 GB available, under 8 GB");

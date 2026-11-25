@@ -24,7 +24,7 @@ import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { capacityConfig, workflowsConfig } from "../config/workflows.ts";
 import { INSTALL_HINTS } from "../init/install.ts";
-import { checkHost } from "../sched/host.ts";
+import { checkHost, hostNeeds } from "../sched/host.ts";
 import { judgeQuota, probeQuota, quotaTarget, type QuotaReading } from "../sched/quota.ts";
 import { resumeCommand } from "../sched/usage.ts";
 import { githubConfig } from "../config/delivery.ts";
@@ -584,8 +584,9 @@ async function hostCheckNow(config: FlowrynConfig): Promise<Check> {
   const verdict = await checkHost(host);
   const pools = Object.entries(capacityConfig(config).pools).map(([pool, cap]) => `${pool} ${cap}`).join(", ");
   const now = verdict.sample ? `${verdict.sample.free_mem_gb.toFixed(1)} GB available, load ${verdict.sample.load_per_core.toFixed(2)} per core` : verdict.reason;
-  if (verdict.ok) return { check: "host check", status: "ok", detail: `${now}; needs ${host.min_free_mem_gb} GB and at most ${host.max_load_per_core} per core; pools: ${pools}` };
-  return { check: "host check", status: "warn", detail: `fails now (${verdict.reason}): no new worker or stage starts while it fails; lower [capacity.host] min_free_mem_gb or max_load_per_core if this machine never has that room` };
+  const unknown = verdict.sample?.notes.length ? `; not holding on: ${verdict.sample.notes.join("; ")}` : "";
+  if (verdict.ok) return { check: "host check", status: "ok", detail: `${now}; needs ${hostNeeds(host)}${unknown}; pools: ${pools}` };
+  return { check: "host check", status: "warn", detail: `fails now (${verdict.reason}): no new worker or stage starts while it fails; lower [capacity.host] min_free_mem_gb or max_load_per_core, or set pressure = false, if this machine never has that room${unknown}` };
 }
 
 /**

@@ -107,10 +107,13 @@ export interface HostCheckConfig {
   /** No new grant while the 1-minute load average per core is above this. */
   max_load_per_core: number;
   /**
-   * A command that prints {"free_mem_gb": n, "load_per_core": n} instead of
-   * reading vm_stat and the load average (tests and the lab point it at a file).
+   * A command that prints {"free_mem_gb": n, "load_per_core": n} (and, optionally,
+   * "swap_used_gb", "swap_total_gb", "vm_cpu_some_avg60") instead of reading
+   * vm_stat, the load average, swap and the Docker VM (tests and the lab point it at a file).
    */
   probe: string | null;
+  /** Also hold on host swap and the Docker VM's CPU pressure, at fixed limits (src/sched/host.ts); false turns both off. */
+  pressure: boolean;
 }
 
 export interface QuotaConfig {
@@ -124,7 +127,7 @@ export interface CapacityConfig {
   quota: QuotaConfig;
 }
 
-export const DEFAULT_HOST: HostCheckConfig = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null };
+export const DEFAULT_HOST: HostCheckConfig = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null, pressure: true };
 export const DEFAULT_QUOTA: QuotaConfig = { floor: 5 };
 
 export const AUTONOMY_MODES = ["plan", "manual"] as const;
@@ -191,7 +194,8 @@ export function capacityConfig(config: FlowrynConfig): CapacityConfig {
     pools[name] = value;
   }
   const host = table(raw.host, "[capacity.host]");
-  unknownKeys(host, ["min_free_mem_gb", "max_load_per_core", "probe"], "[capacity.host]");
+  unknownKeys(host, ["min_free_mem_gb", "max_load_per_core", "probe", "pressure"], "[capacity.host]");
+  if (host.pressure !== undefined && typeof host.pressure !== "boolean") throw new FlowrynError("config_invalid", "[capacity.host] pressure must be true or false");
   let probe: string | null = null;
   if (host.probe !== undefined) {
     if (typeof host.probe !== "string" || host.probe.length === 0) throw new FlowrynError("config_invalid", "[capacity.host] probe must be the path of a command");
@@ -208,6 +212,7 @@ export function capacityConfig(config: FlowrynConfig): CapacityConfig {
       min_free_mem_gb: positiveNumber(host.min_free_mem_gb, "[capacity.host] min_free_mem_gb", DEFAULT_HOST.min_free_mem_gb, true),
       max_load_per_core: positiveNumber(host.max_load_per_core, "[capacity.host] max_load_per_core", DEFAULT_HOST.max_load_per_core),
       probe,
+      pressure: host.pressure !== false,
     },
   };
 }

@@ -621,7 +621,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           forge,
           webUrl: () => github().web_url,
           projectPath: (projectId) => getProject(database, projectId)?.path ?? null,
-          host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
+          host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running", holds: [] },
         }).finally(() => autoMerger?.kick()),
       drainAsks: (isStopped) => drainAsks(askDeps, isStopped),
     });
@@ -636,7 +636,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
       kickScheduler: () => scheduler?.kick(),
       delivery,
-      host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
+      host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running", holds: [] },
     });
     const noCi = async (projectId: string): Promise<boolean> => {
       const project = getProject(database, projectId);
@@ -654,7 +654,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       explainWaits: () => scheduler?.kickWaits(),
       passNow: async () => scheduler?.passNow(),
       grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false,
-      host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
+      host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running", holds: [] },
     };
 
     // Leader-safe restart: the guards read this daemon's in-memory work; launchd (or a test's script) restarts it.

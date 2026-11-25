@@ -61,7 +61,8 @@ export interface SchedulerDeps {
   notify(runId: string): void;
   startDeps: StartDeps;
   kickJournal(): void;
-  host?(cfg: HostCheckConfig): Promise<HostVerdict>;
+  /** `previous` is the last verdict: swap and VM CPU pressure release at a lower level than they hold. */
+  host?(cfg: HostCheckConfig, previous: HostVerdict | null): Promise<HostVerdict>;
   /** One quota-axi reading for an account (tests); by default the configured quota-axi runs for its login. */
   quota?(account: Account): Promise<QuotaReading>;
   /** Start queued verifies while slots are free (src/verify/start.ts): first in each grant, since a verify is the step closest to shipping. */
@@ -88,6 +89,8 @@ export interface HostState {
   since: number;
   free_mem_gb: number | null;
   load_per_core: number | null;
+  /** What held (src/sched/host.ts HostHold); absent in a state recorded before swap and VM CPU pressure were read. */
+  holds?: string[];
 }
 
 const HOST_KEY = "sched_host";
@@ -113,6 +116,8 @@ export class Scheduler {
   private queued: Promise<void> | null = null;
   private stopped = false;
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
+  /** The host readings that last failed, logged once per change. */
+  private hostNotes = "";
   /** The last quota-axi reading per account. */
   private readonly quotaCache = new Map<string, { at: number; reading: QuotaReading }>();
   private readonly relaunching = new Set<string>();
@@ -271,18 +276,29 @@ export class Scheduler {
     const now = this.deps.now();
     const ttl = schedTiming(this.deps.config()).host_cache_ms;
     if (this.hostCache && now - this.hostCache.at < ttl) return this.hostCache.verdict;
-    const verdict = await (this.deps.host ?? checkHost)(cfg);
+    const verdict = await (this.deps.host ?? checkHost)(cfg, this.hostCache?.verdict ?? null);
     this.hostCache = { at: now, verdict };
+    this.logHostNotes(verdict);
     this.recordHost(verdict, now);
     return verdict;
   }
 
-  /** Record the host check when it flips, with an event (it decides whether anything new starts). */
+  /** A failed swap or VM read holds nothing; say so in the log when what failed changes. */
+  private logHostNotes(verdict: HostVerdict): void {
+    const notes = (verdict.sample?.notes ?? []).join("; ");
+    if (notes === this.hostNotes) return;
+    this.hostNotes = notes;
+    this.deps.log(notes ? `sched: host check reads unknown, not holding: ${notes}` : "sched: host check reads every value again");
+  }
+
+  /** Record the host check when it flips or what holds it changes, with an event (it decides whether anything new starts). */
   private recordHost(verdict: HostVerdict, now: number): void {
     const { db } = this.deps;
     const previous = hostState(db);
-    if (previous && previous.ok === verdict.ok) return;
-    const state: HostState = { ok: verdict.ok, reason: verdict.reason, since: now, free_mem_gb: verdict.sample?.free_mem_gb ?? null, load_per_core: verdict.sample?.load_per_core ?? null };
+    const holds = [...(verdict.holds ?? [])].toSorted();
+    if (previous && previous.ok === verdict.ok && (verdict.ok || (previous.holds ?? []).join() === holds.join())) return;
+    const since = previous && previous.ok === verdict.ok ? previous.since : now;
+    const state: HostState = { ok: verdict.ok, reason: verdict.reason, since, free_mem_gb: verdict.sample?.free_mem_gb ?? null, load_per_core: verdict.sample?.load_per_core ?? null, holds };
     tx(db, () => {
       setMeta(db, HOST_KEY, JSON.stringify(state));
       appendEvent(db, { source: "daemon", kind: verdict.ok ? "sched.host_ok" : "sched.host_blocked", payload: state, ts: now });

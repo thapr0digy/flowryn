@@ -1,5 +1,6 @@
 import type { Fact, Unblock } from "../attention/explanations.ts";
 import type { HostCheckConfig } from "../config/workflows.ts";
+import { hostNeeds } from "./host.ts";
 import type { Db } from "../db/db.ts";
 import { harnessFacts, harnessUnblock, harnessWaitReason, type AutoAttempt, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { OperationRow } from "../lifecycle/operations.ts";
@@ -98,7 +99,7 @@ export function hostRefusal(host: HostState | null, cfg: HostCheckConfig, reason
       ...(host?.free_mem_gb != null ? [{ name: "free memory", value: `${host.free_mem_gb} GB (needs ${cfg.min_free_mem_gb})`, at: since }] : []),
       ...(host?.load_per_core != null ? [{ name: "load per core", value: `${host.load_per_core} (under ${cfg.max_load_per_core})`, at: since }] : []),
     ],
-    unblock: [{ by: "flowryn", action: `grants once the host check passes (${cfg.min_free_mem_gb} GB free, load per core under ${cfg.max_load_per_core})` }],
+    unblock: [{ by: "flowryn", action: `grants once the host check passes (${hostNeeds(cfg)})` }],
   };
 }
 

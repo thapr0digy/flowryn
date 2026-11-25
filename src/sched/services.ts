@@ -24,5 +24,5 @@ export interface SchedServices {
 }
 
 export function inertSched(overrides: Partial<SchedServices> = {}): SchedServices {
-  return { kick: () => {}, explainWaits: () => {}, passNow: async () => {}, grantNow: async () => false, host: async () => ({ ok: true, sample: null, reason: "ok" }), ...overrides };
+  return { kick: () => {}, explainWaits: () => {}, passNow: async () => {}, grantNow: async () => false, host: async () => ({ ok: true, sample: null, reason: "ok", holds: [] }), ...overrides };
 }

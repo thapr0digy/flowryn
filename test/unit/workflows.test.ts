@@ -81,11 +81,11 @@ describe("workflows (design section 11)", () => {
 
 describe("capacity, autonomy, the scheduler's clocks, the style block", () => {
   test("pools and the host check default to the design's numbers; [capacity] overrides and adds", () => {
-    expect(capacityConfig(cfg(""))).toEqual({ pools: { worker: 20, validation: 5, docker_env: 5, browser: 5 }, host: { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null }, quota: { floor: 5 } });
-    const c = capacityConfig(cfg('[capacity]\nworker = 3\ngpu = 1\n[capacity.host]\nmin_free_mem_gb = 0\nprobe = "bin/probe"\n'));
+    expect(capacityConfig(cfg(""))).toEqual({ pools: { worker: 20, validation: 5, docker_env: 5, browser: 5 }, host: { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null, pressure: true }, quota: { floor: 5 } });
+    const c = capacityConfig(cfg('[capacity]\nworker = 3\ngpu = 1\n[capacity.host]\nmin_free_mem_gb = 0\nprobe = "bin/probe"\npressure = false\n'));
     expect(c.pools).toMatchObject({ worker: 3, gpu: 1, validation: 5 });
-    expect(c.host).toEqual({ min_free_mem_gb: 0, max_load_per_core: 1.5, probe: `${HOME}/bin/probe` });
-    for (const text of ["[capacity]\nworker = 0", "[capacity]\nworker = 1.5", "[capacity]\nBad = 1", "[capacity.host]\nmax_load_per_core = 0", "[capacity.host]\nspeed = 1"]) {
+    expect(c.host).toEqual({ min_free_mem_gb: 0, max_load_per_core: 1.5, probe: `${HOME}/bin/probe`, pressure: false });
+    for (const text of ["[capacity]\nworker = 0", "[capacity]\nworker = 1.5", "[capacity]\nBad = 1", "[capacity.host]\nmax_load_per_core = 0", "[capacity.host]\nspeed = 1", "[capacity.host]\npressure = 1"]) {
       expect(workflowConfigProblems(cfg(text)).length).toBeGreaterThan(0);
     }
   });
@@ -156,10 +156,11 @@ Pages wired down:                        179331.
   });
 
   test("it fails on low memory or a high load per core, and says why", () => {
-    const host = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null };
-    expect(judgeHost({ free_mem_gb: 9.6, load_per_core: 0.4, source: "vm_stat" }, host)).toMatchObject({ ok: true, reason: "ok" });
-    expect(judgeHost({ free_mem_gb: 2, load_per_core: 0.4, source: "probe" }, host).reason).toBe("2.0 GB available, under 8 GB");
-    expect(judgeHost({ free_mem_gb: 20, load_per_core: 2.25, source: "probe" }, host)).toMatchObject({ ok: false, reason: "load 2.25 per core, over 1.5" });
+    const host = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null, pressure: true };
+    const unread = { swap: null, vm_cpu: null, notes: [] };
+    expect(judgeHost({ free_mem_gb: 9.6, load_per_core: 0.4, source: "vm_stat", ...unread }, host)).toMatchObject({ ok: true, reason: "ok", holds: [] });
+    expect(judgeHost({ free_mem_gb: 2, load_per_core: 0.4, source: "probe", ...unread }, host).reason).toBe("2.0 GB available, under 8 GB");
+    expect(judgeHost({ free_mem_gb: 20, load_per_core: 2.25, source: "probe", ...unread }, host)).toMatchObject({ ok: false, reason: "load 2.25 per core, over 1.5", holds: ["load"] });
   });
 });
 

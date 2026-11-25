@@ -243,6 +243,13 @@ export function hostCause(db: Db, config: FlowrynConfig): { cause: string; fix: 
     parts.push(`load ${host.load_per_core} per core, over the ${floors.max_load_per_core} limit ([capacity.host] max_load_per_core)`);
     keys.push("max_load_per_core");
   }
+  const holds = host?.holds ?? [];
+  const problems = host?.reason.split("; ") ?? [];
+  if (holds.length === problems.length) {
+    problems.forEach((problem, i) => {
+      if (holds[i] === "swap" || holds[i] === "vm_cpu") parts.push(problem);
+    });
+  }
   const cause = `the host check fails: ${parts.length > 0 ? parts.join("; ") : (host?.reason ?? "no reading yet")}`;
   const fix = keys.length > 0 ? `free the host, or change [capacity.host] ${keys.join(" / ")} in config.toml, then reload it (SIGHUP to the daemon, or flowryn daemon restart); flowryn capacity` : "flowryn capacity";
   return { cause, fix };

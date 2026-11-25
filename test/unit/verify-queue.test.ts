@@ -83,7 +83,7 @@ function fixture(steps: string[] = ["true"], caps = "validation = 5"): Fixture {
     root,
     logs,
     prs,
-    host: { ok: true, sample: null, reason: "ok" },
+    host: { ok: true, sample: null, reason: "ok", holds: [] },
     config,
     deps: null as unknown as QueueDeps,
     request(n, over = {}) {
@@ -274,9 +274,9 @@ describe("draining the queue", () => {
     tx(f.db, () => setMeta(f.db, "restart_pending", JSON.stringify({ by: "auto", session: null, requested_at: Date.now(), expires_at: Date.now() + 60_000, force: false })));
     expect(await drainVerifyQueue(f.deps)).toBe(0);
     f.db.exec("DELETE FROM meta WHERE key = 'restart_pending'");
-    f.host = { ok: false, sample: null, reason: "2.0 GB available, under 8 GB" };
+    f.host = { ok: false, sample: null, reason: "2.0 GB available, under 8 GB", holds: ["memory"] };
     expect(await drainVerifyQueue(f.deps)).toBe(0);
-    f.host = { ok: true, sample: null, reason: "ok" };
+    f.host = { ok: true, sample: null, reason: "ok", holds: [] };
     f.config = parseConfig('[projects.web]\nverify = ["true"]\n[capacity]\nvalidation = 1\n', tempDir());
     tx(f.db, () => grantJobLease(f.db, { kind: "verify", id: "v99", taskId: null }, "validation", { validation: 1 }, Date.now()));
     expect(await drainVerifyQueue(f.deps)).toBe(0);
@@ -426,7 +426,7 @@ describe("draining the queue", () => {
       expect(getRequest(f.db, request.id)).toMatchObject({ wait_reason: "stale_read" });
       // The watcher then reads the new head, while the host check holds the whole queue: the drain never reaches the request.
       f.db.query("INSERT INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR(5), number: 5, state: "open", head: f.head, checks: null, observed_at: 1 }));
-      f.host = { ok: false, sample: null, reason: "load" };
+      f.host = { ok: false, sample: null, reason: "load", holds: ["load"] };
       expect(await drainVerifyQueue(f.deps)).toBe(0);
       expect(getRequest(f.db, request.id)).toMatchObject({ state: "queued", wait_reason: null, wait_ref: null });
       expect(events(f.db, "verify.wait_ended")).toMatchObject([{ request: request.id, reason: "stale_read" }]);
