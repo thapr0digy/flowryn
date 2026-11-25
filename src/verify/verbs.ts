@@ -127,6 +127,7 @@ export function verificationView(v: Verification, now: number, db?: Db): Record<
     head: v.head_sha,
     policy: v.policy_id ?? "-",
     state: v.state,
+    ...(v.reused_from ? { reused: v.reused_from } : {}),
     steps: v.steps.map((s) => ({
       step: s.name,
       state: s.state,

@@ -2,7 +2,7 @@ import { getMeta, setMeta, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { LandingRow } from "./landing-queue.ts";
 import { getRequest, positionOf } from "./queue.ts";
-import { getVerification } from "./store.ts";
+import { getVerification, verifyStatus } from "./store.ts";
 
 /**
  * Landing batches' rows (migration 64, docs/notes/2026-11-21-landing-batches-one-27.md), read by
@@ -160,7 +160,7 @@ export function landingBatchOfRun(db: Db, runId: string): BatchRow | null {
 export function batchVerify(db: Db, batch: BatchRow): string | null {
   const request = batch.request_id ? getRequest(db, batch.request_id) : null;
   const v = request?.verification_id ? getVerification(db, request.verification_id) : batch.verification_id ? getVerification(db, batch.verification_id) : null;
-  if (v) return v.state === "running" ? `verifying ${v.id}` : `verify ${v.id} ${v.state}`;
+  if (v) return verifyStatus(v);
   if (request?.state === "queued") {
     const place = positionOf(db, request.id);
     return `verify queued, waiting for a slot (${request.id}${place ? `, ${place.position} of ${place.of}` : ""})`;
@@ -179,7 +179,7 @@ export function batchLine(db: Db, batch: BatchRow): string {
   const members = batchMembers(db, batch.id);
   const what = `${members.length} branch${members.length === 1 ? "" : "es"} on main ${batch.base_sha.slice(0, 8)}`;
   if (batch.state === "held") return `${batch.id} held, ${what}: ${batch.detail ?? batch.reason ?? "-"}`;
-  if (batch.state === "landing") return `${batch.id} landing, ${what}${batch.detail ? `: ${batch.detail}` : ""}`;
+  if (batch.state === "landing") return `${batch.id} landing on ${batchVerify(db, batch) ?? "its verify"}, ${what}${batch.detail ? `: ${batch.detail}` : ""}`;
   if (batch.state === "verifying") return `${batch.id} ${verifyingStage(db, batch)}, ${what}`;
   return `${batch.id} ${batch.state}${batch.reason ? ` (${batch.reason})` : ""}${batch.detail ? `: ${batch.detail}` : ""}`;
 }

@@ -77,12 +77,66 @@ export function anyMatches(globs: readonly string[], paths: readonly string[]): 
 
 export type ChangedFiles = { files: string[]; base: string } | { error: string };
 
+const ORIGIN = "refs/remotes/origin/";
+
+/** Origin's default branch by name, else "main". */
+async function defaultBranch(git: GitRunner, cwd: string): Promise<string> {
+  const head = await git(["symbolic-ref", "--quiet", `${ORIGIN}HEAD`], cwd);
+  const ref = head.stdout.trim();
+  return head.code === 0 && ref.startsWith(ORIGIN) ? ref.slice(ORIGIN.length) : "main";
+}
+
 /** The base ref a diff starts from: origin's copy of the PR's base, else origin's default branch, else origin/main. */
 async function baseRef(git: GitRunner, cwd: string, base: string | null): Promise<string> {
-  if (base) return `refs/remotes/origin/${base}`;
-  const head = await git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], cwd);
-  const ref = head.stdout.trim();
-  return head.code === 0 && ref.startsWith("refs/remotes/origin/") ? ref : "refs/remotes/origin/main";
+  return `${ORIGIN}${base ?? (await defaultBranch(git, cwd))}`;
+}
+
+/** A tree, "none" when git says the object is not there (exit 1), or null when git could not say. */
+async function treeOf(git: GitRunner, cwd: string, rev: string): Promise<string | null> {
+  const out = await git(["rev-parse", "--verify", "--quiet", `${rev}^{tree}`], cwd);
+  if (out.code === 0) return out.stdout.trim();
+  return out.code === 1 ? "none" : null;
+}
+
+/** "<ref tree>:<merge base tree>" of one base ref against `head`; null when git could not say. */
+async function refKey(git: GitRunner, cwd: string, ref: string, head: string): Promise<string | null> {
+  const tree = await treeOf(git, cwd, ref);
+  if (tree === null) return null;
+  if (tree === "none") return "none";
+  const mergeBase = await git(["merge-base", ref, head], cwd);
+  if (mergeBase.code === 1) return `${tree}:none`;
+  if (mergeBase.code !== 0) return null;
+  const baseTree = await treeOf(git, cwd, mergeBase.stdout.trim());
+  return baseTree === null ? null : `${tree}:${baseTree}`;
+}
+
+/**
+ * What a step that diffs `head` against its base can read of that base
+ * (docs/notes/2026-11-25-skip-a-batch-z7.md): for the PR's base branch and
+ * origin's default branch, both the local branch and origin's copy, the
+ * branch's tree and the tree of its merge base with `head`. Two verifications
+ * with the same head tree and the same key see the same changed files however
+ * a step diffs (two dots or three, local or origin). Null when git could not
+ * say: then nothing is reused.
+ */
+export async function baseKey(git: GitRunner, cwd: string, head: string, base: string | null): Promise<string | null> {
+  const fallback = await defaultBranch(git, cwd);
+  const branches = [...new Set([base ?? fallback, fallback])].toSorted();
+  const parts: string[] = [];
+  for (const branch of branches) {
+    for (const ref of [`refs/heads/${branch}`, `${ORIGIN}${branch}`]) {
+      const key = await refKey(git, cwd, ref, head);
+      if (key === null) return null;
+      parts.push(`${ref}=${key}`);
+    }
+  }
+  return parts.join(" ");
+}
+
+/** The tree of a commit, or null when git cannot read it. */
+export async function commitTree(git: GitRunner, cwd: string, commit: string): Promise<string | null> {
+  const tree = await treeOf(git, cwd, commit);
+  return tree === "none" ? null : tree;
 }
 
 /**

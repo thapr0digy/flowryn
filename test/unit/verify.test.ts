@@ -542,7 +542,7 @@ const TODAY = verifyPolicyId({ steps: ["bun install", "bun test"], binary: null 
 const NOT_STARTED: Check = { name: "typecheck, lint, test, build, fixtures", state: "red", detail: "failure", id: 7, app: "github-actions", annotations: 2 };
 
 function verification(id: string, head: string, state: Verification["state"]): Verification {
-  return { id, project_id: "web", pr_url: pr().url, task_id: "t", head_sha: head, state, steps: [], tests: { pass: 9, fail: 0, skip: 0, todo: 0, tests: 9, files: 1 }, detail: state === "passed" ? null : "bun test exited 1", binary_path: null, dir: "/d", worktree_path: "/d/wt", project_path: "/p", started_at: 1, finished_at: 2, policy_id: TODAY };
+  return { id, project_id: "web", pr_url: pr().url, task_id: "t", head_sha: head, state, steps: [], tests: { pass: 9, fail: 0, skip: 0, todo: 0, tests: 9, files: 1 }, detail: state === "passed" ? null : "bun test exited 1", binary_path: null, dir: "/d", worktree_path: "/d/wt", project_path: "/p", started_at: 1, finished_at: 2, policy_id: TODAY, tree_sha: null, base_key: null, reused_from: null };
 }
 
 function facts(over: Partial<MergeFacts> = {}): MergeFacts {

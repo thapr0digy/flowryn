@@ -138,6 +138,25 @@ describe("a verification a stop cut off", () => {
     expect(git(f.repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree ") && l.endsWith("/slots/web/0"))).toHaveLength(1);
   }, 30_000);
 
+  test("a resumed pass is never reused: its kept steps ran against the base as it was before the stop", async () => {
+    const f = fixture();
+    const first = await interrupted(f);
+    writeFileSync(f.go, "");
+    const second = admit(f);
+    expect(second.steps[0]!.resumed_from).toBe(first.id);
+    await run(f, second);
+    const done = getVerification(f.db, second.id)!;
+    expect(done.state).toBe("passed");
+    expect(done.tree_sha).toBeNull();
+
+    const third = admit(f);
+    await run(f, third);
+    const again = getVerification(f.db, third.id)!;
+    expect(again.state).toBe("passed");
+    expect(again.reused_from).toBeNull();
+    expect(ranCount(f)).toBe(2);
+  }, 30_000);
+
   test("one a dead daemon left running keeps its worktree through startup recovery and resumes", async () => {
     const f = fixture();
     // As the last daemon left it: the first step passed, the second was running, the slot held.

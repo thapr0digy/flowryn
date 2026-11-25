@@ -100,7 +100,7 @@ export function collectWaits(db: Db, config: FlowrynConfig, now: number, noCi: N
 /** How long a project's verify usually runs: its slowest of the last few passes, else its timeout. */
 function usualVerifyMs(db: Db, config: FlowrynConfig, projectId: string): number {
   const row = db
-    .query("SELECT MAX(finished_at - started_at) AS ms FROM (SELECT finished_at, started_at FROM verifications WHERE project_id = ?1 AND state = 'passed' AND finished_at IS NOT NULL ORDER BY started_at DESC LIMIT 5)")
+    .query("SELECT MAX(finished_at - started_at) AS ms FROM (SELECT finished_at, started_at FROM verifications WHERE project_id = ?1 AND state = 'passed' AND finished_at IS NOT NULL AND reused_from IS NULL ORDER BY started_at DESC LIMIT 5)")
     .get(projectId) as { ms: number | null };
   if (row.ms !== null) return row.ms;
   try {
