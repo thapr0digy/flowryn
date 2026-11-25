@@ -143,6 +143,7 @@ describe("reusing a pass at the same tree", () => {
     // A third reuses too and names the verification that ran the steps, not the one that reused them.
     const third = await f.run(cfg);
     expect(third.reused_from).toBe(first.id);
+    expect(third.steps.map((s) => s.detail?.split(`reused from ${first.id}`).length)).toEqual([2, 2]);
     expect(f.runs()).toBe(2);
   });
 

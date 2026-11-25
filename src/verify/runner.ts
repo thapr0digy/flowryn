@@ -788,7 +788,8 @@ function reusedPass(deps: VerifyDeps, v: Verification, steps: VerifyStep[], plan
       return null;
     }
   }
-  const taken = source.steps.map((s) => ({ ...s, detail: `reused from ${ran}${s.detail ? `; ${s.detail}` : ""}` }));
+  // A reused source's steps say so already.
+  const taken = source.reused_from ? source.steps.map((s) => ({ ...s })) : source.steps.map((s) => ({ ...s, detail: `reused from ${ran}${s.detail ? `; ${s.detail}` : ""}` }));
   copyLogs(source, v, taken);
   steps.splice(0, steps.length, ...taken);
   deps.log(`verify ${v.id}: tree ${key.tree.slice(0, 8)} passed in ${ran} under the same steps and base; reusing it`);
