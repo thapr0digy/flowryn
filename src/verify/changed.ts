@@ -121,7 +121,7 @@ async function refKey(git: GitRunner, cwd: string, ref: string, head: string): P
  */
 export async function baseKey(git: GitRunner, cwd: string, head: string, base: string | null): Promise<string | null> {
   const fallback = await defaultBranch(git, cwd);
-  const branches = [...new Set([base ?? fallback, fallback])].sort();
+  const branches = [...new Set([base ?? fallback, fallback])].toSorted();
   const parts: string[] = [];
   for (const branch of branches) {
     for (const ref of [`refs/heads/${branch}`, `${ORIGIN}${branch}`]) {

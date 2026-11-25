@@ -22,7 +22,7 @@ A failed, errored, stopped or running verification is never reused. When the pla
 
 Steps such as Signal's `make test-changed BASE=main` choose what to run from the files changed since a base, and `when_changed` skips steps the same way. So the key holds what a step can read of the base: for the PR's base branch and origin's default branch (once each when they are the same), both the local branch and origin's copy, each branch's tree and the tree of its merge base with the head. Two verifications with the same head tree and the same key see the same changed files, whether a step diffs with two dots or three, against the local branch or origin's. A branch that does not exist is recorded as `none`. Git failing to answer (a timeout, a broken repository) means no key and no reuse.
 
-The key is read from the project's repository after the head is fetched and before the slot is touched, so a reused pass never resets, releases or checks out a slot. It is read again when the steps pass; the pass records its tree and key (columns `tree_sha`, `base_key`, migration 71) only when the second read equals the first. A pass during which a base branch moved records no key and is never reused.
+The key is read from the project's repository after the head is fetched and before the slot is touched, so a reused pass never resets, releases or checks out a slot. It is read again when the steps pass; the pass records its tree and key (columns `tree_sha`, `base_key`, migration 71) only when the second read equals the first. A pass during which a base branch moved records no key and is never reused. Neither does a resumed verification that kept steps from before a daemon restart: those steps read the base as it was then.
 
 A step that reads something outside the tree and these refs (another branch, commit messages after the merge base, the network, the clock) is not covered by the key: its result is reused like any other. The scout (speed-up-signal-a3) found reuse safe for Signal only at an identical tree, which this keeps.
 
@@ -34,8 +34,8 @@ A reused verification is a normal row: `state = passed`, its steps copied with t
 - `flowryn show <task>` and the gate's messages print `v<N> passed at <head> (…), reused v<M>`.
 - The dashboard's landing batch card (and `flowryn show lb<N>`) says `lb<N> verify v<N> passed, reused v<M>, …` while verifying and `lb<N> landing on verify v<N> passed, reused v<M>, …` while landing; a train candidate's cell says `verify v<N> passed, reused v<M>`.
 
-Reused rows are left out of each step's deadline history and of the dashboard's typical verify length, since they ran nothing.
+Reused rows are left out of each step's deadline history, the dashboard's typical verify length and the verify queue's expected wait, since they ran nothing.
 
 ## Tests
 
-`test/unit/verify-reuse.test.ts`, on a real git repository: same tree, steps and base reuses (and names the verification that ran); a different tree runs; different steps run; local main or origin's main moved runs; a light pass does not satisfy a full verify (and the reverse); a failed verify is not reused; a base that moved during the run records no key; a pruned binary makes it run; a flake rerun pass is never offered; the same tree with another history has another key.
+`test/unit/verify-reuse.test.ts`, on a real git repository: same tree, steps and base reuses (and names the verification that ran); a different tree runs; different steps run; local main or origin's main moved runs; a light pass does not satisfy a full verify (and the reverse); a failed verify is not reused; a base that moved during the run records no key; a resumed pass with kept steps records no key (`test/unit/verify-resume.test.ts`); a pruned binary makes it run; a flake rerun pass is never offered; the same tree with another history has another key.
