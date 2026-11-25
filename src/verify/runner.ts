@@ -950,8 +950,8 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
     }
     // A pass that needed a retry says so: the hang is worth knowing about even when it cleared.
     const recovered = steps.filter((s) => (s.hangs ?? 0) > 0).map((s) => `${s.name}: ${s.detail}`);
-    // Reusable later only when the base its steps read did not move under them.
-    const after = key ? await reuseKey(deps, v, plan) : null;
+    // Reusable later only when every step ran here and the base its steps read did not move under them.
+    const after = key && !steps.some(kept) ? await reuseKey(deps, v, plan) : null;
     return finish({ state: "passed", detail: recovered.length > 0 ? recovered.join("; ") : null, binary, key: sameKey(key, after) ? key : null });
   } catch (error) {
     deps.log(`verify ${v.id}: ${(error as Error).stack ?? String(error)}`);
