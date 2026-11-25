@@ -8,6 +8,7 @@ import { neededPools, positionOf, projectLimit } from "../lifecycle/stages.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { fullPools, liveCounts, liveJobLeases, projectAtLimit, projectWorkerHolders } from "./pools.ts";
 import { hostState } from "./scheduler.ts";
+import { hostNeeds } from "./host.ts";
 import { overrideQuota, quotaHolds, quotaLine, quotaState, quotaStates, type QuotaState } from "./quota.ts";
 import { clearUsageLimit, resumeCommand, usageGate, usagePause, usagePauses, type UsagePause } from "./usage.ts";
 import { signedOutAccounts } from "./signed-out.ts";
@@ -96,8 +97,8 @@ export function capacityView(ctx: CapacityFacts, lens: ScopeLens): CapacityView 
     pools: Object.entries(cfg.pools).map(([pool, cap]) => ({ pool, used: counts[pool] ?? 0, cap })),
     ...(limits.length > 0 ? { projects: limits.map((l) => ({ project: l.project, workers: projectWorkerHolders(ctx.db, l.project).length, max: l.max })) } : {}),
     host: host
-      ? `${host.ok ? "ok" : `blocked: ${host.reason}`} (since ${age(ctx.now, host.since)} ago; needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`
-      : `not checked yet (needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`,
+      ? `${host.ok ? "ok" : `blocked: ${host.reason}`} (since ${age(ctx.now, host.since)} ago; needs ${hostNeeds(cfg.host)})`
+      : `not checked yet (needs ${hostNeeds(cfg.host)})`,
     usage_limit: pauses.size > 0 ? [...pauses].map(([account, pause]) => ({ account, state: usageLine(ctx.now, pause) })) : "-",
     quota:
       cfg.quota.floor <= 0

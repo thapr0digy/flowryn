@@ -59,8 +59,10 @@ describe("why a verify failed", () => {
   });
 
   test("a fresh host check refusing on load counts; one refusing on memory or one that could not be read does not", () => {
-    expect(envCause(db, verification(), { ok: false, sample: null, reason: LOAD }, "")).toBe("load");
-    expect(envCause(db, verification(), { ok: false, sample: null, reason: "2.0 GB available, under 8 GB" }, "")).toBe("red");
+    expect(envCause(db, verification(), { ok: false, sample: null, reason: LOAD, holds: ["load"] }, "")).toBe("load");
+    expect(envCause(db, verification(), { ok: false, sample: null, reason: "Docker VM CPU pressure 31.0% (some avg60), over 30%", holds: ["vm_cpu"] }, "")).toBe("load");
+    expect(envCause(db, verification(), { ok: false, sample: null, reason: "2.0 GB available, under 8 GB", holds: ["memory"] }, "")).toBe("red");
+    expect(envCause(db, verification(), { ok: false, sample: null, reason: "swap 92% used (15.0 of 16.4 GB), over 90%", holds: ["swap"] }, "")).toBe("red");
     expect(envCause(db, verification(), null, "")).toBe("red");
   });
 });

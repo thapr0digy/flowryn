@@ -281,8 +281,8 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   ];
   // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.
   if (!extraConfig.includes("[github]")) lines.push("[github]", 'api_url = "http://127.0.0.1:9"');
-  // Nor this machine's memory and load: the host check passes unless a test sets its own (a probe, or limits).
-  if (!extraConfig.includes("[capacity.host]")) lines.push("[capacity.host]", "min_free_mem_gb = 0", "max_load_per_core = 1000");
+  // Nor this machine's memory, load, swap and Colima: the host check passes unless a test sets its own (a probe, or limits).
+  if (!extraConfig.includes("[capacity.host]")) lines.push("[capacity.host]", "min_free_mem_gb = 0", "max_load_per_core = 1000", "pressure = false");
   // Tests never reach a real Herdr: without a socket of their own they get one that does not exist. Such a
   // home has no Herdr by design, so its "Herdr unreachable" P1 (design section 16) is kept out of its items.
   // Nor this machine's Claude transcripts: a chat-answer grant is checked against the fake leader's transcript in the home.
