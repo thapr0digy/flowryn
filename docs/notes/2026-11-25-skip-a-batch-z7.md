@@ -13,7 +13,8 @@ All of these must match a passed verification (`src/verify/store.ts` `passedAtTr
 - the same verify policy (`policy_id`: the normalized steps in order, their `when_changed` globs, the binary and the reviewer, `src/verify/policy.ts`). A light check and a full verify have different policies, so a light pass never satisfies a full verify, and a full pass does not satisfy a light check either (the step lists do not say a full pass covers it, so it runs);
 - the same head tree (`git rev-parse <head>^{tree}`); the commit may differ;
 - the same base key (`src/verify/changed.ts` `baseKey`), described below;
-- the earlier one passed, ran every step as configured (no step was a landing batch's flake rerun of only the failed tests), and recorded a key.
+- the earlier one passed, ran every step as configured (no step was a landing batch's flake rerun of only the failed tests), and recorded a key;
+- neither has a review step (`flowryn:review`): the reviewer reads the task's brief, which is not in the tree, so a verify with one always runs (`test/unit/verify-review.test.ts` reviews one tree twice with two verdicts).
 
 A failed, errored, stopped or running verification is never reused. When the plan has a binary (`verify_binary`), the earlier pass's copy is copied into the new verification's directory; if it was pruned, the steps run.
 

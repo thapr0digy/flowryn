@@ -771,10 +771,11 @@ function sameKey(a: ReuseKey | null, b: ReuseKey | null): boolean {
  * A pass this verification may take instead of running its steps (docs/notes/2026-11-25-skip-a-batch-z7.md):
  * one of the same project under the same policy at the same tree and base that ran every step.
  * Its steps, logs and binary are copied here and the outcome names the verification that ran them;
- * null (run the steps) when there is none, this one is a flake rerun, or its binary is gone.
+ * null (run the steps) when there is none, this one is a flake rerun, it has a review step (the
+ * reviewer reads the task's brief, which is not in the tree), or its binary is gone.
  */
 function reusedPass(deps: VerifyDeps, v: Verification, steps: VerifyStep[], plan: VerifyPlan, key: ReuseKey): Omit<VerificationOutcome, "steps" | "tests"> | null {
-  if (v.policy_id === null || steps.some((s) => s.rerun)) return null;
+  if (v.policy_id === null || steps.some((s) => s.rerun || s.name === REVIEW_STEP)) return null;
   const source = passedAtTree(deps.db, v.project_id, v.policy_id, key, v.id);
   if (!source) return null;
   const ran = source.reused_from ?? source.id;
