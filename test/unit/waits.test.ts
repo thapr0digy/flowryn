@@ -11,7 +11,7 @@ import { migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { writeSnapshot } from "../../src/journal/snapshot.ts";
-import { checkWaits, collectWaits, deadlineLabel, RECOVERY_GRACE_MS, WAIT_DEADLINES_MS, waitDeadlines, type WaitPassDeps } from "../../src/reconcile/waits.ts";
+import { checkWaits, collectWaits, deadlineLabel, hostCause, RECOVERY_GRACE_MS, WAIT_DEADLINES_MS, waitDeadlines, type WaitPassDeps } from "../../src/reconcile/waits.ts";
 import { contractRevision } from "../../src/contracts/revision.ts";
 import { AUTO_BUILD_KEY, saveAutoAttempt } from "../../src/lifecycle/harness-gate.ts";
 import { hostRefusal } from "../../src/sched/wait-reasons.ts";
@@ -516,4 +516,14 @@ describe("a yolo run waiting for the leader (docs/notes/2026-11-07-fix-a-held-ss
 test("deadlineLabel says how long until a wait is due, or how long ago it passed", () => {
   expect(deadlineLabel({ due: 10 * MIN }, 2 * MIN)).toBe("in 8m");
   expect(deadlineLabel({ due: 10 * MIN }, 12 * MIN)).toBe("passed 2m ago");
+});
+
+test("hostCause names every hold: memory with the floor's key, and swap and Docker VM pressure from the verdict", () => {
+  const db = database();
+  const swap = "swap 92% used (4.6 of 5.0 GB), over 90%";
+  const vm = "Docker VM CPU pressure 41.0% (some avg60), over 30%";
+  setMeta(db, "sched_host", JSON.stringify({ ok: false, reason: `3.0 GB available, under 8 GB; ${swap}; ${vm}`, since: 1, free_mem_gb: 3, load_per_core: 0.4, holds: ["memory", "swap", "vm_cpu"] }));
+  const { cause, fix } = hostCause(db, config());
+  expect(cause).toBe(`the host check fails: 3 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb); ${swap}; ${vm}`);
+  expect(fix).toContain("[capacity.host] min_free_mem_gb in config.toml");
 });
