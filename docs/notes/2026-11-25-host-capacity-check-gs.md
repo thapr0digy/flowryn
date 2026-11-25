@@ -27,7 +27,7 @@ F3 of the gate speed-up scout (speed-up-signal-a3). On 2026-11-24 the host was 2
 host: blocked: swap 91% used (15.0 of 16.4 GB), over 90% (since 2m ago; needs 8 GB free, load per core under 1.5, swap under 90% used, Docker VM CPU pressure under 30%)
 ```
 
-Inside the band it says `not yet under 85%`. The recorded host state now changes when *what* holds changes (load to swap, say), not only when the check flips, so the line never names a cause that has cleared. A run's wait explanation gives the same needs.
+The line shows the reason recorded when that hold began, still naming swap or Docker VM CPU pressure. The recorded host state changes only when the check flips or the set of holds changes (load to swap, say), so the line never names a cause that has cleared. While a hold stays inside its band it keeps the reading from when it began: swap falling from 92% to 87% still shows `swap 92% used ..., over 90%` until it drops under 85% and the check passes. A run's wait explanation gives the same needs.
 
 ## Config
 
