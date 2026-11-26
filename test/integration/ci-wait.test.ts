@@ -120,7 +120,7 @@ describe("the CI-wait watchdog", () => {
   );
 
   test(
-    "a question the leader dismisses tells the worker nothing",
+    "an open question is not dismissed; deferred, the leader dismisses it and tells the worker nothing",
     async () => {
       ship = await makeShipEnv({ mode: "no-mistakes" });
       const e = ship;
@@ -130,6 +130,9 @@ describe("the CI-wait watchdog", () => {
       await leader.start();
       const [d] = ciWaits(f, run);
       const item = rows<{ id: string }>(f, "SELECT id FROM items WHERE decision_id = ?1", d!.id)[0]!;
+      expect((await leader.runBash(`flowryn dismiss ${item.id} --json`, { approve: true })).code).toBe(2);
+      expect(ciWaits(f, run)[0]!.state).toBe("open");
+      expect((await leader.runBash(`flowryn decision defer ${d!.id} --until 2099-01-01 --json`, { approve: true })).code).toBe(0);
       const dismissed = await leader.runBash(`flowryn dismiss ${item.id} --json`, { approve: true });
       expect(dismissed.code).toBe(0);
       expect(ciWaits(f, run)[0]!.state).toBe("dismissed");

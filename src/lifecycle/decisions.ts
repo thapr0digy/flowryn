@@ -4,6 +4,7 @@ import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { capStoredText, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { localDate } from "./dates.ts";
 import { mintTaskId } from "./ids.ts";
 import { takenIds } from "./plans.ts";
 import { holdReason } from "./runs.ts";
@@ -152,6 +153,11 @@ export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by" | "ans
 /** The user may answer it: open, or a rule's answer to undo. */
 export function captainAnswerable(d: Pick<DecisionRow, "state" | "answered_by" | "answered_via">): boolean {
   return d.state === "open" || isRuleAnswer(d);
+}
+
+/** Left out of the briefing until a later local day (`flowryn decision defer`). */
+export function isDeferred<T extends Pick<DecisionRow, "defer_until">>(d: T, now: number): d is T & { defer_until: string } {
+  return d.defer_until !== null && d.defer_until > localDate(new Date(now));
 }
 
 export function getDecision(db: Db, id: string): DecisionRow | null {

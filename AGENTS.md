@@ -95,6 +95,7 @@ A correction made twice becomes a check (the correct skill; docs/notes/2026-11-2
 | Frozen docs gain no heading; notes files well formed | test/unit/docs-notes.test.ts | - |
 | Toolkit rules (gh-axi, sqlite-axi, ...) | the hook, src/policy/toolkit.ts; test/integration/toolkit.test.ts | - |
 | Leader skill under 6,000 characters | test/unit/prompts-that-keep.test.ts | - |
+| An open q<N>'s item cannot be dismissed | test/unit/dismiss-open-question.test.ts | fails at 7753f46, passes at HEAD |
 
 ## Maintaining this file
 

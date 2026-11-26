@@ -13,9 +13,8 @@ import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { autonomyForDecision } from "../policy/autonomy.ts";
 import { COUNTERSIGN_ORIGIN } from "../policy/countersign.ts";
 import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
-import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { createStandaloneDecision, DEADLINE_VIA, VALIDATOR_VIA, DECISION_OPTION, getDecision, isRuleAnswer, LEADER_AWAY_VIA, type DecisionRow } from "./decisions.ts";
+import { createStandaloneDecision, DEADLINE_VIA, VALIDATOR_VIA, DECISION_OPTION, getDecision, isDeferred, isRuleAnswer, LEADER_AWAY_VIA, type DecisionRow } from "./decisions.ts";
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject, requireActiveProject } from "./projects.ts";
@@ -362,9 +361,8 @@ const decisionDefer: VerbSpec = {
 
 /** Open decisions in the order to take them: most dependents first, then oldest. */
 export function openDecisions(ctx: { db: ReadCtx["db"]; now: number }, filter: "open" | "reserved" | "deferred" | "all"): DecisionRow[] {
-  const today = localDate(new Date(ctx.now));
   const rows = ctx.db.query(filter === "all" ? "SELECT * FROM decisions ORDER BY created_at" : "SELECT * FROM decisions WHERE state = 'open' ORDER BY created_at").all() as DecisionRow[];
-  const deferred = (d: DecisionRow) => d.defer_until !== null && d.defer_until > today;
+  const deferred = (d: DecisionRow) => isDeferred(d, ctx.now);
   const picked = rows.filter((d) => (filter === "deferred" ? deferred(d) : filter === "all" ? true : !deferred(d) && (filter === "open" || d.reserved_reason !== null)));
   const tasks = backlogTasks(ctx);
   const weight = new Map(picked.map((d) => [d.id, dependentsOf(tasks, d.task_id).length]));

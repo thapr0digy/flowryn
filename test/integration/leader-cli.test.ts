@@ -114,6 +114,12 @@ describe("leader verbs", () => {
     const refused = await cliJson(e.h, ["dismiss", question], { env: { FLOWRYN_TOKEN: b.token } });
     expect(refused.code).toBe(77);
     expect((refused.reply.error as { code: string; help: string }).help).toBe("flowryn leader claim");
+    // An open question's item is refused (learning l77): its answer would be lost. Deferred, it dismisses.
+    const open = await cliJson(e.h, ["dismiss", question], { env: { FLOWRYN_TOKEN: a.token } });
+    expect(open.code).toBe(2);
+    expect(open.reply.error).toMatchObject({ code: "decision_open", help: expect.stringContaining("flowryn decide q1 <choice>") });
+    expect(e.withDb((db) => db.query("SELECT state FROM decisions WHERE id = 'q1'").get())).toEqual({ state: "open" });
+    expect((await cliJson(e.h, ["decision", "defer", "q1", "--until", "2099-01-01"], { env: { FLOWRYN_TOKEN: a.token } })).code).toBe(0);
     const dismissed = await cliJson(e.h, ["dismiss", question], { env: { FLOWRYN_TOKEN: a.token } });
     expect(dismissed.reply.data).toMatchObject({ item: question, state: "dismissed", decision: "q1" });
     expect(e.withDb((db) => db.query("SELECT state FROM decisions WHERE id = 'q1'").get())).toEqual({ state: "dismissed" });

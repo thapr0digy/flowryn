@@ -12,6 +12,7 @@ import { awayConfig, leaderTiming } from "../config/leader.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { CI_WAIT_ORIGIN } from "../lifecycle/ci-wait.ts";
+import { getDecision, isDeferred, type DecisionRow } from "../lifecycle/decisions.ts";
 import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
 import { settleAutonomyParked } from "./items.ts";
@@ -58,19 +59,25 @@ interface ItemRef {
   decision_id: string | null;
 }
 
-interface DecisionRef {
-  id: string;
-  task_id: string;
-  run_id: string | null;
-  blocking: number;
-  state: string;
-  origin: string | null;
+/**
+ * An open question's item is not dismissed: that closed the question too, so
+ * a later answer was refused ("already dismissed") and lost. Answer it, or
+ * defer it first when the worker should decide for itself.
+ */
+function refuseOpenQuestion(item: string, d: DecisionRow): never {
+  const answer = d.reserved_reason ? `ask the user: flowryn chat-question ${d.id}` : `answer it: flowryn decide ${d.id} <choice> --rationale -`;
+  throw new FlowrynError(
+    "decision_open",
+    `item ${item} is question ${d.id}, still open: dismissing it would close the question and lose its answer`,
+    `${answer}; or, to let the worker decide, flowryn decision defer ${d.id} --until <YYYY-MM-DD>, then flowryn dismiss ${item}`,
+  );
 }
 
 /**
  * `flowryn dismiss <item>`: you decided an item needs nothing more (design
- * section 9). A worker's question is closed as dismissed, its captain hold
- * lifted, and the worker told to decide for itself.
+ * section 9). An item whose question is still open is refused
+ * (refuseOpenQuestion); a deferred question is closed as dismissed, its
+ * captain hold lifted, and the worker told to decide for itself.
  */
 const dismiss: VerbSpec = {
   name: "dismiss",
@@ -85,19 +92,20 @@ const dismiss: VerbSpec = {
     const item = ctx.db.query("SELECT id, class, state, kind, task_id, run_id, decision_id FROM items WHERE id = ?1").get(id) as ItemRef | null;
     if (!item) throw new FlowrynError("not_found", `no item ${id}`, "flowryn fleet");
     if (item.state !== "open" && item.state !== "presented") throw new FlowrynError("bad_args", `item ${id} is already ${item.state}`);
-    const gateQuestion = item.decision_id ? (ctx.db.query("SELECT id, gate_id FROM decisions WHERE id = ?1 AND gate_id IS NOT NULL").get(item.decision_id) as { id: string; gate_id: string } | null) : null;
-    if (gateQuestion) {
+    const decision = item.decision_id ? getDecision(ctx.db, item.decision_id) : null;
+    if (decision?.gate_id) {
       throw new FlowrynError(
         "bad_args",
-        `item ${id} is review question ${gateQuestion.id} of gate ${gateQuestion.gate_id}: only the user answers it`,
-        `relay the user's answer: flowryn decide ${gateQuestion.id} <choice> --by captain; or send the review back (flowryn gate changes), which closes it`,
+        `item ${id} is review question ${decision.id} of gate ${decision.gate_id}: only the user answers it`,
+        `relay the user's answer: flowryn decide ${decision.id} <choice> --by captain; or send the review back (flowryn gate changes), which closes it`,
       );
     }
     const now = ctx.now();
+    if (decision?.state === "open" && !isDeferred(decision, now)) refuseOpenQuestion(id, decision);
     ctx.db.query("UPDATE items SET state = 'dismissed', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1").run(id, `dismissed by ${ctx.caller.role}`, now);
     appendEvent(ctx.db, { source: "cli", kind: "item.dismissed", runId: item.run_id, taskId: item.task_id, payload: { item: id, kind: item.kind, by: ctx.caller.role } });
     let steer: string | null = null;
-    const decision = item.decision_id ? (ctx.db.query("SELECT id, task_id, run_id, blocking, state, origin FROM decisions WHERE id = ?1").get(item.decision_id) as DecisionRef | null) : null;
+    // Only a deferred question is still open here: dismissing it is the choice to let its worker decide.
     if (decision && decision.state === "open") {
       ctx.db.query("UPDATE decisions SET state = 'dismissed', answered_via = ?2, answered_at = ?3 WHERE id = ?1").run(decision.id, ctx.caller.role, now);
       appendEvent(ctx.db, { source: "cli", kind: "decision.dismissed", runId: decision.run_id, taskId: decision.task_id, payload: { decision: decision.id, by: ctx.caller.role } });

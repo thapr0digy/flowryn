@@ -1,8 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { answerDecision } from "../lifecycle/decision-verbs.ts";
-import { localDate } from "../lifecycle/dates.ts";
-import { DEADLINE_VIA, type DecisionRow } from "../lifecycle/decisions.ts";
+import { DEADLINE_VIA, isDeferred, type DecisionRow } from "../lifecycle/decisions.ts";
 import { getRunWithPolicy, isTerminal, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { userStartedAway } from "./away.ts";
 import { DEADLINE_CLASSES, DEADLINE_FLOOR, DEADLINE_REFUSED_ANSWERS, reservedReason, type DecisionsConfig } from "./decisions-policy.ts";
@@ -27,7 +26,7 @@ export function deadlineRefusal(d: DecisionRow, run: Pick<RunWithPolicy, "state"
   if (d.reserved_reason === null) return "not reserved";
   if (d.run_id === null) return "standalone decision";
   if (d.gate_id !== null) return "review-gate question";
-  if (d.defer_until !== null && d.defer_until > localDate(new Date(now))) return "deferred";
+  if (isDeferred(d, now)) return "deferred";
   const klass = d.reserved_class;
   if (klass === null || DEADLINE_FLOOR.includes(klass) || !(DEADLINE_CLASSES as readonly string[]).includes(klass)) return `kind ${klass ?? "none"} is always the user's`;
   if (!(cfg.default_classes as readonly string[]).includes(klass)) return `kind ${klass} is not opted in`;

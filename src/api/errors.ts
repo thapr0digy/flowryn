@@ -48,6 +48,8 @@ export const ERROR_CODES = {
   config_invalid: EXIT.failure,
   contract_unverified: EXIT.policy,
   daemon_unavailable: EXIT.unavailable,
+  // flowryn dismiss on an item whose question is still open: answer or defer it first, or the answer is lost
+  decision_open: EXIT.policy,
   delivery_refused: EXIT.policy,
   design_changed: EXIT.policy,
   design_page_invalid: EXIT.validation,
