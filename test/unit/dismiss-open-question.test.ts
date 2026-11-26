@@ -63,9 +63,11 @@ describe("dismiss of an item whose question is open", () => {
     expect(states()).toEqual({ item: "open", decision: "open" });
   });
 
-  test("a reserved question points at the user's chat answer", () => {
+  test("a reserved question points the leader at the user's chat answer, and the user at their own decide", () => {
     db.query("UPDATE decisions SET reserved_reason = 'security' WHERE id = 'q1'").run();
     expect(refusal().help).toContain("flowryn chat-question q1");
+    expect(refusal("human").help).toContain("flowryn decide q1 <choice> --by captain");
+    expect(refusal("human").help).not.toContain("chat-question");
   });
 
   test("once answered, the item dismisses and the answer stands", () => {

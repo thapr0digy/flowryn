@@ -6,7 +6,7 @@
 
 Now dismiss refuses an item whose question is open and not deferred, for every caller, with `decision_open` (exit 2). The help names the next step:
 
-- `flowryn decide q<N> <choice> --rationale -`, or `flowryn chat-question q<N>` when the question is reserved for the user;
+- for the leader, `flowryn decide q<N> <choice> --rationale -`, or `flowryn chat-question q<N>` when the question is reserved for the user; in the user's own terminal, `flowryn decide q<N> <choice> --by captain`;
 - or, to let the worker decide, `flowryn decision defer q<N> --until <YYYY-MM-DD>`, then `flowryn dismiss <item>`.
 
 There is no override flag. A deferred question's item dismisses as before: the question closes as dismissed, its hold lifts, and the worker is told to decide for itself (a CI-wait question tells it nothing). An answered question's item dismisses and the answer stands. A review gate's question is still refused with `bad_args` (only the user answers it). Unattended mode's parked questions are open, so they are refused too.

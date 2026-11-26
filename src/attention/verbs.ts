@@ -64,8 +64,13 @@ interface ItemRef {
  * a later answer was refused ("already dismissed") and lost. Answer it, or
  * defer it first when the worker should decide for itself.
  */
-function refuseOpenQuestion(item: string, d: DecisionRow): never {
-  const answer = d.reserved_reason ? `ask the user: flowryn chat-question ${d.id}` : `answer it: flowryn decide ${d.id} <choice> --rationale -`;
+function refuseOpenQuestion(item: string, d: DecisionRow, role: string): never {
+  const answer =
+    role === "human"
+      ? `answer it: flowryn decide ${d.id} <choice> --by captain`
+      : d.reserved_reason
+        ? `ask the user: flowryn chat-question ${d.id}`
+        : `answer it: flowryn decide ${d.id} <choice> --rationale -`;
   throw new FlowrynError(
     "decision_open",
     `item ${item} is question ${d.id}, still open: dismissing it would close the question and lose its answer`,
@@ -101,7 +106,7 @@ const dismiss: VerbSpec = {
       );
     }
     const now = ctx.now();
-    if (decision?.state === "open" && !isDeferred(decision, now)) refuseOpenQuestion(id, decision);
+    if (decision?.state === "open" && !isDeferred(decision, now)) refuseOpenQuestion(id, decision, ctx.caller.role);
     ctx.db.query("UPDATE items SET state = 'dismissed', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1").run(id, `dismissed by ${ctx.caller.role}`, now);
     appendEvent(ctx.db, { source: "cli", kind: "item.dismissed", runId: item.run_id, taskId: item.task_id, payload: { item: id, kind: item.kind, by: ctx.caller.role } });
     let steer: string | null = null;
