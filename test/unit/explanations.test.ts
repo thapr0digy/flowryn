@@ -331,16 +331,16 @@ describe("capacity: a scheduler wait", () => {
     blocked.stop();
     const open = openExplanations(db, "r2");
     expect(open.map((r) => [r.rule, r.reason])).toEqual([["capacity.host_check", "the host check fails: free memory 1 GB under 8 GB"]]);
-    expect(JSON.parse(open[0]!.unblock)).toEqual([{ by: "flowryn", action: "grants once the host check passes (8 GB free, load per core under 1.5, swap under 90% used, Docker VM CPU pressure under 30%)" }]);
+    expect(JSON.parse(open[0]!.unblock)).toEqual([{ by: "flowryn", action: "grants once the host check passes (8 GB free, load per core under 1.5, system-wide memory free over 20%, Docker VM CPU pressure under 30%)" }]);
   });
 
-  test("the host check is recorded when what holds it changes, so flowryn capacity names swap or VM pressure; each check gets the last verdict", async () => {
+  test("the host check is recorded when what holds it changes, so flowryn capacity names memory or VM pressure; each check gets the last verdict", async () => {
     let clock = 4_000_000;
     const held = (reason: string, holds: HostVerdict["holds"]): HostVerdict => ({ ok: false, sample: null, reason, holds });
     const sequence = [
       held("load 2.00 per core, over 1.5", ["load"]),
-      held("swap 91% used (15.0 of 16.4 GB), over 90%", ["swap"]),
-      held("swap 88% used (14.0 of 16.0 GB), not yet under 85%", ["swap"]),
+      held("system-wide memory free 15%, under 20%", ["mem_free"]),
+      held("system-wide memory free 22%, not yet over 25%", ["mem_free"]),
       held("Docker VM CPU pressure 35.0% (some avg60), over 30%", ["vm_cpu"]),
     ];
     const seen: (HostVerdict | null)[] = [];
@@ -355,7 +355,7 @@ describe("capacity: a scheduler wait", () => {
     }
     s.stop();
     expect(seen).toEqual([null, ...sequence.slice(0, -1)]);
-    expect(recorded).toEqual(["load 2.00 per core, over 1.5", "swap 91% used (15.0 of 16.4 GB), over 90%", "swap 91% used (15.0 of 16.4 GB), over 90%", "Docker VM CPU pressure 35.0% (some avg60), over 30%"]);
+    expect(recorded).toEqual(["load 2.00 per core, over 1.5", "system-wide memory free 15%, under 20%", "system-wide memory free 15%, under 20%", "Docker VM CPU pressure 35.0% (some avg60), over 30%"]);
     expect(hostState(db)!.holds).toEqual(["vm_cpu"]);
   });
 

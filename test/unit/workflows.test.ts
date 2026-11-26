@@ -157,7 +157,7 @@ Pages wired down:                        179331.
 
   test("it fails on low memory or a high load per core, and says why", () => {
     const host = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null, pressure: true };
-    const unread = { swap: null, vm_cpu: null, notes: [] };
+    const unread = { mem_free_pct: null, vm_cpu: null, notes: [] };
     expect(judgeHost({ free_mem_gb: 9.6, load_per_core: 0.4, source: "vm_stat", ...unread }, host)).toMatchObject({ ok: true, reason: "ok", holds: [] });
     expect(judgeHost({ free_mem_gb: 2, load_per_core: 0.4, source: "probe", ...unread }, host).reason).toBe("2.0 GB available, under 8 GB");
     expect(judgeHost({ free_mem_gb: 20, load_per_core: 2.25, source: "probe", ...unread }, host)).toMatchObject({ ok: false, reason: "load 2.25 per core, over 1.5", holds: ["load"] });

@@ -108,11 +108,11 @@ export interface HostCheckConfig {
   max_load_per_core: number;
   /**
    * A command that prints {"free_mem_gb": n, "load_per_core": n} (and, optionally,
-   * "swap_used_gb", "swap_total_gb", "vm_cpu_some_avg60") instead of reading
-   * vm_stat, the load average, swap and the Docker VM (tests and the lab point it at a file).
+   * "mem_free_pct", "vm_cpu_some_avg60") instead of reading vm_stat, the load
+   * average, the memory free level and the Docker VM (tests and the lab point it at a file).
    */
   probe: string | null;
-  /** Also hold on host swap and the Docker VM's CPU pressure, at fixed limits (src/sched/host.ts); false turns both off. */
+  /** Also hold on macOS's memory free level and the Docker VM's CPU pressure, at fixed limits (src/sched/host.ts); false turns both off. */
   pressure: boolean;
 }
 

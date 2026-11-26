@@ -136,7 +136,7 @@ function maxWaitMs(env: NodeJS.ProcessEnv): number {
  * never granted the launch, and the suite timed out at its first step.
  */
 // You asked for this run: the quota floor does not hold it (the daemon's own auto check waits on it instead).
-// Nor host swap or Docker VM pressure: the contract worker runs no Docker, and a busy fleet's swap must not stall the suite.
+// Nor host memory or Docker VM pressure: the contract worker runs no Docker, and a busy fleet's pressure must not stall the suite.
 const CONTRACT_CAPACITY = { worker: 1, host: { min_free_mem_gb: 1, max_load_per_core: 8, pressure: false }, quota: { floor: 0 } };
 
 function git(args: string[], cwd: string): { code: number; out: string } {
