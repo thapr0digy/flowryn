@@ -1,8 +1,7 @@
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { localDate } from "../lifecycle/dates.ts";
-import type { DecisionRow } from "../lifecycle/decisions.ts";
+import { isDeferred, type DecisionRow } from "../lifecycle/decisions.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import type { RunWithPolicy } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
@@ -133,7 +132,7 @@ function decisionWait(run: LiveRun, d: DecisionRow, now: number): Explained {
     { by: "captain", action: `the same in your terminal: flowryn decide ${d.id} ${choice} --by captain` },
   ];
   const blocking = d.blocking ? " (the worker is blocked)" : "";
-  if (d.defer_until && d.defer_until > localDate(new Date(now))) {
+  if (isDeferred(d, now)) {
     facts.push({ name: "deferred until", value: d.defer_until, at: null });
     return {
       rule: "decision.deferred",

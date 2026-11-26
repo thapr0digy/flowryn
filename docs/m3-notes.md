@@ -46,7 +46,7 @@ M3 builds section 17's "M3 · Leaders and attention" of [`design-v3.html`](desig
 - The briefing (`src/attention/briefing.ts`) lists the leader, what needs you (up to 20 lines), what is in flight and queued, and the to-dos due today. The first briefing at or after `morning_hour` on a local day adds one morning line (due today, overdue, tasks done since yesterday); `flowryn brief` shows it without using it up.
 - Overdue to-dos are P1 items, opened by the daemon's pass and closed when the to-do is done, removed or moved off the past (`src/attention/todos-due.ts`); a to-do verb settles them at once.
 - Notifications (`src/attention/notify.ts`): a P0 at once, coalesced within `p0_coalesce_s`, again after `p0_renotify_min` while open; at most one batched notification for new actionable P1 items per `min_interval_min`, and actionable items open over `age_ms` join one once a day; never one for P2. Channels are macOS (`osascript`, text passed as arguments) and Herdr's `notification.show`. Each is a `notifications` row and an event.
-- `flowryn dismiss <item>` closes an item that needs nothing more; a dismissed question is closed as dismissed, its captain hold lifted, and its worker told to decide for itself.
+- `flowryn dismiss <item>` closes an item that needs nothing more; a deferred question is closed as dismissed, its captain hold lifted, and its worker told to decide for itself. An open, undeferred question's item is refused (`decision_open`, docs/notes/2026-11-25-flowryn-dismiss-refuses-8t.md).
 
 ## To-dos
 
