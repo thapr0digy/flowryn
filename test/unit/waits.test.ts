@@ -518,12 +518,12 @@ test("deadlineLabel says how long until a wait is due, or how long ago it passed
   expect(deadlineLabel({ due: 10 * MIN }, 12 * MIN)).toBe("passed 2m ago");
 });
 
-test("hostCause names every hold: memory with the floor's key, and swap and Docker VM pressure from the verdict", () => {
+test("hostCause names every hold: memory with the floor's key, and memory free level and Docker VM pressure from the verdict", () => {
   const db = database();
-  const swap = "swap 92% used (4.6 of 5.0 GB), over 90%";
+  const memFree = "system-wide memory free 12%, under 20%";
   const vm = "Docker VM CPU pressure 41.0% (some avg60), over 30%";
-  setMeta(db, "sched_host", JSON.stringify({ ok: false, reason: `3.0 GB available, under 8 GB; ${swap}; ${vm}`, since: 1, free_mem_gb: 3, load_per_core: 0.4, holds: ["memory", "swap", "vm_cpu"] }));
+  setMeta(db, "sched_host", JSON.stringify({ ok: false, reason: `3.0 GB available, under 8 GB; ${memFree}; ${vm}`, since: 1, free_mem_gb: 3, load_per_core: 0.4, holds: ["memory", "mem_free", "vm_cpu"] }));
   const { cause, fix } = hostCause(db, config());
-  expect(cause).toBe(`the host check fails: 3 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb); ${swap}; ${vm}`);
+  expect(cause).toBe(`the host check fails: 3 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb); ${memFree}; ${vm}`);
   expect(fix).toContain("[capacity.host] min_free_mem_gb in config.toml");
 });

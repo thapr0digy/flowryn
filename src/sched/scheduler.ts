@@ -61,7 +61,7 @@ export interface SchedulerDeps {
   notify(runId: string): void;
   startDeps: StartDeps;
   kickJournal(): void;
-  /** `previous` is the last verdict: swap and VM CPU pressure release at a lower level than they hold. */
+  /** `previous` is the last verdict: the memory free level and VM CPU pressure release past the level they hold at. */
   host?(cfg: HostCheckConfig, previous: HostVerdict | null): Promise<HostVerdict>;
   /** One quota-axi reading for an account (tests); by default the configured quota-axi runs for its login. */
   quota?(account: Account): Promise<QuotaReading>;
@@ -89,7 +89,7 @@ export interface HostState {
   since: number;
   free_mem_gb: number | null;
   load_per_core: number | null;
-  /** What held (src/sched/host.ts HostHold); absent in a state recorded before swap and VM CPU pressure were read. */
+  /** What held (src/sched/host.ts HostHold); absent in a state recorded before pressure was read. */
   holds?: string[];
 }
 
@@ -283,7 +283,7 @@ export class Scheduler {
     return verdict;
   }
 
-  /** A failed swap or VM read holds nothing; say so in the log when what failed changes. */
+  /** A failed memory free level or VM read holds nothing; say so in the log when what failed changes. */
   private logHostNotes(verdict: HostVerdict): void {
     const notes = (verdict.sample?.notes ?? []).join("; ");
     if (notes === this.hostNotes) return;

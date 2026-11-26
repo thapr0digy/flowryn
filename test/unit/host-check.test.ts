@@ -2,10 +2,10 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkHost, hostNeeds, judgeHost, parsePressureSome, parseSwapUsage, sampleHost, VM_READ_MS, vmCpuReading, type HostSample, type HostVerdict } from "../../src/sched/host.ts";
+import { checkHost, hostNeeds, judgeHost, parseMemFreeLevel, parsePressureSome, sampleHost, VM_READ_MS, vmCpuReading, type HostSample, type HostVerdict } from "../../src/sched/host.ts";
 
-// Swap and Docker VM CPU pressure in the host check (docs/notes/2026-11-25-host-capacity-check-gs.md).
-// Nothing here reads this machine's swap or a real Colima: samples are built by hand, and colima and the probe are stand-in scripts.
+// The memory free level and Docker VM CPU pressure in the host check (docs/notes/2026-11-25-host-capacity-check-gs.md).
+// Nothing here reads this machine's memory or a real Colima: samples are built by hand, and colima and the probe are stand-in scripts.
 
 const dir = mkdtempSync(join(tmpdir(), "fw-host-check-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -20,17 +20,17 @@ function script(name: string, body: string): string {
 const HOST = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null, pressure: true };
 
 function sample(over: Partial<HostSample> = {}): HostSample {
-  return { free_mem_gb: 20, load_per_core: 0.3, source: "probe", swap: null, vm_cpu: null, notes: [], ...over };
+  return { free_mem_gb: 20, load_per_core: 0.3, source: "probe", mem_free_pct: null, vm_cpu: null, notes: [], ...over };
 }
 
-const swap = (used_gb: number, total_gb = 16) => sample({ swap: { used_gb, total_gb } });
+const memFree = (mem_free_pct: number) => sample({ mem_free_pct });
 const vm = (some_avg60: number | null, note: string | null = null) => sample({ vm_cpu: { some_avg60, at: 0, note } });
 
 describe("readings", () => {
-  test("sysctl vm.swapusage in M or G becomes GB", () => {
-    expect(parseSwapUsage("total = 16793.60M  used = 15360.00M  free = 1433.60M  (encrypted)\n")).toEqual({ used_gb: 15, total_gb: 16.4 });
-    expect(parseSwapUsage("total = 2.00G  used = 0.50G  free = 1.50G")).toEqual({ used_gb: 0.5, total_gb: 2 });
-    expect(parseSwapUsage("vm.swapusage: unknown")).toBeNull();
+  test("sysctl kern.memorystatus_level is a percentage", () => {
+    expect(parseMemFreeLevel("42\n")).toBe(42);
+    expect(parseMemFreeLevel("kern.memorystatus_level: unknown")).toBeNull();
+    expect(parseMemFreeLevel("142")).toBeNull();
   });
 
   test("the \"some\" avg60 of /proc/pressure/cpu, not avg10 or the \"full\" line", () => {
@@ -39,28 +39,28 @@ describe("readings", () => {
   });
 });
 
-describe("swap", () => {
-  test("swap over 90% used holds, and says so", () => {
-    const verdict = judgeHost(swap(15, 16.4), HOST);
-    expect(verdict).toMatchObject({ ok: false, holds: ["swap"], reason: "swap 91% used (15.0 of 16.4 GB), over 90%" });
+describe("memory free level", () => {
+  test("under 20% free holds, and says so", () => {
+    const verdict = judgeHost(memFree(15), HOST);
+    expect(verdict).toMatchObject({ ok: false, holds: ["mem_free"], reason: "system-wide memory free 15%, under 20%" });
   });
 
-  test("between 85% and 90% it keeps its last state", () => {
-    const held = judgeHost(swap(15, 16.4), HOST);
-    const inBand = swap(14, 16);
-    expect(judgeHost(inBand, HOST, held)).toMatchObject({ ok: false, holds: ["swap"], reason: "swap 88% used (14.0 of 16.0 GB), not yet under 85%" });
-    expect(judgeHost(inBand, HOST, judgeHost(swap(4, 16), HOST))).toMatchObject({ ok: true, holds: [] });
+  test("between 20% and 25% it keeps its last state", () => {
+    const held = judgeHost(memFree(15), HOST);
+    const inBand = memFree(22);
+    expect(judgeHost(inBand, HOST, held)).toMatchObject({ ok: false, holds: ["mem_free"], reason: "system-wide memory free 22%, not yet over 25%" });
+    expect(judgeHost(inBand, HOST, judgeHost(memFree(45), HOST))).toMatchObject({ ok: true, holds: [] });
     expect(judgeHost(inBand, HOST, null)).toMatchObject({ ok: true });
-    expect(judgeHost(swap(13, 16), HOST, held)).toMatchObject({ ok: true, reason: "ok" });
+    expect(judgeHost(memFree(26), HOST, held)).toMatchObject({ ok: true, reason: "ok" });
   });
 
-  test("a small swap nearly full holds nothing: macOS grows it a file at a time", () => {
-    expect(judgeHost(swap(1.9, 2), HOST).ok).toBe(true);
+  test("45% free holds nothing, however full macOS's on-demand swap reads", () => {
+    expect(judgeHost(memFree(45), HOST).ok).toBe(true);
   });
 
-  test("pressure = false holds on neither swap nor the VM", () => {
+  test("pressure = false holds on neither the memory free level nor the VM", () => {
     const off = { ...HOST, pressure: false };
-    expect(judgeHost(sample({ swap: { used_gb: 16, total_gb: 16 }, vm_cpu: { some_avg60: 90, at: 0, note: null } }), off)).toMatchObject({ ok: true, holds: [] });
+    expect(judgeHost(sample({ mem_free_pct: 5, vm_cpu: { some_avg60: 90, at: 0, note: null } }), off)).toMatchObject({ ok: true, holds: [] });
   });
 });
 
@@ -102,25 +102,25 @@ describe("Docker VM CPU pressure", () => {
 });
 
 describe("the probe and the stated needs", () => {
-  test("a probe may report swap and VM pressure; without them they hold nothing", async () => {
-    const full = script("probe-full", `echo '{"free_mem_gb": 20, "load_per_core": 0.2, "swap_used_gb": 15, "swap_total_gb": 16, "vm_cpu_some_avg60": 40}'`);
+  test("a probe may report the memory free level and VM pressure; without them they hold nothing", async () => {
+    const full = script("probe-full", `echo '{"free_mem_gb": 20, "load_per_core": 0.2, "mem_free_pct": 12, "vm_cpu_some_avg60": 40}'`);
     const verdict = await checkHost({ ...HOST, probe: full });
-    expect(verdict.holds).toEqual(["swap", "vm_cpu"]);
-    expect(verdict.reason).toBe("swap 94% used (15.0 of 16.0 GB), over 90%; Docker VM CPU pressure 40.0% (some avg60), over 30%");
+    expect(verdict.holds).toEqual(["mem_free", "vm_cpu"]);
+    expect(verdict.reason).toBe("system-wide memory free 12%, under 20%; Docker VM CPU pressure 40.0% (some avg60), over 30%");
     const plain = script("probe-plain", `echo '{"free_mem_gb": 20, "load_per_core": 0.2}'`);
-    expect(await sampleHost({ probe: plain, pressure: true })).toMatchObject({ swap: null, vm_cpu: null, notes: [] });
+    expect(await sampleHost({ probe: plain, pressure: true })).toMatchObject({ mem_free_pct: null, vm_cpu: null, notes: [] });
     expect((await checkHost({ ...HOST, probe: full, pressure: false })).ok).toBe(true);
   });
 
   test("checkHost carries the last verdict's holds into the release levels", async () => {
-    const band = script("probe-band", `echo '{"free_mem_gb": 20, "load_per_core": 0.2, "swap_used_gb": 14, "swap_total_gb": 16}'`);
-    const held: HostVerdict = { ok: false, sample: null, reason: "swap", holds: ["swap"] };
-    expect((await checkHost({ ...HOST, probe: band }, held)).holds).toEqual(["swap"]);
+    const band = script("probe-band", `echo '{"free_mem_gb": 20, "load_per_core": 0.2, "mem_free_pct": 22}'`);
+    const held: HostVerdict = { ok: false, sample: null, reason: "mem_free", holds: ["mem_free"] };
+    expect((await checkHost({ ...HOST, probe: band }, held)).holds).toEqual(["mem_free"]);
     expect((await checkHost({ ...HOST, probe: band }, null)).ok).toBe(true);
   });
 
-  test("the needs name swap and VM pressure only while pressure is on", () => {
-    expect(hostNeeds(HOST)).toBe("8 GB free, load per core under 1.5, swap under 90% used, Docker VM CPU pressure under 30%");
+  test("the needs name the memory free level and VM pressure only while pressure is on", () => {
+    expect(hostNeeds(HOST)).toBe("8 GB free, load per core under 1.5, system-wide memory free over 20%, Docker VM CPU pressure under 30%");
     expect(hostNeeds({ ...HOST, pressure: false })).toBe("8 GB free, load per core under 1.5");
   });
 });

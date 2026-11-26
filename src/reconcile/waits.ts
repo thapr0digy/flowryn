@@ -247,7 +247,7 @@ export function hostCause(db: Db, config: FlowrynConfig): { cause: string; fix: 
   const problems = host?.reason.split("; ") ?? [];
   if (holds.length === problems.length) {
     problems.forEach((problem, i) => {
-      if (holds[i] === "swap" || holds[i] === "vm_cpu") parts.push(problem);
+      if (holds[i] === "mem_free" || holds[i] === "vm_cpu") parts.push(problem);
     });
   }
   const cause = `the host check fails: ${parts.length > 0 ? parts.join("; ") : (host?.reason ?? "no reading yet")}`;

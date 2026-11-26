@@ -15,19 +15,17 @@ import { runBounded } from "../runtime/bounded.ts";
  *
  * With `pressure` on (the default) it also holds on two readings the free
  * memory figure hides (docs/notes/2026-11-25-host-capacity-check-gs.md):
- * host swap nearly full (`sysctl vm.swapusage`) and a CPU-starved Docker VM
- * (`colima ssh -- cat /proc/pressure/cpu`, "some" avg60). Both limits are
- * fixed and have a release level under the hold level, so a reading at the
+ * macOS's system-wide memory free level (`sysctl kern.memorystatus_level`,
+ * what `memory_pressure` prints) and a CPU-starved Docker VM
+ * (`colima ssh -- cat /proc/pressure/cpu`, "some" avg60). Swap used/total is
+ * not read: macOS grows swap on demand and keeps it, so it reads nearly full
+ * long after the pressure that grew it has gone. Both limits are
+ * fixed and release only once the reading is back past a second level, so a reading at the
  * line keeps the last state instead of flipping. A reading that fails or is
  * absent holds nothing: it is named in the verdict's notes.
  */
 
-export type HostHold = "memory" | "load" | "swap" | "vm_cpu" | "probe";
-
-export interface SwapReading {
-  used_gb: number;
-  total_gb: number;
-}
+export type HostHold = "memory" | "load" | "mem_free" | "vm_cpu" | "probe";
 
 /** The Docker VM's CPU pressure ("some" avg60, percent), when it was read and, with no value, why. */
 export interface VmCpuReading {
@@ -40,8 +38,8 @@ export interface HostSample {
   free_mem_gb: number;
   load_per_core: number;
   source: "probe" | "vm_stat" | "freemem";
-  /** Null when not read (pressure off, a probe without it, not macOS) or the read failed. */
-  swap: SwapReading | null;
+  /** macOS's system-wide memory free percentage; null when not read (pressure off, a probe without it, not macOS) or the read failed. */
+  mem_free_pct: number | null;
   /** Null when not read (pressure off, a probe without it). */
   vm_cpu: VmCpuReading | null;
   /** Readings that failed, and why: each holds nothing. */
@@ -57,12 +55,10 @@ export interface HostVerdict {
   holds: HostHold[];
 }
 
-/** Swap used over this share of its total holds new starts... */
-export const SWAP_HOLD_PCT = 90;
-/** ...until it is back under this one. */
-export const SWAP_RELEASE_PCT = 85;
-/** macOS grows swap a file at a time, so a small swap is often nearly full on a healthy host: under this much used, swap never holds. */
-export const SWAP_MIN_USED_GB = 4;
+/** System-wide memory free under this percentage holds new starts (a healthy fleet reads 40-45%)... */
+export const MEM_FREE_HOLD_PCT = 20;
+/** ...until it is back over this one. */
+export const MEM_FREE_RELEASE_PCT = 25;
 /** The Docker VM's CPU pressure ("some" avg60, percent) over this holds new starts (one DB-heavy step alone read 25-28% on 8 vCPUs)... */
 export const VM_CPU_HOLD_PCT = 30;
 /** ...until it is back under this one. */
@@ -82,17 +78,12 @@ export function parseVmStat(text: string): number | null {
   return available > 0 ? (available * pageSize) / GB : null;
 }
 
-/** `sysctl -n vm.swapusage` ("total = 16384.00M  used = 15360.00M  free = ..."), in GB. */
-export function parseSwapUsage(text: string): SwapReading | null {
-  const size = (label: string): number | null => {
-    const match = new RegExp(`${label} = ([\\d.]+)([KMG])`).exec(text);
-    if (!match) return null;
-    const scale = { K: 1 / 1024 ** 2, M: 1 / 1024, G: 1 }[match[2] as "K" | "M" | "G"];
-    return Number(match[1]) * scale;
-  };
-  const total = size("total");
-  const used = size("used");
-  return total === null || used === null ? null : { used_gb: used, total_gb: total };
+/** `sysctl -n kern.memorystatus_level`: the system-wide memory free percentage, 0 to 100. */
+export function parseMemFreeLevel(text: string): number | null {
+  const level = /^\s*(\d+)\s*$/.exec(text)?.[1];
+  if (level === undefined) return null;
+  const pct = Number(level);
+  return pct <= 100 ? pct : null;
 }
 
 /** The "some" avg60 of a Linux PSI file (/proc/pressure/cpu), in percent. */
@@ -113,12 +104,12 @@ async function read(argv: string[], label: string): Promise<Read> {
   return { out: null, failure: `${label} exited ${result.code}${detail ? `: ${detail}` : ""}` };
 }
 
-async function readSwap(): Promise<{ swap: SwapReading | null; note: string | null }> {
-  if (process.platform !== "darwin") return { swap: null, note: null };
-  const { out, failure } = await read(["/usr/sbin/sysctl", "-n", "vm.swapusage"], "sysctl vm.swapusage");
-  if (out === null) return { swap: null, note: `swap not read (${failure})` };
-  const swap = parseSwapUsage(out);
-  return { swap, note: swap ? null : "swap not read (sysctl vm.swapusage printed no sizes)" };
+async function readMemFree(): Promise<{ mem_free_pct: number | null; note: string | null }> {
+  if (process.platform !== "darwin") return { mem_free_pct: null, note: null };
+  const { out, failure } = await read(["/usr/sbin/sysctl", "-n", "kern.memorystatus_level"], "sysctl kern.memorystatus_level");
+  if (out === null) return { mem_free_pct: null, note: `memory free level not read (${failure})` };
+  const mem_free_pct = parseMemFreeLevel(out);
+  return { mem_free_pct, note: mem_free_pct === null ? "memory free level not read (sysctl kern.memorystatus_level printed no percentage)" : null };
 }
 
 /** The Docker VM's CPU pressure: `previous` while it is younger than VM_READ_MS, else one `colima ssh` read (none without colima). */
@@ -153,46 +144,46 @@ async function sampleProbe(probe: string, pressure: boolean, now: number): Promi
     throw new Error(`the host probe ${probe} did not print JSON`);
   }
   if (typeof parsed.free_mem_gb !== "number" || typeof parsed.load_per_core !== "number") throw new Error(`the host probe ${probe} must print {"free_mem_gb": n, "load_per_core": n}`);
-  const used = optionalNumber(parsed.swap_used_gb);
-  const total = optionalNumber(parsed.swap_total_gb);
+  const memFree = optionalNumber(parsed.mem_free_pct);
   const some = optionalNumber(parsed.vm_cpu_some_avg60);
   return {
     free_mem_gb: parsed.free_mem_gb,
     load_per_core: parsed.load_per_core,
     source: "probe",
-    swap: pressure && used !== null && total !== null ? { used_gb: used, total_gb: total } : null,
+    mem_free_pct: pressure ? memFree : null,
     vm_cpu: pressure && some !== null ? { some_avg60: some, at: now, note: null } : null,
     notes: [],
   };
 }
 
-/** One sample of the host: the configured probe command, else vm_stat, the load average and (with pressure on) swap and the Docker VM. */
+/** One sample of the host: the configured probe command, else vm_stat, the load average and (with pressure on) the memory free level and the Docker VM. */
 export async function sampleHost(cfg: Pick<HostCheckConfig, "probe" | "pressure">, options: SampleOptions = {}): Promise<HostSample> {
   const now = options.now ?? Date.now();
   if (cfg.probe) return sampleProbe(cfg.probe, cfg.pressure, now);
   const cores = Math.max(1, availableParallelism());
   const load = loadavg()[0]! / cores;
   const colima = cfg.pressure && options.colima === undefined ? Bun.which("colima") : (options.colima ?? null);
-  const [vmStat, swapRead, vm_cpu] = await Promise.all([
+  const [vmStat, memFree, vm_cpu] = await Promise.all([
     process.platform === "darwin" ? read(["/usr/bin/vm_stat"], "vm_stat") : Promise.resolve({ out: null, failure: null }),
-    cfg.pressure ? readSwap() : Promise.resolve({ swap: null, note: null }),
+    cfg.pressure ? readMemFree() : Promise.resolve({ mem_free_pct: null, note: null }),
     cfg.pressure ? vmCpuReading(colima, options.previous?.vm_cpu ?? null, now) : Promise.resolve(null),
   ]);
   const fromVm = vmStat.out ? parseVmStat(vmStat.out) : null;
-  const notes = [swapRead.note, vm_cpu?.note ?? null].filter((note): note is string => note !== null);
-  const pressure = { swap: swapRead.swap, vm_cpu, notes };
+  const notes = [memFree.note, vm_cpu?.note ?? null].filter((note): note is string => note !== null);
+  const pressure = { mem_free_pct: memFree.mem_free_pct, vm_cpu, notes };
   if (fromVm !== null) return { free_mem_gb: fromVm, load_per_core: load, source: "vm_stat", ...pressure };
   return { free_mem_gb: freemem() / GB, load_per_core: load, source: "freemem", ...pressure };
 }
 
-/** Whether `value` holds: over the hold level, or over the release level while it already held. */
-function overLimit(value: number, held: boolean, hold: number, release: number): { over: boolean; tail: string } {
-  if (value > hold) return { over: true, tail: `over ${hold}%` };
-  if (held && value >= release) return { over: true, tail: `not yet under ${release}%` };
-  return { over: false, tail: "" };
+/** Whether `value` holds: past the hold level on the bad `side`, or not yet back past the release level while it already held. */
+function pastLimit(value: number, held: boolean, side: "over" | "under", hold: number, release: number): { holds: boolean; tail: string } {
+  const sign = side === "over" ? 1 : -1;
+  if (sign * value > sign * hold) return { holds: true, tail: `${side} ${hold}%` };
+  if (held && sign * value >= sign * release) return { holds: true, tail: `not yet ${side === "over" ? "under" : "over"} ${release}%` };
+  return { holds: false, tail: "" };
 }
 
-/** The verdict on `sample`; `previous` (the last verdict) sets the release levels for swap and VM CPU pressure. */
+/** The verdict on `sample`; `previous` (the last verdict) sets the release levels for the memory free level and VM CPU pressure. */
 export function judgeHost(sample: HostSample, cfg: HostCheckConfig, previous: HostVerdict | null = null): HostVerdict {
   const held = new Set(previous?.holds ?? []);
   const problems: string[] = [];
@@ -203,15 +194,14 @@ export function judgeHost(sample: HostSample, cfg: HostCheckConfig, previous: Ho
   };
   if (sample.free_mem_gb < cfg.min_free_mem_gb) hold("memory", `${sample.free_mem_gb.toFixed(1)} GB available, under ${cfg.min_free_mem_gb} GB`);
   if (sample.load_per_core > cfg.max_load_per_core) hold("load", `load ${sample.load_per_core.toFixed(2)} per core, over ${cfg.max_load_per_core}`);
-  if (cfg.pressure && sample.swap && sample.swap.total_gb > 0 && sample.swap.used_gb >= SWAP_MIN_USED_GB) {
-    const pct = (sample.swap.used_gb / sample.swap.total_gb) * 100;
-    const limit = overLimit(pct, held.has("swap"), SWAP_HOLD_PCT, SWAP_RELEASE_PCT);
-    if (limit.over) hold("swap", `swap ${pct.toFixed(0)}% used (${sample.swap.used_gb.toFixed(1)} of ${sample.swap.total_gb.toFixed(1)} GB), ${limit.tail}`);
+  if (cfg.pressure && sample.mem_free_pct !== null) {
+    const limit = pastLimit(sample.mem_free_pct, held.has("mem_free"), "under", MEM_FREE_HOLD_PCT, MEM_FREE_RELEASE_PCT);
+    if (limit.holds) hold("mem_free", `system-wide memory free ${sample.mem_free_pct}%, ${limit.tail}`);
   }
   const some = sample.vm_cpu?.some_avg60;
   if (cfg.pressure && some != null) {
-    const limit = overLimit(some, held.has("vm_cpu"), VM_CPU_HOLD_PCT, VM_CPU_RELEASE_PCT);
-    if (limit.over) hold("vm_cpu", `Docker VM CPU pressure ${some.toFixed(1)}% (some avg60), ${limit.tail}`);
+    const limit = pastLimit(some, held.has("vm_cpu"), "over", VM_CPU_HOLD_PCT, VM_CPU_RELEASE_PCT);
+    if (limit.holds) hold("vm_cpu", `Docker VM CPU pressure ${some.toFixed(1)}% (some avg60), ${limit.tail}`);
   }
   return { ok: problems.length === 0, sample, reason: problems.length === 0 ? "ok" : problems.join("; "), holds };
 }
@@ -219,7 +209,7 @@ export function judgeHost(sample: HostSample, cfg: HostCheckConfig, previous: Ho
 /** What the host check needs, for `flowryn capacity`, doctor and the wait reasons. */
 export function hostNeeds(cfg: HostCheckConfig): string {
   const base = `${cfg.min_free_mem_gb} GB free, load per core under ${cfg.max_load_per_core}`;
-  return cfg.pressure ? `${base}, swap under ${SWAP_HOLD_PCT}% used, Docker VM CPU pressure under ${VM_CPU_HOLD_PCT}%` : base;
+  return cfg.pressure ? `${base}, system-wide memory free over ${MEM_FREE_HOLD_PCT}%, Docker VM CPU pressure under ${VM_CPU_HOLD_PCT}%` : base;
 }
 
 /** Sample and judge; a probe that fails refuses grants, since the host cannot be shown to have room. */
