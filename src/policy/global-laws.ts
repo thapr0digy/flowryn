@@ -158,9 +158,9 @@ function tagHit(c: Command, git: { sub: string; rest: string[] } | null): string
 
 /** Commands that read, reach or search for a port rather than serve on it. */
 const PORT_READERS = new Set([
-  ...["curl", "wget", "http", "https", "httpie", "xh", "xhs", "curlie", "grpcurl", "websocat", "open", "chrome-devtools-axi"],
-  ...["lsof", "netstat", "ss", "nc", "ncat", "telnet", "ssh", "scp", "sftp", "kill"],
-  ...["grep", "egrep", "fgrep", "rg", "ag", "ack", "git", "echo", "printf", "sed", "awk", "jq", "yq", "cat", "head", "tail"],
+  "curl", "wget", "http", "https", "httpie", "xh", "xhs", "curlie", "grpcurl", "websocat", "open", "chrome-devtools-axi",
+  "lsof", "netstat", "ss", "nc", "ncat", "telnet", "ssh", "scp", "sftp", "kill",
+  "grep", "egrep", "fgrep", "rg", "ag", "ack", "git", "echo", "printf", "sed", "awk", "jq", "yq", "cat", "head", "tail",
 ]);
 const PORT = "8081";
 const BIND = /^(?:(?:127\.0\.0\.1|0\.0\.0\.0|localhost|\*|\[::1?\])?:)8081(?::\d+(?:\/\w+)?)?$/;
