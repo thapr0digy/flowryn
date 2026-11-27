@@ -231,13 +231,13 @@ export class Upkeep {
         const result = await this.deps.reprove(project, controller.signal);
         // Cut off by the stop: its laws were not all re-proved, so it runs again at the next start.
         if (controller.signal.aborted) return undefined;
-        const item = recordReproof(this.deps.db, result, this.deps.now());
+        const items = recordReproof(this.deps.db, result, this.deps.now());
         results.push(result);
         if (result.skipped !== null) this.deps.log(`upkeep: re-proving laws in ${project.id} skipped (${result.skipped})`);
         else {
           const unproven = result.laws.filter((l) => l.state === "unproven").length;
           const unrun = result.laws.filter((l) => l.state === "unrun").length;
-          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${unrun > 0 ? `; ${unrun} could not run` : ""}${item ? ` (${item})` : ""}`);
+          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${unrun > 0 ? `; ${unrun} could not run` : ""}${items.length > 0 ? ` (${items.join(", ")})` : ""}`);
         }
       }
       this.reproveDue = reproveDueAt(this.deps.db, projects.map((p) => p.id), this.deps.now());

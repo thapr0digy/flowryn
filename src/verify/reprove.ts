@@ -308,19 +308,22 @@ function resolveLawsItems(db: Db, prefix: string, now: number): void {
 }
 
 /**
- * Record one project's re-prove as it finishes: its event, and its laws item replaced. When its setup
- * failed, nothing ran, so its unproven-laws item stays and its could-not-run item is replaced; otherwise
- * both are resolved and an unproven-laws item opens when a law is no longer proven. Returns the item opened, or null.
+ * Record one project's re-prove as it finishes: its event, and its two laws items, each replaced by its
+ * newest. A could-not-run item opens when a law is `unrun` and is resolved when none is. An unproven-laws
+ * item opens when a law is no longer proven; with none, the old one is resolved, unless a law was `unrun`
+ * (nothing was re-proved, so it stays). Returns the items opened.
  */
-export function recordReproof(db: Db, result: ProjectReproof, now: number): string | null {
+export function recordReproof(db: Db, result: ProjectReproof, now: number): string[] {
   return tx(db, () => {
     const event = appendEvent(db, { source: "daemon", kind: REPROVE_KIND, payload: result, ts: now });
-    if (result.skipped !== null) return null;
+    if (result.skipped !== null) return [];
+    const opened: string[] = [];
     resolveLawsItems(db, unrunPrefix(result.project), now);
     const unrun = unrunLine(result);
-    if (unrun) return openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line: unrun, now });
-    resolveLawsItems(db, unprovenPrefix(result.project), now);
-    const line = unprovenLine(result);
-    return line ? openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line, now }) : null;
+    if (unrun) opened.push(openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line: unrun, now }));
+    const unproven = unprovenLine(result);
+    if (unproven || !unrun) resolveLawsItems(db, unprovenPrefix(result.project), now);
+    if (unproven) opened.push(openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line: unproven, now }));
+    return opened;
   });
 }
