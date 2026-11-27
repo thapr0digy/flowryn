@@ -239,38 +239,33 @@ describe("the upkeep pass", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").get()).toEqual({ n: 0 });
   });
 
-  test("a re-prove whose setup failed keeps the unproven-laws item open and opens a could-not-run item; the next clean re-prove resolves both", () => {
-    const openLaws = () => db.query("SELECT id, line FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented') ORDER BY id").all() as { id: string; line: string }[];
-    const unproven = recordReproof(db, { project: "web", head: "abc12345ff", skipped: null, laws: [{ rule: "Tests stay", state: "unproven", detail: "it no longer fails" }] }, HOUR);
-    const unrunLaws = [
-      { rule: "Tests stay", state: "unrun" as const, detail: "could not run: verify step make pg-test-up failed (exit 2): postgres unreachable" },
-      { rule: "Docs stay", state: "holds" as const, detail: "README.md holds at HEAD" },
-    ];
-    const first = recordReproof(db, { project: "web", head: "def67890aa", skipped: null, laws: unrunLaws }, 2 * HOUR);
-    const second = recordReproof(db, { project: "web", head: "def67890aa", skipped: null, laws: unrunLaws }, 3 * HOUR);
-    expect(first).not.toEqual(second);
-    expect(openLaws().map((i) => i.id).toSorted()).toEqual([...unproven, ...second].toSorted());
-    expect(openLaws().find((i) => i.id === second[0])!.line).toBe("Laws could not be re-proved in web (1 of 2, at def67890): verify step make pg-test-up failed (exit 2): postgres unreachable; flowryn laws web");
-    recordReproof(db, { project: "web", head: "0123456789", skipped: null, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }, 4 * HOUR);
-    expect(openLaws()).toEqual([]);
-  });
+  test("a law unproven before and unrun since stays in the unproven-laws item, week after week, beside a law freshly unproven and the could-not-run item; a clean re-prove resolves both", () => {
+    const openLines = () => (db.query("SELECT COALESCE(full_line, line) AS line FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all() as { line: string }[]).map((i) => i.line).toSorted();
+    const setupFailed = { rule: "Tests stay", state: "unrun" as const, detail: "could not run: verify step make pg-test-up failed (exit 2): postgres unreachable" };
+    recordReproof(db, { project: "web", head: "abc12345ff", skipped: null, laws: [{ rule: "Tests stay", state: "unproven", detail: "at HEAD: bun test test/a.test.ts fails" }, { rule: "Lint stays", state: "holds", detail: "verify step lint at HEAD" }] }, HOUR);
 
-  test("a law found unproven in a week whose setup failed gets its own item next to the could-not-run item", () => {
-    const openLines = () => (db.query("SELECT line FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all() as { line: string }[]).map((i) => i.line).toSorted();
-    recordReproof(db, { project: "web", head: "abc12345ff", skipped: null, laws: [{ rule: "Old law", state: "unproven", detail: "it no longer fails" }] }, HOUR);
-    const opened = recordReproof(db, {
-      project: "web",
-      head: "def67890aa",
-      skipped: null,
-      laws: [
-        { rule: "Tests stay", state: "unrun", detail: "could not run: verify step make pg-test-up failed (exit 2): postgres unreachable" },
-        { rule: "Lint stays", state: "unproven", detail: "at HEAD: verify step lint is not configured" },
-      ],
-    }, 2 * HOUR);
-    expect(opened).toHaveLength(2);
+    const week2 = recordReproof(db, { project: "web", head: "def67890aa", skipped: null, laws: [setupFailed, { rule: "Lint stays", state: "unproven", detail: "at HEAD: verify step lint is not configured" }] }, 2 * HOUR);
+    expect(week2).toHaveLength(2);
     expect(openLines()).toEqual([
       "Laws could not be re-proved in web (1 of 2, at def67890): verify step make pg-test-up failed (exit 2): postgres unreachable; flowryn laws web",
-      "Laws no longer proven in web (1 of 2, re-proved at def67890): Lint stays: at HEAD: verify step lint is not configured; flowryn laws web",
+      "Laws no longer proven in web (2 of 2, re-proved at def67890): Tests stay: at HEAD: bun test test/a.test.ts fails (last re-proved at abc12345; could not run since); Lint stays: at HEAD: verify step lint is not configured; flowryn laws web",
+    ]);
+
+    recordReproof(db, { project: "web", head: "0011223344", skipped: null, laws: [setupFailed, { rule: "Lint stays", state: "holds", detail: "verify step lint at HEAD" }] }, 3 * HOUR);
+    expect(openLines()).toEqual([
+      "Laws could not be re-proved in web (1 of 2, at 00112233): verify step make pg-test-up failed (exit 2): postgres unreachable; flowryn laws web",
+      "Laws no longer proven in web (1 of 2, re-proved at 00112233): Tests stay: at HEAD: bun test test/a.test.ts fails (last re-proved at abc12345; could not run since); flowryn laws web",
+    ]);
+
+    recordReproof(db, { project: "web", head: "5566778899", skipped: null, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }, { rule: "Lint stays", state: "holds", detail: "verify step lint at HEAD" }] }, 4 * HOUR);
+    expect(openLines()).toEqual([]);
+  });
+
+  test("an unrun law that was proven before opens no unproven-laws item", () => {
+    recordReproof(db, { project: "web", head: "abc12345ff", skipped: null, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }, HOUR);
+    recordReproof(db, { project: "web", head: "def67890aa", skipped: null, laws: [{ rule: "Tests stay", state: "unrun", detail: "could not run: verify step make pg-test-up timed out" }] }, 2 * HOUR);
+    expect(db.query("SELECT line FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual([
+      { line: "Laws could not be re-proved in web (1 of 1, at def67890): verify step make pg-test-up timed out; flowryn laws web" },
     ]);
   });
 

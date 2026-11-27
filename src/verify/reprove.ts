@@ -41,6 +41,8 @@ export interface LawReproof {
   rule: string;
   state: ReproofState;
   detail: string;
+  /** An unrun law's unproven detail from its last re-prove, carried until it runs again. */
+  carried?: string;
 }
 
 export interface ProjectReproof {
@@ -251,14 +253,39 @@ export function projectReprover(input: { config: FlowrynConfig; db: Db; git: Git
  * project's result; one from before results were recorded per project lists them all under `projects`.
  */
 export function lastReproved(db: Db): Map<string, number> {
-  const rows = db.query("SELECT ts, payload FROM events WHERE kind = ?1 ORDER BY seq").all(REPROVE_KIND) as { ts: number; payload: string }[];
   const last = new Map<string, number>();
-  for (const row of rows) {
-    const payload = JSON.parse(row.payload) as { project?: unknown; projects?: { project?: unknown }[] };
-    const named = typeof payload.project === "string" ? [payload.project] : Array.isArray(payload.projects) ? payload.projects.map((r) => r?.project) : [];
-    for (const project of named) if (typeof project === "string") last.set(project, row.ts);
-  }
+  for (const row of reproofEvents(db)) for (const r of row.results) if (typeof r?.project === "string") last.set(r.project, row.ts);
   return last;
+}
+
+/** Every `laws.reproved` event, oldest first, with the project results it holds. */
+function reproofEvents(db: Db): { ts: number; results: Partial<ProjectReproof>[] }[] {
+  const rows = db.query("SELECT ts, payload FROM events WHERE kind = ?1 ORDER BY seq").all(REPROVE_KIND) as { ts: number; payload: string }[];
+  return rows.map((row) => {
+    const payload = JSON.parse(row.payload) as Partial<ProjectReproof> & { projects?: Partial<ProjectReproof>[] };
+    return { ts: row.ts, results: typeof payload.project === "string" ? [payload] : Array.isArray(payload.projects) ? payload.projects : [] };
+  });
+}
+
+/** A project's newest result that re-proved its laws, or null. */
+function previousReproof(db: Db, project: string): Partial<ProjectReproof> | null {
+  let previous: Partial<ProjectReproof> | null = null;
+  for (const row of reproofEvents(db)) for (const r of row.results) if (r?.project === project && r.skipped === null && Array.isArray(r.laws)) previous = r;
+  return previous;
+}
+
+/** The result with each unrun law that was unproven at the project's previous re-prove carrying that detail. */
+function carryUnproven(db: Db, result: ProjectReproof): ProjectReproof {
+  if (!result.laws.some((l) => l.state === "unrun")) return result;
+  const previous = previousReproof(db, result.project);
+  const before = new Map((previous?.laws ?? []).map((l) => [l.rule, l]));
+  const laws = result.laws.map((l) => {
+    const was = l.state === "unrun" ? before.get(l.rule) : undefined;
+    if (was?.carried) return { ...l, carried: was.carried };
+    if (was?.state === "unproven") return { ...l, carried: `${was.detail} (last re-proved at ${previous?.head?.slice(0, 8) ?? "?"}; could not run since)` };
+    return l;
+  });
+  return { ...result, laws };
 }
 
 /** Whether a project's last re-prove is a week old or it has none. */
@@ -282,9 +309,9 @@ function unprovenPrefix(project: string): string {
 
 /** The item's words for a project's unproven laws. */
 export function unprovenLine(r: ProjectReproof): string | null {
-  const bad = r.laws.filter((l) => l.state === "unproven");
+  const bad = r.laws.filter((l) => l.state === "unproven" || l.carried);
   if (bad.length === 0) return null;
-  return `${unprovenPrefix(r.project)}${bad.length} of ${r.laws.length}, re-proved at ${r.head?.slice(0, 8) ?? "?"}): ${bad.map((l) => `${l.rule}: ${l.detail}`).join("; ")}; flowryn laws ${r.project}`;
+  return `${unprovenPrefix(r.project)}${bad.length} of ${r.laws.length}, re-proved at ${r.head?.slice(0, 8) ?? "?"}): ${bad.map((l) => `${l.rule}: ${l.carried ?? l.detail}`).join("; ")}; flowryn laws ${r.project}`;
 }
 
 /** How a project's could-not-run item starts, so its next re-prove can find it. */
@@ -309,20 +336,21 @@ function resolveLawsItems(db: Db, prefix: string, now: number): void {
 
 /**
  * Record one project's re-prove as it finishes: its event, and its two laws items, each replaced by its
- * newest. A could-not-run item opens when a law is `unrun` and is resolved when none is. An unproven-laws
- * item opens when a law is no longer proven; with none, the old one is resolved, unless a law was `unrun`
- * (nothing was re-proved, so it stays). Returns the items opened.
+ * newest or resolved. A could-not-run item opens when a law is `unrun`. An unproven-laws item opens when a
+ * law is no longer proven or, `unrun` now, was at the previous re-prove (carried, in the event too, until it
+ * runs again). Returns the items opened.
  */
-export function recordReproof(db: Db, result: ProjectReproof, now: number): string[] {
+export function recordReproof(db: Db, reproof: ProjectReproof, now: number): string[] {
   return tx(db, () => {
+    const result = reproof.skipped === null ? carryUnproven(db, reproof) : reproof;
     const event = appendEvent(db, { source: "daemon", kind: REPROVE_KIND, payload: result, ts: now });
     if (result.skipped !== null) return [];
     const opened: string[] = [];
     resolveLawsItems(db, unrunPrefix(result.project), now);
     const unrun = unrunLine(result);
     if (unrun) opened.push(openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line: unrun, now }));
+    resolveLawsItems(db, unprovenPrefix(result.project), now);
     const unproven = unprovenLine(result);
-    if (unproven || !unrun) resolveLawsItems(db, unprovenPrefix(result.project), now);
     if (unproven) opened.push(openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line: unproven, now }));
     return opened;
   });
