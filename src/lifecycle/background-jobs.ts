@@ -196,7 +196,12 @@ export function runningBackgroundJobs(db: Db, run: RunRow, now: number, source: 
 
 /** "its own background job (Bash bf1ambuzj, started 12m ago)": the worker_idle pointer's words for what the worker waits on. */
 export function describeJobs(jobs: BackgroundJob[], now: number): string {
+  return `its own background ${jobs.length === 1 ? "job" : "jobs"} (${listJobs(jobs, now)})`;
+}
+
+/** "Bash bf1ambuzj, started 12m ago", or for several "Bash a, Bash b; the first started 12m ago". */
+export function listJobs(jobs: BackgroundJob[], now: number): string {
   const names = jobs.map((j) => `${j.tool} ${j.job ?? j.toolUseId}`).join(", ");
   const minutes = Math.round((now - Math.min(...jobs.map((j) => j.startedAt))) / 60_000);
-  return jobs.length === 1 ? `its own background job (${names}, started ${minutes}m ago)` : `its own background jobs (${names}; the first started ${minutes}m ago)`;
+  return jobs.length === 1 ? `${names}, started ${minutes}m ago` : `${names}; the first started ${minutes}m ago`;
 }

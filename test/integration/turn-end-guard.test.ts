@@ -8,7 +8,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
+import { BACKGROUND_HOLD_PREFIX, TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
+import { makeShipEnv } from "../helpers/ship-env.ts";
+import { HOLD_MAX_REFUSALS } from "../../src/lifecycle/background-hold.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
@@ -136,28 +138,67 @@ describe("the turn-end guard's episodes", () => {
   }, 30_000);
 });
 
-describe("the turn-end guard and a worker's own background job (Claude)", () => {
-  test("a worker that ends its turn to wait on its background job gets no reminder, and the idle pointer names the job", async () => {
-    const env = await fleet({ timing: { idle_alert_ms: 300 } });
-    const { task, run } = await env.dispatch("Build\nFAKE: bg-start bjob1\nFAKE: stop-no-outcome\nFAKE: sleep 50", { harness: "claude" });
-    await env.waitRun(run, stopped, "idle, waiting on its job");
-    await waitUntil(() => idleLines(env, run).length === 1, 10_000, "the worker_idle pointer");
-    expect(idleLines(env, run)[0]).toMatch(/has been idle \d+m waiting on its own background job \(Bash bjob1, started \d+m ago\)$/);
-    expect(payloads(env, run, "run.idle_alert")).toMatchObject([{ ignored_reminder: false, background_jobs: ["bjob1"] }]);
-    expect(payloads(env, run, "run.background_started")).toMatchObject([{ tool: "Bash", job: "bjob1" }]);
+/** The background holds the fake worker received ($FLOWRYN_REPORT_DIR/fake-holds.txt). */
+function holds(env: FleetEnv, task: string): string[] {
+  const file = join(env.h.dataDir, task, "fake-holds.txt");
+  return existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+}
+
+describe("the background hold: a worker's own background Bash job (Claude)", () => {
+  test("a worker that ends its turn while its job runs is held in the turn, naming the job; once it ends, the turn may end", async () => {
+    const env = await fleet();
+    const { task, run } = await env.dispatch("Build\nFAKE: bg-start bjob1\nFAKE: stop-no-outcome\nFAKE: bg-end bjob1\nFAKE: report progress\nFAKE: sleep 50", { harness: "claude" });
+    await waitUntil(() => payloads(env, run, "worker.report").length === 1, 15_000, "the report after the job ended");
+    await env.waitRun(run, stopped, "idle once the job ended");
+    expect(holds(env, task)).toEqual([expect.stringMatching(/^Do not end your turn yet: your background job \(Bash bjob1, started 0m ago\) is still running.*Monitor/)]);
+    expect(payloads(env, run, "run.background_hold")).toMatchObject([{ jobs: ["bjob1"] }]);
+    expect(payloads(env, run, "run.background_ended")).toMatchObject([{ job: "bjob1", status: "completed" }]);
+    expect(payloads(env, run, "run.background_hold_released")).toEqual([]);
     expect(received(env, task)).toEqual([]);
-    expect(payloads(env, run, "run.turn_end_reminder")).toEqual([]);
   }, 30_000);
 
-  test("once the job's notice is in the transcript, an outcome-less turn end is reminded again", async () => {
-    const env = await fleet();
-    const { task, run } = await env.dispatch("Build\nFAKE: bg-start bjob2\nFAKE: stop-no-outcome\nFAKE: bg-end bjob2\nFAKE: stop-no-outcome\nFAKE: sleep 50", { harness: "claude" });
-    await env.waitRun(run, stopped, "idle, waiting on its job");
+  test("a worker that keeps ending its turn is let go after the refusal cap, the reason recorded, and the idle pointer names its job", async () => {
+    const env = await fleet({ timing: { idle_alert_ms: 300 } });
+    const { task, run } = await env.dispatch("Build\nFAKE: bg-start bjob2\nFAKE: sleep 50", { harness: "claude" });
+    await env.waitRun(run, stopped, "idle once the hold let go");
+    expect(holds(env, task)).toHaveLength(HOLD_MAX_REFUSALS);
+    expect(payloads(env, run, "run.background_hold_released")).toMatchObject([{ job: "bjob2", reason: "refusals", refusals: HOLD_MAX_REFUSALS }]);
+    // Released, the job is still a rightful wait for the turn-end guard: no reminder, and the pointer is the backstop.
     expect(received(env, task)).toEqual([]);
-    // The job's notice wakes the worker in Claude; here a steer does, and the job ends in that turn.
-    expect((await env.json(["steer", run, "--body-file", "-"], { stdin: "carry on" })).code).toBe(0);
+    await waitUntil(() => idleLines(env, run).length === 1, 10_000, "the worker_idle pointer");
+    expect(idleLines(env, run)[0]).toMatch(/has been idle \d+m waiting on its own background job \(Bash bjob2, started \d+m ago\)$/);
+    expect(payloads(env, run, "run.idle_alert")).toMatchObject([{ ignored_reminder: false, background_jobs: ["bjob2"] }]);
+  }, 30_000);
+
+  test("a leader session is never held: its background Bash job and Stop go through the real leader hooks untouched", async () => {
+    const ship = await makeShipEnv({ mode: "local-only" });
+    try {
+      const leader = await ship.claude();
+      await leader.start();
+      await leader.hook(
+        "PostToolUse",
+        { tool_name: "Bash", tool_use_id: "toolu_leader_bg", tool_input: { command: "make ui-golden", run_in_background: true }, tool_response: { stdout: "", backgroundTaskId: "bleader" } },
+        "Bash",
+      );
+      const contexts = await leader.hook("Stop", { stop_hook_active: false });
+      expect(contexts.filter((c) => c.startsWith(BACKGROUND_HOLD_PREFIX))).toEqual([]);
+      const db = ship.fleet.h.db();
+      try {
+        expect(db.query("SELECT kind FROM events WHERE kind IN ('run.background_started', 'run.background_hold')").all()).toEqual([]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      await ship.cleanup();
+    }
+  }, 30_000);
+
+  test("once the job's notice is in the transcript, an outcome-less turn end gets the turn-end reminder instead", async () => {
+    const env = await fleet();
+    const { task, run } = await env.dispatch("Build\nFAKE: bg-start bjob3\nFAKE: stop-no-outcome\nFAKE: bg-end bjob3\nFAKE: stop-no-outcome\nFAKE: sleep 50", { harness: "claude" });
     await waitUntil(() => received(env, task).length === 1, 15_000, "the reminder once the job ended");
-    expect(payloads(env, run, "run.background_ended")).toMatchObject([{ job: "bjob2", status: "completed" }]);
+    expect(holds(env, task)).toHaveLength(1);
+    expect(payloads(env, run, "run.background_ended")).toMatchObject([{ job: "bjob3", status: "completed" }]);
   }, 30_000);
 });
 
