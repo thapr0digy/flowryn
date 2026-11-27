@@ -23,7 +23,8 @@ import { parseEnforcers, provenCommits, splitRow } from "../verify/laws.ts";
  *
  * Between weekly passes (docs/notes/2026-11-27-phase-corrections-become-jx.md), `classPass` files
  * the scout as soon as two corrections look like one class (repeatedClass: plain word overlap, or
- * a lesson confirmed again). Each scout's list starts where the project's last scout's ended. The
+ * a lesson confirmed again, which counts as two). Each scout's list starts where the project's
+ * last scout's ended, with any older correction of the week a new one repeats. The
  * weekly pass also files, once per project, a sweep of its lessons into law, fact or stale.
  */
 
@@ -52,7 +53,7 @@ const TITLE_MAX = 120;
 const SHIP_BODY_MAX = 3_000;
 /** An evidence id as the list prints it: a decision, a steer, a lesson, a send-back gate, or a review-page message (gate.seq). */
 const EVIDENCE_ID = /^(?:[qk]\d+|m\d+|l\d+|g\d+(?:\.\d+)?)$/;
-const LIST_LINE = /^- ([a-z]\d+(?:\.\d+)?) · /;
+const LIST_LINE = /^- ([a-z]\d+(?:\.\d+)?) · ([^·]+) · /;
 /** An entry's labelled lines; an entry must say more than these. */
 const FIELD_LINE = /^(?:evidence|enforcer|past mistake|law):/i;
 
@@ -120,13 +121,20 @@ export function correctionsOf(db: Db, project: string, since: number, until: num
     .all(project, since, until) as { id: number; text: string; created_at: number; reinforced_at: number }[];
   for (const l of lessons) {
     const again = l.reinforced_at > l.created_at && l.reinforced_at >= since;
-    const text = clean(again ? `${l.text} (confirmed again)` : l.text);
+    const text = clean(l.text);
     out.push(again ? { id: `l${l.id}`, source: "lesson", at: l.reinforced_at, task: null, text, again: true } : { id: `l${l.id}`, source: "lesson", at: l.created_at, task: null, text });
   }
   return out.toSorted((a, b) => a.at - b.at || a.id.localeCompare(b.id));
 }
 
 const SOURCE_LABEL: Record<CorrectionSource, string> = { answer: "user's answer", steer: "steer", page: "review page", "send-back": "sent back", lesson: "lesson" };
+/** The list's source for a lesson learned again: one id that stands for two corrections. */
+const AGAIN_LABEL = "lesson learned again";
+
+/** How many corrections a list holds: a lesson learned again counts twice. */
+function timesCorrected(all: readonly Correction[]): number {
+  return all.reduce((n, c) => n + (c.again ? 2 : 1), 0);
+}
 
 function day(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
@@ -139,9 +147,9 @@ export function correctionsList(project: string, since: number, until: number, a
   const lines = [
     `# Corrections in ${project}, ${day(since)} to ${day(until)}`,
     "",
-    `${all.length} corrections${cut > 0 ? ` (the oldest ${cut} left out)` : ""}: the user's answers to questions, steers from the leader or the user, the user's review-page words, review gates sent back, and lessons recorded from the user's chat corrections. Each line: id · source · date · task · words. A check to ship cites these ids.`,
+    `${all.length} corrections${cut > 0 ? ` (the oldest ${cut} left out)` : ""}: the user's answers to questions, steers from the leader or the user, the user's review-page words, review gates sent back, and lessons recorded from the user's chat corrections (a lesson learned again is one correction made twice and counts as two). Each line: id · source · date · task · words. A check to ship cites these ids.`,
     "",
-    ...kept.map((c) => `- ${c.id} · ${SOURCE_LABEL[c.source]} · ${day(c.at)} · ${c.task ?? "-"} · ${c.text}`),
+    ...kept.map((c) => `- ${c.id} · ${c.again ? AGAIN_LABEL : SOURCE_LABEL[c.source]} · ${day(c.at)} · ${c.task ?? "-"} · ${c.text}`),
   ];
   return lines.join("\n");
 }
@@ -150,7 +158,7 @@ function scoutBody(project: string, since: number, until: number, count: number,
   return [
     `Corrections become checks: ${project}, ${day(since)} to ${day(until)}.`,
     "",
-    `The plan's shared brief lists the ${count} corrections people made in ${project} since its last corrections scout (at most a week). ${repeat ? `Filed early: ${repeat.length === 1 ? `${repeat[0]} was learned again` : `${repeat.join(" and ")} look like one class`}; start there. ` : ""}Follow the correct skill your stage names: group them into mistake classes (two corrections or more), skip classes the project's checks already enforce, and pick each class's highest enforcer (architecture, type or lint, test, doc). Read the code and find a commit that made the mistake, so its ship can prove the check fails there and passes on HEAD.`,
+    `The plan's shared brief lists the ${count} corrections people made in ${project} since its last corrections scout (at most a week), with any older one in the week that a new one repeats. ${repeat ? `Filed early: ${repeat.length === 1 ? `${repeat[0]} was learned again` : `${repeat.join(" and ")} look like one class`}; start there. ` : ""}Follow the correct skill your stage names: group them into mistake classes (two corrections or more), skip classes the project's checks already enforce, and pick each class's highest enforcer (architecture, type or lint, test, doc). Read the code and find a commit that made the mistake, so its ship can prove the check fails there and passes on HEAD.`,
     "",
     `Report with ## Short answer (at most 15 lines), then ## ${CHECKS_HEADING} (at most ${CORRECTIONS_MAX_SHIPS} entries, each with an Evidence: line citing two or more ids from the list and a Law: line, the laws row its ship adds), then ## Classes not filed. Flowryn files each valid entry as a ship of ${project}. Change no code.`,
   ].join("\n");
@@ -160,6 +168,19 @@ function scoutBody(project: string, since: number, until: number, count: number,
 function coveredUntil(db: Db, project: string): number {
   const row = db.query("SELECT MAX(created_at) AS at FROM plans WHERE project_id = ?1 AND filed_by = ?2").get(project, CORRECTIONS_FILER) as { at: number | null };
   return row.at ?? 0;
+}
+
+/**
+ * A project's next scout list: its corrections since its last scout (at most a week back), plus an
+ * older correction of the week that a new one repeats, so a class split by a scout's filing is
+ * still seen; and the repeat, or null.
+ */
+function nextList(db: Db, project: string, now: number): { since: number; all: Correction[]; repeat: string[] | null } {
+  const lookback = now - CORRECTIONS_WINDOW_MS;
+  const since = Math.max(lookback, coveredUntil(db, project));
+  const week = correctionsOf(db, project, lookback, now);
+  const repeat = repeatedClass(week, since);
+  return { since, all: week.filter((c) => c.at >= since || repeat?.includes(c.id)), repeat };
 }
 
 /** File one corrections scout: a one-phase approved plan whose shared brief is the list. */
@@ -192,19 +213,21 @@ export function contentWords(text: string): Set<string> {
 }
 
 /**
- * Two corrections of one class, found by plain code, or null: a lesson learned again (one
- * correction made twice), else the first two corrections from different tasks whose content
- * words overlap (CLASS_SHARED_MIN shared, CLASS_SHARE_MIN of the shorter). Two corrections in one
+ * Two corrections of one class, at least one made at or after `since`, found by plain code, or
+ * null: a lesson learned again (one correction made twice), else the first two corrections from
+ * different tasks whose content words overlap (CLASS_SHARED_MIN shared, CLASS_SHARE_MIN of the
+ * shorter). Two corrections in one
  * task are one incident relayed (an answer and the steer that passes it on), not a repeat. This
  * only decides when the scout starts: a false match costs one scout run, whose model groups the
  * list; a missed one waits for the weekly pass.
  */
-export function repeatedClass(all: readonly Correction[]): string[] | null {
-  const again = all.find((c) => c.again);
+export function repeatedClass(all: readonly Correction[], since: number): string[] | null {
+  const again = all.find((c) => c.again && c.at >= since);
   if (again) return [again.id];
   const words = all.map((c) => contentWords(c.text));
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
+      if (all[i]!.at < since && all[j]!.at < since) continue;
       if (all[i]!.task !== null && all[i]!.task === all[j]!.task) continue;
       const [a, b] = [words[i]!, words[j]!];
       const shared = [...a].filter((w) => b.has(w)).length;
@@ -262,10 +285,9 @@ export function correctionsPass(db: Db, projects: readonly ProjectRow[], now: nu
       if (project.removed_at != null) continue;
       const sweep = fileSweep(db, project, now);
       if (sweep) pass.swept.push({ project: project.id, ...sweep });
-      const since = Math.max(pass.since, coveredUntil(db, project.id));
-      const all = correctionsOf(db, project.id, since, now);
+      const { since, all } = nextList(db, project.id, now);
       if (all.length === 0) continue;
-      if (all.length < CORRECTIONS_MIN) {
+      if (timesCorrected(all) < CORRECTIONS_MIN) {
         pass.skipped.push({ project: project.id, why: `${all.length} correction, fewer than ${CORRECTIONS_MIN}` });
         continue;
       }
@@ -295,9 +317,7 @@ export function classPass(db: Db, projects: readonly ProjectRow[], now: number):
   // The reads run outside a write transaction: most hours nothing repeats and nothing is written.
   const found = projects.flatMap((project) => {
     if (project.removed_at != null || openScout(db, project.id)) return [];
-    const since = Math.max(now - CORRECTIONS_WINDOW_MS, coveredUntil(db, project.id));
-    const all = correctionsOf(db, project.id, since, now);
-    const repeat = repeatedClass(all);
+    const { since, all, repeat } = nextList(db, project.id, now);
     return repeat ? [{ project, since, all, repeat }] : [];
   });
   if (found.length === 0) return pass;
@@ -399,12 +419,12 @@ export function parseStale(report: string): { id: string; why: string }[] {
   return [...out].map(([id, why]) => ({ id, why }));
 }
 
-/** The ids a scout was given: the lines of its plan's shared brief. */
-export function listedIds(list: string): Set<string> {
-  const ids = new Set<string>();
+/** The ids a scout was given, from the lines of its plan's shared brief, each with the corrections it stands for (a lesson learned again, two). */
+export function listedIds(list: string): Map<string, number> {
+  const ids = new Map<string, number>();
   for (const line of list.split("\n")) {
     const m = LIST_LINE.exec(line);
-    if (m) ids.add(m[1]!);
+    if (m) ids.set(m[1]!, m[2]!.trim() === AGAIN_LABEL ? 2 : 1);
   }
   return ids;
 }
@@ -445,20 +465,21 @@ function lawRefusal(law: string[] | null): string | null {
   return null;
 }
 
-function refusal(entry: CheckEntry, listed: Set<string>, min: number): string | null {
+function refusal(entry: CheckEntry, listed: Map<string, number>, min: number): string | null {
   if (entry.title.length === 0) return "no title";
   if (!entry.body.split("\n").some((l) => l.trim().length > 0 && !FIELD_LINE.test(l.trim()))) return "no words under the title";
   const bad = entry.evidence.filter((id) => !EVIDENCE_ID.test(id) || !listed.has(id));
   if (bad.length > 0) return `cites ids not in its list: ${bad.slice(0, 5).join(", ")}`;
-  if (entry.evidence.length < min) return min === 1 ? "cites no lesson from its list" : `cites ${entry.evidence.length} correction${entry.evidence.length === 1 ? "" : "s"}; a class needs ${min}`;
+  const cited = entry.evidence.reduce((n, id) => n + listed.get(id)!, 0);
+  if (cited < min) return min === 1 ? "cites no lesson from its list" : `cites ${cited} correction${cited === 1 ? "" : "s"}; a class needs ${min}`;
   return lawRefusal(entry.law);
 }
 
 /** Each listed lesson's bucket: law when a filed ship cites it, else stale when the report says so, else fact. */
-function bucketsOf(listed: Set<string>, cited: Set<string>, stale: readonly { id: string; why: string }[]): LessonBuckets {
+function bucketsOf(listed: ReadonlyMap<string, number>, cited: Set<string>, stale: readonly { id: string; why: string }[]): LessonBuckets {
   const staleKept = stale.filter((s) => listed.has(s.id) && !cited.has(s.id));
   const staleIds = new Set(staleKept.map((s) => s.id));
-  const ids = [...listed];
+  const ids = [...listed.keys()];
   return { law: ids.filter((id) => cited.has(id)), stale: staleKept, fact: ids.filter((id) => !cited.has(id) && !staleIds.has(id)) };
 }
 

@@ -123,7 +123,8 @@ describe("the week's corrections", () => {
       ["q1", "answer"],
     ]);
     expect(rows.find((r) => r.id === "q1")!.text).toBe("Fold the details? → drop: less on screen");
-    expect(rows.find((r) => r.id === "l2")!.text).toBe("User: one table, no section titles. (confirmed again)");
+    expect(rows.find((r) => r.id === "l2")).toMatchObject({ text: "User: one table, no section titles.", again: true });
+    expect(correctionsList("web", NOW - CORRECTIONS_WINDOW_MS, NOW, rows)).toContain("- l2 · lesson learned again · 2026-11-20 · - · User: one table, no section titles.");
     expect(correctionsOf(db, "api", NOW - CORRECTIONS_WINDOW_MS, NOW).map((r) => r.id)).toEqual(["m3", "q4"]);
   });
 
@@ -136,7 +137,7 @@ describe("the week's corrections", () => {
     expect(line).toStartWith("- q1 · user's answer · 2026-11-21 · web-page-a1 · ");
     expect(line).not.toContain("ghp_");
     expect(line).not.toContain("\u001b");
-    expect([...listedIds(list)]).toEqual(["q1"]);
+    expect([...listedIds(list).keys()]).toEqual(["q1"]);
   });
 });
 
@@ -174,7 +175,7 @@ describe("the weekly pass", () => {
     const web = pass.filed.find((f) => f.project === "web")!;
     const plan = db.query("SELECT * FROM plans WHERE id = ?1").get(web.plan) as { state: string; filed_by: string; preamble: string };
     expect(plan).toMatchObject({ state: "approved", filed_by: CORRECTIONS_FILER });
-    expect([...listedIds(plan.preamble)].toSorted()).toEqual(["g10", "g10.1", "l1", "l2", "m1", "q1"]);
+    expect([...listedIds(plan.preamble).keys()].toSorted()).toEqual(["g10", "g10.1", "l1", "l2", "m1", "q1"]);
     expect(db.query("SELECT kind, workflow, auto FROM task_policy WHERE task_id = ?1").get(web.task)).toEqual({ kind: "scout", workflow: "corrections", auto: 1 });
     const add = pendingIntents(db).find((i) => i.task_id === web.task)!;
     expect(intentArgs(add).flags).toMatchObject({ kind: "scout", repo: "web" });
@@ -244,7 +245,7 @@ describe("a repeated class files its scout at once (docs/notes/2026-11-27-phase-
     expect(pass.filed.map((f) => [f.project, f.corrections, f.repeat])).toEqual([["web", 2, ["m1", "m2"]]]);
     const plan = db.query("SELECT filed_by, preamble FROM plans WHERE id = ?1").get(pass.filed[0]!.plan) as { filed_by: string; preamble: string };
     expect(plan.filed_by).toBe(CORRECTIONS_FILER);
-    expect([...listedIds(plan.preamble)]).toEqual(["m1", "m2"]);
+    expect([...listedIds(plan.preamble).keys()]).toEqual(["m1", "m2"]);
     expect((db.query("SELECT body FROM plan_phases WHERE task_id = ?1").get(pass.filed[0]!.task) as { body: string }).body).toContain("Filed early: m1 and m2 look like one class");
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = ?1").get(CORRECTIONS_CLASS_KIND)).toEqual({ n: 1 });
     // The scout is open: no second one for the same words.
@@ -264,11 +265,44 @@ describe("a repeated class files its scout at once (docs/notes/2026-11-27-phase-
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = ?1").get(CORRECTIONS_CLASS_KIND)).toEqual({ n: 0 });
   });
 
-  test("a lesson learned again is a class by itself", () => {
+  test("a lesson learned again is a class by itself: its scout files a check citing it alone", () => {
     quietWeek();
     const id = lesson("web", "User: labels are one word.", NOW - 20 * DAY);
     lesson("web", "User: labels are one word.", NOW + DAY);
-    expect(classPass(db, listProjects(db), NOW + 2 * DAY).filed.map((f) => f.repeat)).toEqual([[`l${id}`]]);
+    const filed = classPass(db, listProjects(db), NOW + 2 * DAY).filed;
+    expect(filed.map((f) => f.repeat)).toEqual([[`l${id}`]]);
+    const report = REPORT(`### Labels are one word\nEvidence: l${id}\nLaw: | Labels are one word | test/ui/labels.test.ts | fails at 1a2b3c4 |\nA test over every label.`);
+    const checks = tx(db, () => fileChecks(db, { project: getProject(db, "web")!, scoutTask: filed[0]!.task, runId: "r-scout", plan: correctionsPlanOf(db, filed[0]!.task)!, report, skillPath: null, now: NOW + 3 * DAY }))!;
+    expect(checks.refused).toEqual([]);
+    expect(checks.ships).toHaveLength(1);
+  });
+
+  test("a weekly pass counts a lesson learned again as two corrections", () => {
+    lesson("web", "User: labels are one word.", NOW - 20 * DAY);
+    lesson("web", "User: labels are one word.", NOW - DAY);
+    expect(correctionsPass(db, listProjects(db), NOW)!.filed.map((f) => [f.project, f.corrections])).toEqual([["web", 1]]);
+  });
+
+  test("a class split by a scout's filing is still seen: a new correction brings the older one it repeats into the next list", () => {
+    quietWeek();
+    const [a, b, c, d] = ["web-a-1", "web-b-2", "web-c-3", "web-d-4"].map((t) => seedTask(t));
+    tx(db, () => {
+      createSteer(db, a!, "Merge origin main before you deliver the branch.", NOW + DAY, null, false, false, "leader");
+      createSteer(db, b!, "Drop the section titles on the briefing page.", NOW + 2 * DAY, null, false, false, "leader");
+      createSteer(db, c!, "The briefing page has section titles again: drop them.", NOW + 2 * DAY, null, false, false, "leader");
+    });
+    const first = classPass(db, listProjects(db), NOW + 2 * DAY + 1).filed[0]!;
+    expect(first.repeat).toEqual(["m2", "m3"]);
+    tx(db, () => {
+      db.query(
+        `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+         VALUES ('r-scout', ?1, 'claude', '2.1.281', 'landed', 'gone', 'corrections', 'investigate', '/tmp/s', 'fm/s', 'abc', 'h', ?2, ?2)`,
+      ).run(first.task, NOW + 2 * DAY + 1);
+      createSteer(db, d!, "Again you did not merge origin main before you delivered the branch.", NOW + 3 * DAY, null, false, false, "human");
+    });
+    const second = classPass(db, listProjects(db), NOW + 3 * DAY + 1).filed;
+    expect(second.map((f) => f.repeat)).toEqual([["m1", "m4"]]);
+    expect([...listedIds(correctionsPlanOf(db, second[0]!.task)!.preamble).keys()]).toEqual(["m1", "m4"]);
   });
 
   test("a scout's list starts where the project's last scout's ended: corrections it already had are not sent again", () => {
@@ -294,7 +328,7 @@ describe("a repeated class files its scout at once (docs/notes/2026-11-27-phase-
 
   test("content words: lower case, no stopwords, ids or short words, a plural's s cut", () => {
     expect([...contentWords("Drop the Section titles on q12's page, don't again (m4).")]).toEqual(["drop", "section", "title", "page"]);
-    expect(repeatedClass([])).toBeNull();
+    expect(repeatedClass([], 0)).toBeNull();
   });
 });
 
@@ -313,7 +347,7 @@ describe("the learnings sweep: each project's lessons sorted once into law, fact
     const { task, preamble } = sweep();
     expect(db.query("SELECT pl.filed_by, pl.state FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id WHERE ph.task_id = ?1").get(task)).toEqual({ filed_by: SWEEP_FILER, state: "approved" });
     expect(db.query("SELECT kind, workflow FROM task_policy WHERE task_id = ?1").get(task)).toEqual({ kind: "scout", workflow: "corrections" });
-    expect([...listedIds(preamble)]).toEqual(["l1", "l2", "l3", "l5"]);
+    expect([...listedIds(preamble).keys()]).toEqual(["l1", "l2", "l3", "l5"]);
     expect(preamble).toContain("- l5 · lesson · ");
     expect(preamble).toContain("- l1 · correction · ");
     lesson("web", "A new lesson after the sweep.", NOW + DAY);

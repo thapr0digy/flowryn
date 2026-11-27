@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, statSync, symlinkSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
-import { openItem } from "../attention/items.ts";
+import { openItem, resolveItem } from "../attention/items.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
@@ -214,19 +214,35 @@ export function reproveDueAt(db: Db): number {
   return last ? last.ts + REPROVE_WINDOW_MS : 0;
 }
 
+/** How a project's unproven-laws item starts, so its next re-prove can find it. */
+function unprovenPrefix(project: string): string {
+  return `Laws no longer proven in ${project} (`;
+}
+
 /** The item's words for a project's unproven laws. */
 export function unprovenLine(r: ProjectReproof): string | null {
   const bad = r.laws.filter((l) => l.state === "unproven");
   if (bad.length === 0) return null;
-  return `Laws no longer proven in ${r.project} (${bad.length} of ${r.laws.length}, re-proved at ${r.head?.slice(0, 8) ?? "?"}): ${bad.map((l) => `${l.rule}: ${l.detail}`).join("; ")}; flowryn laws ${r.project}`;
+  return `${unprovenPrefix(r.project)}${bad.length} of ${r.laws.length}, re-proved at ${r.head?.slice(0, 8) ?? "?"}): ${bad.map((l) => `${l.rule}: ${l.detail}`).join("; ")}; flowryn laws ${r.project}`;
 }
 
-/** Record one re-prove: one event, and an item for each project with a law no longer proven. Returns the items opened. */
+/** Resolve a project's open unproven-laws items: its newest re-prove replaces them. */
+function resolveUnproven(db: Db, project: string, now: number): void {
+  const prefix = unprovenPrefix(project);
+  const open = db
+    .query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented') AND substr(line, 1, length(?1)) = ?1")
+    .all(prefix) as { id: string }[];
+  for (const { id } of open) resolveItem(db, id, "laws re-proved again", now);
+}
+
+/** Record one re-prove: one event, and for each project re-proved, its last item replaced by one when a law is no longer proven. Returns the items opened. */
 export function recordReproofs(db: Db, results: readonly ProjectReproof[], now: number): string[] {
   return tx(db, () => {
     const event = appendEvent(db, { source: "daemon", kind: REPROVE_KIND, payload: { projects: results }, ts: now });
     const items: string[] = [];
     for (const r of results) {
+      if (r.skipped !== null) continue;
+      resolveUnproven(db, r.project, now);
       const line = unprovenLine(r);
       if (line) items.push(openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line, now }));
     }

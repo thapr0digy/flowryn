@@ -7,7 +7,8 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { MAX_CONFLICT_NUDGES, conflictAction } from "../../src/reconcile/delivery.ts";
 import type { BuildPass } from "../../src/upkeep/build.ts";
 import { sweepCandidates } from "../../src/upkeep/sweep.ts";
-import { Upkeep } from "../../src/upkeep/upkeep.ts";
+import { Upkeep, type UpkeepDeps } from "../../src/upkeep/upkeep.ts";
+import { recordReproofs } from "../../src/verify/reprove.ts";
 import { insertProject } from "../../src/lifecycle/projects.ts";
 import { projectAt } from "../helpers/scratch-git.ts";
 
@@ -94,7 +95,7 @@ interface Loop {
   config: UpkeepConfig;
 }
 
-function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "skipped", reason: "the daemon runs this commit" }): Loop {
+function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "skipped", reason: "the daemon runs this commit" }, reprove?: UpkeepDeps["reprove"]): Loop {
   const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], reproved: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over } };
   l.upkeep = new Upkeep({
     db,
@@ -118,7 +119,8 @@ function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "s
       l.calls.push(`sweep ${runId}`);
       return { outcome: "removed", reason: "landed", task: `t-${runId}` };
     },
-    reprove: async (project) => {
+    reprove: async (project, signal) => {
+      if (reprove) return reprove(project, signal);
       l.reproved.push(project.id);
       return { project: project.id, head: "abc123", skipped: null, laws: [{ rule: "Tests stay", state: "unproven", detail: "bun test ./a.test.ts passes at 1a2b3c4: it no longer fails where the mistake was" }] };
     },
@@ -146,17 +148,47 @@ describe("the upkeep pass", () => {
   test("laws are re-proved after the sweep, once a week: one event, an item for a law no longer proven; not while busy (src/verify/reprove.ts)", async () => {
     const l = loop();
     l.busy = "a cleanup is running";
-    expect((await l.upkeep.pass()).reproved).toBeUndefined();
+    expect((await l.upkeep.pass()).reproving).toBeUndefined();
     expect(l.reproved).toEqual([]);
     l.busy = null;
     const report = await l.upkeep.pass();
     expect(l.reproved).toEqual(["web"]);
-    expect(report.reproved!.map((r) => r.project)).toEqual(["web"]);
+    expect((await report.reproving)!.map((r) => r.project)).toEqual(["web"]);
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'laws.reproved'").get()).toEqual({ n: 1 });
     const item = db.query("SELECT kind, line FROM items WHERE kind = 'laws_unproven'").get() as { kind: string; line: string };
     expect(item.line).toStartWith("Laws no longer proven in web (1 of 1, re-proved at abc123): Tests stay: bun test ./a.test.ts passes at 1a2b3c4");
-    expect((await l.upkeep.pass()).reproved).toBeUndefined();
+    expect((await l.upkeep.pass()).reproving).toBeUndefined();
     expect(l.reproved).toEqual(["web"]);
+  });
+
+  test("a re-prove runs on past its pass: later passes sync, build and sweep meanwhile, and start no second re-prove", async () => {
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => (finish = resolve));
+    let starts = 0;
+    const l = loop({}, undefined, async (project) => {
+      starts++;
+      await held;
+      return { project: project.id, head: "abc123", skipped: null, laws: [] };
+    });
+    const first = await l.upkeep.pass();
+    expect(first.reproving).toBeDefined();
+    seedRun("a", "cancelled", 0);
+    const second = await l.upkeep.pass();
+    expect(second.swept.map((s) => s.run)).toEqual(["a"]);
+    expect(second.reproving).toBeUndefined();
+    finish();
+    expect(await first.reproving).toEqual([{ project: "web", head: "abc123", skipped: null, laws: [] }]);
+    expect(starts).toBe(1);
+  });
+
+  test("a project's next re-prove replaces its unproven-laws item instead of adding one, and resolves it once its laws are proven", () => {
+    const unproven = { project: "web", head: "abc123", skipped: null, laws: [{ rule: "Tests stay", state: "unproven" as const, detail: "it no longer fails" }] };
+    const first = recordReproofs(db, [unproven], HOUR);
+    const second = recordReproofs(db, [unproven], 2 * HOUR);
+    expect(db.query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual([{ id: second[0]! }]);
+    expect(first).not.toEqual(second);
+    recordReproofs(db, [{ ...unproven, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }], 3 * HOUR);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").get()).toEqual({ n: 0 });
   });
 
   test("in order: build after the syncs, then the sweep of each candidate", async () => {

@@ -22,7 +22,8 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * week files the corrections scouts and learnings sweeps, and at most hourly
  * between weeks a scout for a repeated class (src/leader/corrections.ts): each
  * one SQLite transaction, no checkout. Last, once a week and not while busy, it
- * re-proves every project's laws in a throwaway checkout (src/verify/reprove.ts).
+ * starts the re-prove of every project's laws in a throwaway checkout
+ * (src/verify/reprove.ts), which runs on past the pass so later passes are not held up.
  * The fourth hook, the conflict nudge, rides the delivery watcher's PR reads
  * (src/reconcile/delivery.ts).
  *
@@ -65,8 +66,8 @@ export interface PassReport {
   synced: string[];
   build: BuildPass | null;
   swept: { run: string; outcome: string; reason: string }[];
-  /** The weekly re-prove of every project's laws, when it ran this pass. */
-  reproved?: ProjectReproof[];
+  /** The weekly re-prove of every project's laws, when this pass started it: its results, or undefined when stopped or failed. */
+  reproving?: Promise<ProjectReproof[] | undefined>;
 }
 
 export class Upkeep {
@@ -84,6 +85,8 @@ export class Upkeep {
   private reproveDue = 0;
   /** Ends a re-prove under way when the loop stops. */
   private reproving: AbortController | null = null;
+  /** The re-prove under way, which outlives the pass that started it. */
+  private reproveRun: Promise<ProjectReproof[] | undefined> | null = null;
 
   constructor(deps: UpkeepDeps) {
     this.deps = deps;
@@ -103,6 +106,7 @@ export class Upkeep {
     this.kickTimer = null;
     this.reproving?.abort();
     await this.running;
+    await this.reproveRun;
   }
 
   /** A run landed: look soon rather than at the next tick. */
@@ -191,11 +195,21 @@ export class Upkeep {
     }
   }
 
+  /** Start the weekly re-prove when it is due and none is under way; it runs on past the pass. */
+  private startReprove(): Promise<ProjectReproof[] | undefined> | undefined {
+    if (this.reproveRun) return undefined;
+    if (this.reproveDue === 0) this.reproveDue = reproveDueAt(this.deps.db);
+    if (this.deps.now() < this.reproveDue) return undefined;
+    const run = this.reprove().finally(() => {
+      this.reproveRun = null;
+    });
+    this.reproveRun = run;
+    return run;
+  }
+
   /** The weekly re-prove of every project's laws; recorded only when it ran to its end, so a stopped one runs again. */
   private async reprove(): Promise<ProjectReproof[] | undefined> {
     const now = this.deps.now();
-    if (this.reproveDue === 0) this.reproveDue = reproveDueAt(this.deps.db);
-    if (now < this.reproveDue) return undefined;
     const controller = new AbortController();
     this.reproving = controller;
     try {
@@ -251,8 +265,8 @@ export class Upkeep {
       this.deps.log(`upkeep: swept ${result.task}: ${result.outcome} (${result.reason})`);
     }
     if (!this.stopped && !this.deps.busy()) {
-      const reproved = await this.reprove();
-      if (reproved) report.reproved = reproved;
+      const reproving = this.startReprove();
+      if (reproving) report.reproving = reproving;
     }
     return report;
   }
