@@ -17,7 +17,10 @@ import type { RunRow } from "./runs.ts";
  * a fixed string. Each reminder and its result are events, so how often one
  * is obeyed can be counted (docs/m5-notes.md, "Turn-end guard"). A worker that
  * ends its turn to wait on its own background job, or because the leader's
- * steer said to (steer --end-turn), is waiting, not stuck: no reminder.
+ * steer said to (steer --end-turn), is waiting, not stuck: no reminder. A
+ * Claude worker's own background Bash job first holds the turn open, bounded
+ * (src/lifecycle/background-hold.ts); the guard sees a job only once that
+ * hold has let it go.
  */
 
 /** What a worker records when it finishes or hands a turn over: stage done or begin, deliver, ask, report (any status), fail, a review reply. */
@@ -65,6 +68,14 @@ function toldToEndTurn(db: Db, run: RunRow): boolean {
  * turn-end guard's hook, or the reconciler's stale-hook pointer).
  */
 export function pendingWait(db: Db, run: RunRow, now: number, source: EventSource): string | null {
+  const wait = waitBesidesOwnJobs(db, run);
+  if (wait !== null) return wait;
+  if (runningBackgroundJobs(db, run, now, source).length > 0) return WAIT_BACKGROUND;
+  return null;
+}
+
+/** `pendingWait` without the worker's own background jobs: what holds it that is not its own doing. */
+export function waitBesidesOwnJobs(db: Db, run: RunRow): string | null {
   if (run.state !== "running") return `run ${run.state}`;
   // A review gate is a rightful wait, except for a page message the worker was handed and has not answered.
   if (run.stage_state === "review" && unansweredPageSteer(db, run.id)) return null;
@@ -73,7 +84,6 @@ export function pendingWait(db: Db, run: RunRow, now: number, source: EventSourc
   if (waitingOnOthers(db, run)) return "an open question";
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog";
   if (toldToEndTurn(db, run)) return WAIT_END_TURN;
-  if (runningBackgroundJobs(db, run, now, source).length > 0) return WAIT_BACKGROUND;
   return null;
 }
 

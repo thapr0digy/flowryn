@@ -71,9 +71,10 @@
  *   FAKE: stop-no-outcome            end the turn with no outcome. A turn-end reminder (appended to
  *                                    $FLOWRYN_REPORT_DIR/fake-reminders.txt) continues it: the steps after it run
  *                                    at once, so a report or stage-done next obeys it. With none, the turn ends and
- *                                    the steps after it run when the next steer arrives
+ *                                    the steps after it run when the next steer arrives. A background hold's
+ *                                    refusal (appended to $FLOWRYN_REPORT_DIR/fake-holds.txt) continues it the same way
  *
- * Any other turn end that brings a turn-end reminder ignores it: the continued turn ends again at once.
+ * Any other turn end that brings a turn-end reminder or a hold ignores it: the continued turn ends again at once.
  *
  * Tool calls carry a tool_use_id. A PreToolUse that denies (an urgent steer) skips the tool and hands the
  * steer to the model. The fake Pi plays its extension's urgent steers: one that arrives while a tool runs
@@ -88,7 +89,8 @@ import { basename, dirname, join } from "node:path";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
 import { QA_PLACEHOLDERS, QA_TEMPLATE } from "../../src/skills/qa-template.ts";
 import { filledDesignPage } from "./design-page.ts";
-import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
+import { BACKGROUND_HOLD_PREFIX, TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
+import { HOLD_MAX_REFUSALS } from "../../src/lifecycle/background-hold.ts";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
 
@@ -578,11 +580,12 @@ async function stopOnce(): Promise<"reminded" | "ended"> {
     const stop = harness === "pi" ? await hook("stop", {}, ["--json"]) : await hook("stop");
     const context = harness === "pi" ? piContextOf(stop.stdout) : contextOf(stop.stdout);
     if (!context) return "ended";
-    if (context === TURN_END_REMINDER) {
-      log(`reminded: ${context}`);
+    const held = context.startsWith(BACKGROUND_HOLD_PREFIX);
+    if (context === TURN_END_REMINDER || held) {
+      log(`${held ? "held" : "reminded"}: ${context}`);
       const dir = env.FLOWRYN_REPORT_DIR ?? ".";
       mkdirSync(dir, { recursive: true });
-      appendFileSync(join(dir, "fake-reminders.txt"), `${context}\n`);
+      appendFileSync(join(dir, held ? "fake-holds.txt" : "fake-reminders.txt"), `${context}\n`);
       return "reminded";
     }
     await onSteer(context);
@@ -599,9 +602,9 @@ function piContextOf(stdout: string): string | null {
   }
 }
 
-/** End the turn; a reminder is ignored: the continued (or followed-up) turn ends again at once. */
+/** End the turn; a reminder or hold is ignored: the continued (or followed-up) turn ends again at once, until one lets it end. */
 async function endTurn(): Promise<void> {
-  for (let i = 0; i < 3 && (await stopOnce()) === "reminded"; i++);
+  for (let i = 0; i < HOLD_MAX_REFUSALS + 3 && (await stopOnce()) === "reminded"; i++);
 }
 
 let typedSeen = 0;

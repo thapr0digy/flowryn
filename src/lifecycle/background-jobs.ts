@@ -34,6 +34,8 @@ export interface BackgroundStart {
   tool: string;
   /** Claude's own id: a Bash backgroundTaskId or an agentId; null when the response named none. */
   job: string | null;
+  /** The call's own `timeout` (ms), when it set one: the job's deadline for the background hold. */
+  timeoutMs?: number;
 }
 
 export interface BackgroundJob extends BackgroundStart {
@@ -61,10 +63,12 @@ export function backgroundStartOf(input: ToolHookInput): BackgroundStart | null 
   if (!toolUseId) return null;
   const tool = text(input.tool_name) ?? "tool";
   const response = record(input.tool_response);
+  const toolInput = record(input.tool_input);
+  const timeout = typeof toolInput.timeout === "number" && toolInput.timeout > 0 ? { timeoutMs: toolInput.timeout } : {};
   const taskId = text(response.backgroundTaskId);
-  if (taskId) return { toolUseId, tool, job: taskId };
+  if (taskId) return { toolUseId, tool, job: taskId, ...timeout };
   if (response.status === "async_launched") return { toolUseId, tool, job: text(response.agentId) };
-  if (tool === "Bash" && record(input.tool_input).run_in_background === true) return { toolUseId, tool, job: null };
+  if (tool === "Bash" && toolInput.run_in_background === true) return { toolUseId, tool, job: null, ...timeout };
   return null;
 }
 
@@ -76,7 +80,14 @@ export function recordBackgroundStart(db: Db, run: RunRow, start: BackgroundStar
     kind: BACKGROUND_STARTED,
     runId: run.id,
     taskId: run.task_id,
-    payload: { tool_use_id: start.toolUseId, tool: start.tool, job: start.job, transcript, offset: transcriptSize(transcript) },
+    payload: {
+      tool_use_id: start.toolUseId,
+      tool: start.tool,
+      job: start.job,
+      transcript,
+      offset: transcriptSize(transcript),
+      ...(start.timeoutMs !== undefined ? { timeout_ms: start.timeoutMs } : {}),
+    },
     ts: now,
   });
 }
@@ -87,6 +98,7 @@ interface StartPayload {
   job: string | null;
   transcript: string | null;
   offset: number;
+  timeout_ms?: number;
 }
 
 /** The transcript from `fromByte` on, or null when it cannot be read. */
@@ -187,7 +199,7 @@ export function runningBackgroundJobs(db: Db, run: RunRow, now: number, source: 
       const scanned = tail ? Math.max(cursorOf(start, path), read.from + tail.length - SCAN_OVERLAP) : cursorOf(start, path);
       nextCursors.set(cursorKey(start, path), scanned);
     }
-    running.push({ toolUseId: start.tool_use_id, tool: start.tool, job: start.job, startedAt: start.ts });
+    running.push({ toolUseId: start.tool_use_id, tool: start.tool, job: start.job, startedAt: start.ts, ...(start.timeout_ms !== undefined ? { timeoutMs: start.timeout_ms } : {}) });
   }
   if (nextCursors.size > 0) scanCursors.set(run.id, nextCursors);
   else scanCursors.delete(run.id);
@@ -196,7 +208,12 @@ export function runningBackgroundJobs(db: Db, run: RunRow, now: number, source: 
 
 /** "its own background job (Bash bf1ambuzj, started 12m ago)": the worker_idle pointer's words for what the worker waits on. */
 export function describeJobs(jobs: BackgroundJob[], now: number): string {
+  return `its own background ${jobs.length === 1 ? "job" : "jobs"} (${listJobs(jobs, now)})`;
+}
+
+/** "Bash bf1ambuzj, started 12m ago", or for several "Bash a, Bash b; the first started 12m ago". */
+export function listJobs(jobs: BackgroundJob[], now: number): string {
   const names = jobs.map((j) => `${j.tool} ${j.job ?? j.toolUseId}`).join(", ");
   const minutes = Math.round((now - Math.min(...jobs.map((j) => j.startedAt))) / 60_000);
-  return jobs.length === 1 ? `its own background job (${names}, started ${minutes}m ago)` : `its own background jobs (${names}; the first started ${minutes}m ago)`;
+  return jobs.length === 1 ? `${names}, started ${minutes}m ago` : `${names}; the first started ${minutes}m ago`;
 }

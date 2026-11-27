@@ -171,6 +171,22 @@ export const TURN_END_REMINDER = "You ended your turn without an outcome. Finish
 /** The same reminder at a review gate, where the outcome due is a reply to the user's page message. */
 export const REVIEW_TURN_END_REMINDER = "You ended your turn without answering the user's message on your review page. Answer it: $FLOWRYN_BIN review reply --body-file -";
 
+/** How the background hold's refusal starts, so a reader can tell it from a steer (src/lifecycle/background-hold.ts). */
+export const BACKGROUND_HOLD_PREFIX = "Do not end your turn yet:";
+
+/**
+ * The background hold's refusal of a turn end: `jobs` names each job the way
+ * the worker_idle pointer does ("Bash bf1ambuzj, started 12m ago").
+ */
+export function backgroundHoldLine(jobs: string, count: number): string {
+  const running = count === 1 ? `your background job (${jobs}) is still running, and its end` : `your background jobs (${jobs}) are still running, and their ends`;
+  return (
+    `${BACKGROUND_HOLD_PREFIX} ${running} may not wake you once the turn is over. ` +
+    "Wait for it in this turn with an until-loop on its completion: Monitor, or a foreground Bash until-loop (under 10 min a call; run it again until the job ends). " +
+    "Then act on its result. If you no longer need it, stop it with TaskStop."
+  );
+}
+
 /** The one-line pointer an idle-wake waiter prints: a fact that stands on its own (M0 finding 5). */
 export function steerPointer(id: string): string {
   return `Flowryn: steer ${id} from your leader is waiting. Run $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack ${id}.`;

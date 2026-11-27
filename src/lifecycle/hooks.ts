@@ -19,6 +19,7 @@ import { gateQuestionsLine } from "./gate-questions.ts";
 import { dueSteers, dueUrgent, getMessage, loseUnseenUrgent, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { piPreempt } from "./urgent.ts";
 import { guardTurnEnd } from "./turn-end-guard.ts";
+import { holdTurnEnd } from "./background-hold.ts";
 import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
 import { clearUsageLimit, noteProbeReply, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
@@ -614,7 +615,13 @@ const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pend
       return { data: { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body, steer.end_turn === 1) } };
     }
   }
-  // No steer taken: the turn-end guard may continue it once per episode (Claude) or follow it up (Pi).
+  // No steer taken: a Claude worker's own background Bash job still running holds the turn open (bounded; Pi has no background tool).
+  const hold = harness === "claude" && ctx.fleet.turnEndGuard() ? holdTurnEnd(ctx.db, run, ctx.now()) : null;
+  if (hold !== null) {
+    markBusy(ctx, run, "held");
+    return { data: { run: run.id, hold: true, context: hold } };
+  }
+  // The turn-end guard may continue it once per episode (Claude) or follow it up (Pi).
   const reminder = !ctx.fleet.turnEndGuard() ? null : guardTurnEnd(
     ctx.db,
     run,
