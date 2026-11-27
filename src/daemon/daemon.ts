@@ -729,7 +729,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         const report = await delivery.cleanup(runId, { discardApproval: null, auto: false, sweep: true });
         return { outcome: report.outcome, reason: report.reason, task: report.task };
       },
-      reprove: projectReprover({ config, db: database, git: deliveryGit }),
+      reprove: projectReprover({ config, db: database, git: deliveryGit, log }),
     });
     // Policy follow-through: a policy change on a default branch steers that project's in-flight ships to merge it.
     policyFollow = new PolicyFollower({

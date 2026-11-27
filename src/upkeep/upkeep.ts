@@ -236,7 +236,8 @@ export class Upkeep {
         if (result.skipped !== null) this.deps.log(`upkeep: re-proving laws in ${project.id} skipped (${result.skipped})`);
         else {
           const unproven = result.laws.filter((l) => l.state === "unproven").length;
-          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${item ? ` (${item})` : ""}`);
+          const unrun = result.laws.filter((l) => l.state === "unrun").length;
+          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${item ? ` (${item})` : ""}${unrun > 0 ? `; ${unrun} could not run` : ""}`);
         }
       }
       this.reproveDue = reproveDueAt(this.deps.db, projects.map((p) => p.id), this.deps.now());
