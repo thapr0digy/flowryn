@@ -70,6 +70,8 @@ export interface ReproveDeps {
   signal?: AbortSignal;
 }
 
+const COULD_NOT_RUN = "could not run: ";
+
 type Runnable = { argv: string[]; what: string; overlay: string };
 
 /** The files of HEAD a runnable path enforcer brings to an old commit: a Go package's test files, or the file. Call with the checkout at HEAD. */
@@ -144,7 +146,7 @@ async function reproveLaw(deps: ReproveDeps, checkout: string, head: string, law
     if ("confirmed" in plan) confirmed.push(plan.confirmed);
     else runnable.push({ ...plan, overlay: overlayOf(checkout, e) });
   }
-  if (runnable.length > 0 && unready) return { rule: law.rule, state: "unrun", detail: `could not run: ${unready}` };
+  if (runnable.length > 0 && unready) return { rule: law.rule, state: "unrun", detail: `${COULD_NOT_RUN}${unready}` };
   for (const r of runnable) {
     const out = await runOne(deps, checkout, r);
     if (out.result !== "passed") return unproven(`at HEAD: ${out.result === "void" ? out.why : `${r.what} fails`}`);
@@ -285,21 +287,39 @@ export function unprovenLine(r: ProjectReproof): string | null {
   return `${unprovenPrefix(r.project)}${bad.length} of ${r.laws.length}, re-proved at ${r.head?.slice(0, 8) ?? "?"}): ${bad.map((l) => `${l.rule}: ${l.detail}`).join("; ")}; flowryn laws ${r.project}`;
 }
 
-/** Resolve a project's open unproven-laws items: its newest re-prove replaces them. */
-function resolveUnproven(db: Db, project: string, now: number): void {
-  const prefix = unprovenPrefix(project);
+/** How a project's could-not-run item starts, so its next re-prove can find it. */
+function unrunPrefix(project: string): string {
+  return `Laws could not be re-proved in ${project} (`;
+}
+
+/** The item's words for a project whose setup failed: how many laws could not run, and why. */
+export function unrunLine(r: ProjectReproof): string | null {
+  const unrun = r.laws.filter((l) => l.state === "unrun");
+  if (unrun.length === 0) return null;
+  return `${unrunPrefix(r.project)}${unrun.length} of ${r.laws.length}, at ${r.head?.slice(0, 8) ?? "?"}): ${unrun[0]!.detail.slice(COULD_NOT_RUN.length)}; flowryn laws ${r.project}`;
+}
+
+/** Resolve a project's open laws items that start with `prefix`: its newest re-prove replaces them. */
+function resolveLawsItems(db: Db, prefix: string, now: number): void {
   const open = db
     .query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented') AND substr(line, 1, length(?1)) = ?1")
     .all(prefix) as { id: string }[];
   for (const { id } of open) resolveItem(db, id, "laws re-proved again", now);
 }
 
-/** Record one project's re-prove as it finishes: its event, and when it was re-proved, its last item replaced by one when a law is no longer proven. Returns the item opened, or null. */
+/**
+ * Record one project's re-prove as it finishes: its event, and its laws item replaced. When its setup
+ * failed, nothing ran, so its unproven-laws item stays and its could-not-run item is replaced; otherwise
+ * both are resolved and an unproven-laws item opens when a law is no longer proven. Returns the item opened, or null.
+ */
 export function recordReproof(db: Db, result: ProjectReproof, now: number): string | null {
   return tx(db, () => {
     const event = appendEvent(db, { source: "daemon", kind: REPROVE_KIND, payload: result, ts: now });
     if (result.skipped !== null) return null;
-    resolveUnproven(db, result.project, now);
+    resolveLawsItems(db, unrunPrefix(result.project), now);
+    const unrun = unrunLine(result);
+    if (unrun) return openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line: unrun, now });
+    resolveLawsItems(db, unprovenPrefix(result.project), now);
     const line = unprovenLine(result);
     return line ? openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line, now }) : null;
   });

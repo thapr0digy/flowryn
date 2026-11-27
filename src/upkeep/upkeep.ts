@@ -237,7 +237,7 @@ export class Upkeep {
         else {
           const unproven = result.laws.filter((l) => l.state === "unproven").length;
           const unrun = result.laws.filter((l) => l.state === "unrun").length;
-          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${item ? ` (${item})` : ""}${unrun > 0 ? `; ${unrun} could not run` : ""}`);
+          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${unrun > 0 ? `; ${unrun} could not run` : ""}${item ? ` (${item})` : ""}`);
         }
       }
       this.reproveDue = reproveDueAt(this.deps.db, projects.map((p) => p.id), this.deps.now());
