@@ -61,7 +61,7 @@ It records them once, as `learnings.swept` (project, plan, law, stale with why, 
 
 ## Re-proving laws weekly
 
-`src/verify/reprove.ts`. Once a week, the upkeep loop runs `reproveProject` for each project that is not removed. It starts after the sync, build and sweep, and not while a restart or cleanup is under way. It runs on past the pass that started it, so later passes (a landed run's kick, the sync and sweep) are not held up by its tests, and no second re-prove starts while one runs. Those passes build nothing while it runs (the build reports skipped, "laws are being re-proved"), since a new build restarts the daemon and the stop would throw the re-prove away; the build waits at most one re-prove. The daemon's stop aborts it and waits for it. Its due time is a week after the last `laws.reproved` event, so the first pass after this lands runs it.
+`src/verify/reprove.ts`. Once a week, the upkeep loop runs `reproveProject` for each project that is not removed. It starts after the sync, build and sweep, and not while a restart or cleanup is under way. It runs on past the pass that started it, so later passes (a landed run's kick, the sync and sweep) are not held up by its tests, and no second re-prove starts while one runs. Those passes still build: each project's result is recorded the moment it finishes, so the restart a build brings loses at most the project under way. The daemon's stop aborts it and waits for it. Each project is due a week after its own last result (`lastReproved`, `reproveDue`). A re-prove takes only the projects due, so the next start after a restart re-proves only the ones not done this week. The loop wakes for the oldest project's due time (`reproveDueAt`), so the first pass after this lands runs every project.
 
 1. It reads the head of `origin/<default branch>` in the project's checkout, then the AGENTS.md table at that head. A project with no origin branch, no AGENTS.md or no table is skipped, with the reason.
 2. It makes a detached checkout of that head at `<state_dir>/reprove/<project>`, under the repository's worktree lock. It links the project's `node_modules` into the checkout, so tests import what verify's do. It removes the checkout when it is done, whatever happened.
@@ -78,7 +78,7 @@ Each law ends in one of three states:
 | holds | it passes at HEAD, but nothing re-proves it at a commit: it runs nothing (a doc, a `verify:` step, a hook rule), or its row says `-` |
 | unproven | its enforcer vanished or fails at HEAD; it ran no tests; it timed out; or it passes at its commit ("no longer fails where the mistake was") |
 
-`recordReproofs` appends one `laws.reproved` event with every project's results. For each project with an unproven law, it opens a `laws_unproven` item (P1, the leader's to act on) listing each such law and why. Each project re-proved first resolves its open `laws_unproven` item, so a project has at most one, from its newest re-prove, and a project whose laws are all proven again has none. A skipped project's item is left as it is. A re-prove that the daemon's stop cuts off records nothing, so it runs again at the next start.
+`recordReproof` appends one `laws.reproved` event per project, as it finishes, whose payload is that project's result. An event from before (one per re-prove, its results under `projects`) still counts for each project it lists. For each project with an unproven law, it opens a `laws_unproven` item (P1, the leader's to act on) listing each such law and why. Each project re-proved first resolves its open `laws_unproven` item, so a project has at most one, from its newest re-prove, and a project whose laws are all proven again has none. A skipped project's item is left as it is. A project that the daemon's stop cuts off mid-way records nothing, so it runs again at the next start.
 
 **An emptied test.** `bun test` on a file with no tests exits 0. So both the re-prove and verify's laws step now read the output (`ranNoTests`: bun's "Ran 0 tests", go's "[no tests to run]" or "[no test files]"). A test enforcer that ran no test fails its law: `bun test t/e.test.ts ran no tests: an emptied test proves nothing`. A merge that empties a law's test is refused by verify. The re-prove reports a law whose test went empty some other way.
 
@@ -116,8 +116,10 @@ The checkout was removed afterwards.
 `test/unit/upkeep.test.ts`:
 
 - the weekly pass and the class check never run in one pass, and the class check runs at most hourly;
-- the re-prove runs once a week, not while busy, with one event and an item for an unproven law;
-- the re-prove runs on past its pass: a later pass sweeps meanwhile, builds nothing and starts no second one;
+- the re-prove runs once a week, not while busy, with one event per project and an item for an unproven law;
+- the re-prove runs on past its pass: a later pass sweeps and builds meanwhile and starts no second one;
+- a restart after one project finished re-proves only the other, and nothing more that week;
+- each project is due a week after its own last result, and an older whole-run event counts for each project it lists;
 - a project's next re-prove replaces its item, and resolves it once its laws are proven.
 
 `test/integration/corrections.test.ts`: its report's check now carries a `Law:` row.

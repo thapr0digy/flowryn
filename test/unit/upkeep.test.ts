@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_UPKEEP, type UpkeepConfig } from "../../src/config/upkeep.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { MAX_CONFLICT_NUDGES, conflictAction } from "../../src/reconcile/delivery.ts";
 import type { BuildPass } from "../../src/upkeep/build.ts";
 import { sweepCandidates } from "../../src/upkeep/sweep.ts";
 import { Upkeep, type UpkeepDeps } from "../../src/upkeep/upkeep.ts";
-import { recordReproof } from "../../src/verify/reprove.ts";
+import { lastReproved, recordReproof, reproveDue, reproveDueAt, REPROVE_WINDOW_MS } from "../../src/verify/reprove.ts";
 import { insertProject } from "../../src/lifecycle/projects.ts";
 import { projectAt } from "../helpers/scratch-git.ts";
 
@@ -186,7 +187,7 @@ describe("the upkeep pass", () => {
     expect(starts).toBe(1);
   });
 
-  test("each project's result is recorded as it finishes: a restart after web finished re-proves only api, and nothing again until a week has passed", async () => {
+  test("each project's result is recorded as it finishes: a restart after web finished re-proves only api, and nothing more this week", async () => {
     let started!: () => void;
     const apiStarted = new Promise<void>((resolve) => (started = resolve));
     const before = loop({}, undefined, async (project, signal) => {
@@ -213,6 +214,19 @@ describe("the upkeep pass", () => {
     expect(after.reproved).toEqual(["api"]);
     expect((await after.upkeep.pass()).reproving).toBeUndefined();
     expect(after.reproved).toEqual(["api"]);
+  });
+
+  test("a project is due a week after its own last result; a whole-run event from before per-project results counts for each project it lists", () => {
+    appendEvent(db, { source: "daemon", kind: "laws.reproved", payload: { projects: [{ project: "web", head: null, skipped: "no AGENTS.md", laws: [] }] }, ts: HOUR });
+    recordReproof(db, { project: "api", head: "abc123", skipped: null, laws: [] }, 2 * HOUR);
+    const last = lastReproved(db);
+    expect([...last]).toEqual([["web", HOUR], ["api", 2 * HOUR]]);
+    expect(reproveDue(last, "web", HOUR + REPROVE_WINDOW_MS - 1)).toBe(false);
+    expect(reproveDue(last, "web", HOUR + REPROVE_WINDOW_MS)).toBe(true);
+    expect(reproveDue(last, "new", 3 * HOUR)).toBe(true);
+    expect(reproveDueAt(db, ["web", "api"], 3 * HOUR)).toBe(HOUR + REPROVE_WINDOW_MS);
+    expect(reproveDueAt(db, ["web", "api", "new"], 3 * HOUR)).toBe(3 * HOUR);
+    expect(reproveDueAt(db, [], 3 * HOUR)).toBe(3 * HOUR + REPROVE_WINDOW_MS);
   });
 
   test("a project's next re-prove replaces its unproven-laws item instead of adding one, and resolves it once its laws are proven", () => {

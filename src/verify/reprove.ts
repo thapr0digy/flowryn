@@ -217,7 +217,7 @@ export function lastReproved(db: Db): Map<string, number> {
   const last = new Map<string, number>();
   for (const row of rows) {
     const payload = JSON.parse(row.payload) as { project?: unknown; projects?: { project?: unknown }[] };
-    const named = typeof payload.project === "string" ? [payload.project] : (payload.projects ?? []).map((r) => r.project);
+    const named = typeof payload.project === "string" ? [payload.project] : Array.isArray(payload.projects) ? payload.projects.map((r) => r?.project) : [];
     for (const project of named) if (typeof project === "string") last.set(project, row.ts);
   }
   return last;
