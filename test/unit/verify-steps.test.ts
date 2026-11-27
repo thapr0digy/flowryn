@@ -150,6 +150,7 @@ describe("verify groups and verify_step_timeout_min in config", () => {
       ["bun install", 0],
       ["bun run typecheck", 1],
       ["npx oxlint", 1],
+      ["flowryn:laws", 2],
     ]);
   });
 

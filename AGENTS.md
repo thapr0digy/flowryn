@@ -83,7 +83,7 @@ fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"
 
 ## Rules and their checks
 
-A correction made twice becomes a check (the correct skill; docs/notes/2026-11-22-phase-corrections-become-7t.md). Add its row here.
+A correction made twice becomes a check (the correct skill; docs/notes/2026-11-22-phase-corrections-become-7t.md). Add its row here. Verify's laws step checks every row (docs/notes/2026-11-27-phase-the-laws-ib.md): Enforced by names a test it runs, a file with the names it must hold, or `verify: <step>`; a new row's Proven on names the commit it fails at.
 
 | Rule | Enforced by | Proven on |
 |---|---|---|
@@ -96,6 +96,7 @@ A correction made twice becomes a check (the correct skill; docs/notes/2026-11-2
 | Toolkit rules (gh-axi, sqlite-axi, ...) | the hook, src/policy/toolkit.ts; test/integration/toolkit.test.ts | - |
 | Leader skill under 6,000 characters | test/unit/prompts-that-keep.test.ts | - |
 | An open q<N>'s item cannot be dismissed | test/unit/dismiss-open-question.test.ts | fails at 7753f46, passes at HEAD |
+| Every law names an enforcer verify runs or confirms; a new law names its commit | test/unit/laws.test.ts | fails at ce93110, passes at HEAD |
 
 ## Maintaining this file
 

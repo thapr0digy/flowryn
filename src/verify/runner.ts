@@ -15,7 +15,8 @@ import { PROJECT_ID } from "../lifecycle/projects.ts";
 import { failedReleases, projectRelease, runRelease } from "../lifecycle/release.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { anyMatches, baseKey, changedSinceBase, commitTree, type ChangedFiles } from "./changed.ts";
-import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
+import { LAWS_STEP, REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
+import { checkLaws, lawsSummary, type LawResult, type LawsOutcome } from "./laws.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
@@ -135,12 +136,19 @@ export function logName(index: number, step: string): string {
 }
 
 
-/** One waiting row per step, groups flattened in order; `group` is the entry of `verify` it came from, `when_changed` its globs by flattened place. */
-export function initialSteps(items: readonly VerifyItem[], whenChanged: readonly (readonly string[] | null)[] = []): VerifyStep[] {
+/**
+ * One waiting row per step, groups flattened in order; `group` is the entry of `verify` it came from, `when_changed` its globs by flattened place.
+ * With `laws`, the laws step (LAWS_STEP) is a group of its own, just before the review step (REVIEW_STEP) or last.
+ */
+export function initialSteps(items: readonly VerifyItem[], whenChanged: readonly (readonly string[] | null)[] = [], laws = false): VerifyStep[] {
   const steps: VerifyStep[] = [];
-  items.forEach((item, group) => {
+  const review = items.indexOf(REVIEW_STEP);
+  const at = review === -1 ? items.length : review;
+  const all = laws ? [...items.slice(0, at), LAWS_STEP, ...items.slice(at)] : items;
+  let configured = 0;
+  all.forEach((item, group) => {
     for (const name of typeof item === "string" ? [item] : item) {
-      const when = whenChanged[steps.length] ?? null;
+      const when = item === LAWS_STEP ? null : (whenChanged[configured++] ?? null);
       steps.push({ name, state: "waiting", exit: null, ms: null, log: logName(steps.length, name), tests: null, detail: null, group, ...(when ? { when_changed: [...when] } : {}) });
     }
   });
@@ -374,6 +382,46 @@ async function reviewStep(deps: VerifyDeps, job: Job, v: Verification, plan: Ver
   } finally {
     job.calls.delete(controller);
   }
+}
+
+/**
+ * The laws step (src/verify/laws.ts): the AGENTS.md laws table checked in-process, each test
+ * enforcer run through runBounded (argv, never a shell) by the step's deadline. Exit 0 when every
+ * law holds or there is no table, 1 when one fails; the run's deadline is a run timeout as for any step.
+ */
+async function lawsStep(deps: VerifyDeps, job: Job, v: Verification, plan: VerifyPlan, logPath: string, env: Record<string, string>, deadline: number, runDeadline: number): Promise<StepResult & { laws: LawResult[] | undefined; summary: string | null }> {
+  const controller = new AbortController();
+  job.calls.add(controller);
+  try {
+    const outcome = await checkLaws({
+      git: deps.git,
+      run: (argv, opts) => runBounded(argv, opts),
+      worktree: v.worktree_path,
+      base: plan.base ?? null,
+      steps: v.steps.map((s) => s.name),
+      env,
+      deadline: Math.min(deadline, runDeadline),
+      now: Date.now,
+      signal: controller.signal,
+    });
+    const fd = openSync(logPath, LOG_FLAGS, 0o600);
+    try {
+      appendFileSync(fd, outcome.log);
+    } finally {
+      closeSync(fd);
+    }
+    const step = lawsStepResult(outcome);
+    const timedOut = step.exit !== 0 && !outcome.aborted && Date.now() >= runDeadline ? "run" : null;
+    return { ...step, timedOut, stopped: false };
+  } finally {
+    job.calls.delete(controller);
+  }
+}
+
+/** What the laws step records from a check: exit 1 when a law failed or the check was stopped, and no per-law results from a stopped check. */
+export function lawsStepResult(outcome: LawsOutcome): { exit: number; laws: LawResult[] | undefined; summary: string | null } {
+  const failed = outcome.aborted || outcome.error !== null || outcome.laws.some((l) => l.state === "failed");
+  return { exit: failed ? 1 : 0, laws: outcome.aborted ? undefined : outcome.laws, summary: lawsSummary(outcome) };
 }
 
 /** A review step that ended with no verdict: not the worker's to fix (src/verify/auto-merge.ts holds it). */
@@ -778,6 +826,8 @@ function reusedPass(deps: VerifyDeps, v: Verification, steps: VerifyStep[], plan
   if (v.policy_id === null || steps.some((s) => s.rerun || s.name === REVIEW_STEP)) return null;
   const source = passedAtTree(deps.db, v.project_id, v.policy_id, key, v.id);
   if (!source) return null;
+  // A pass from before the laws step checked no laws (the step is not part of the policy).
+  if (steps.some((s) => s.name === LAWS_STEP) && !source.steps.some((s) => s.name === LAWS_STEP)) return null;
   const ran = source.reused_from ?? source.id;
   let binary: string | null = null;
   if (plan.binary) {
@@ -871,6 +921,7 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
       const firstLog = step.log;
       const began = Date.now();
       let result: StepResult = { exit: 127, timedOut: null, stopped: false };
+      let lawsNote: string | null = null;
       step.hangs = 0;
       for (let attempt = 1; attempt <= 2; attempt++) {
         if (stoppedBy() !== null) {
@@ -885,6 +936,12 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
         if (step.name === REVIEW_STEP) {
           result = await reviewStep(deps, job, v, plan, join(v.dir, step.log), runDeadline);
           if (result.timedOut === "step") step.hangs++;
+          break;
+        }
+        if (step.name === LAWS_STEP) {
+          const laws = await lawsStep(deps, job, v, plan, join(v.dir, step.log), childEnv, deadline ? Date.now() + deadline.ms : runDeadline, runDeadline);
+          ({ laws: step.laws, summary: lawsNote } = laws);
+          result = laws;
           break;
         }
         result = await runStep(
@@ -907,9 +964,10 @@ export async function runVerification(deps: VerifyDeps, admitted: Verification, 
       }
       step.ms = Date.now() - began;
       step.exit = result.exit;
-      step.tests = parseBunSummary(readTail(join(v.dir, step.log)));
+      // The laws step's log holds only the tails of failing enforcers: never the suite's counts.
+      step.tests = step.name === LAWS_STEP ? null : parseBunSummary(readTail(join(v.dir, step.log)));
       step.state = result.stopped ? "stopped" : result.exit === 0 && result.timedOut === null ? "passed" : "failed";
-      step.detail = [gate.note, rerunNote(step), stepDetail(step, result, deadline, plan, firstLog, stoppedBy())].filter((d) => d !== null).join("; ") || null;
+      step.detail = [gate.note, rerunNote(step), lawsNote, stepDetail(step, result, deadline, plan, firstLog, stoppedBy())].filter((d) => d !== null).join("; ") || null;
       if (result.note !== undefined && result.timedOut !== "run") step.detail = `${result.timedOut === "step" ? "the review timed out" : "the review gave no verdict"}: ${result.note}`;
       record(step);
     };

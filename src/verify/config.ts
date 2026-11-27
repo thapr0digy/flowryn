@@ -28,6 +28,11 @@ export const FAILED_PLACEHOLDER = "{failed}";
 
 /** The review step's name in a verification's steps: no shell command is ever spelled like this. */
 export const REVIEW_STEP = "flowryn:review";
+/**
+ * The laws step (src/verify/laws.ts, docs/notes/2026-11-27-phase-the-laws-ib.md): every project's
+ * verify runs it after the steps that install and build, before a review step (initialSteps). It checks the AGENTS.md laws table.
+ */
+export const LAWS_STEP = "flowryn:laws";
 /** The review step's spend cap and deadline when its entry sets none. */
 export const DEFAULT_REVIEW_USD = 2;
 export const DEFAULT_REVIEW_TIMEOUT_MIN = 10;
@@ -57,6 +62,11 @@ export interface VerifyConfig {
    * step has one. Not part of the verify policy: it never changes what a pass of the step proves.
    */
   rerun_failed?: (string | null)[];
+  /**
+   * Whether the laws step (LAWS_STEP) ends this verify: true for every project's verify, absent on
+   * the light check. Not part of the verify policy: the step is the same built-in on every project.
+   */
+  laws?: boolean;
   /** A file the steps build, relative to the worktree, copied out before the worktree goes. */
   binary: string | null;
   /** The whole run, every step together. */
@@ -89,7 +99,7 @@ function projectTable(config: FlowrynConfig, projectId: string): Record<string, 
   return table(projects[projectId], `[projects.${projectId}]`);
 }
 
-const isStep = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0 && s.trim() !== REVIEW_STEP;
+const isStep = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0 && s.trim() !== REVIEW_STEP && s.trim() !== LAWS_STEP;
 const isTable = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const REVIEW_KEYS = new Set(["review", "max_usd", "timeout_min", "harness", "model"]);
 
@@ -231,7 +241,7 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
   const rerun_failed = read.rerun.some((r) => r !== null) ? read.rerun : undefined;
   const light = readLight(raw.light_verify, where);
-  return { steps: read.items, ...(when_changed ? { when_changed } : {}), ...(rerun_failed ? { rerun_failed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms, ...(light ? { light } : {}) };
+  return { laws: true, steps: read.items, ...(when_changed ? { when_changed } : {}), ...(rerun_failed ? { rerun_failed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms, ...(light ? { light } : {}) };
 }
 
 /** `light_verify`: the verify grammar without a review step; null when unset. */

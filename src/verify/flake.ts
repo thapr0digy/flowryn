@@ -10,7 +10,7 @@ import type { ProjectRow } from "../lifecycle/projects.ts";
 import { redactSecrets } from "../util/redact.ts";
 import { fenceFor, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { liveBatchAt, type BatchRow } from "./batch-store.ts";
-import { FAILED_PLACEHOLDER, type VerifyConfig } from "./config.ts";
+import { FAILED_PLACEHOLDER, LAWS_STEP, type VerifyConfig } from "./config.ts";
 import { readTail } from "./runner.ts";
 import type { Verification, VerifyStep } from "./store.ts";
 
@@ -191,7 +191,7 @@ export function rerunStep(v: Verification): VerifyStep | null {
  */
 export function flakeCandidate(db: Db, config: VerifyConfig, v: Verification, step: VerifyStep, now: number): { flake: BatchFlake } | { refused: string; tests: string[] } | null {
   const index = v.steps.indexOf(step);
-  const template = config.rerun_failed?.[index] ?? null;
+  const template = config.rerun_failed?.[v.steps.filter((s) => s.name !== LAWS_STEP).indexOf(step)] ?? null;
   if (!template) return null;
   const failed = failuresOf(v, step);
   if (!failed) return { refused: `its log names no failing tests a rerun can retry alone (Go or bun output, at most ${MAX_TARGETS} packages or files, no build failure)`, tests: [] };
