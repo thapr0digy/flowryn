@@ -1,4 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
+import { GUIDANCE, LAW_RULES, gitCall, globalLawHit, type LawRule, type PushFacts } from "./global-laws.ts";
 import { basename, shellCommands, type Command } from "./shell.ts";
 
 /**
@@ -10,10 +11,11 @@ import { basename, shellCommands, type Command } from "./shell.ts";
  * before any daemon call, so a denial holds with the daemon down.
  *
  * Every decision is a lookup on a tool name, a normalized argv0 (src/policy/shell.ts),
- * a URL host or a file path; no model is involved.
+ * a URL host or a file path; no model is involved. The global laws (src/policy/global-laws.ts)
+ * are rules here too: their denials hold the same way.
  */
 
-export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths", "review-page", "process-kill"] as const;
+export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths", "review-page", "process-kill", ...LAW_RULES] as const;
 export type ToolkitRule = (typeof TOOLKIT_RULES)[number];
 
 export interface ToolkitVerdict {
@@ -39,6 +41,8 @@ export interface ToolkitPaths {
   flowrynBacklog: string;
   flowrynTodos: string;
   flowrynDb: string;
+  /** The global laws file (`<home>/laws.md`), the user's alone to write. */
+  globalLaws?: string;
   /** TASKS_AXI_FILE in the hook's environment, if set. */
   tasksAxiFile?: string | null;
   /**
@@ -93,18 +97,24 @@ const TOOL_FOR: Record<Exclude<ToolkitRule, "leader-shell">, string> = {
   "scope-paths": "flowryn",
   "review-page": "$FLOWRYN_BIN review reply",
   "process-kill": "kill <pid>",
+  rebase: "git merge origin/<base>",
+  "force-push": "a plain git push",
+  tags: "a new vMAJOR.MINOR.PATCH tag",
+  "remember-push": "git rm -r --cached .remember",
+  "dev-port": "another port",
+  "laws-file": "a row proposed to the user",
 };
 
-/** The verdict for one tool call: the first rule it breaks, or null. Never throws. */
-export function toolkitVerdict(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
+/** The verdict for one tool call: the first rule it breaks, or null. `facts`: what the hook read about its pushes. Never throws. */
+export function toolkitVerdict(call: ToolCall, paths: ToolkitPaths, facts: PushFacts | null = null): ToolkitVerdict | null {
   try {
-    return evaluate(call, paths);
+    return evaluate(call, paths, facts);
   } catch {
     return null;
   }
 }
 
-function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
+function evaluate(call: ToolCall, paths: ToolkitPaths, facts: PushFacts | null): ToolkitVerdict | null {
   const tool = call.toolName.toLowerCase();
   if (SHELL_TOOLS.has(tool)) {
     const command = typeof call.toolInput.command === "string" ? call.toolInput.command : "";
@@ -120,6 +130,8 @@ function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
       const hit = commandVerdict(c, call, paths);
       if (hit) return hit;
     }
+    const law = globalLawHit(commands, call.role, facts);
+    if (law) return deny(law.rule, call, law.what);
     return processKillVerdict(commands, call) ?? scopeShellVerdict(commands, call, paths);
   }
   if (FILE_TOOLS.has(tool) || READ_TOOLS.has(tool)) {
@@ -176,6 +188,8 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
       return "Flowryn listens on your review page and hands you the user's words as a steer; answer them with $FLOWRYN_BIN review reply --body-file -.";
     case "process-kill":
       return PROCESS_KILL_GUIDANCE;
+    default:
+      return GUIDANCE[rule satisfies LawRule];
   }
 }
 
@@ -365,7 +379,6 @@ const SQLITE_CLIS = new Set(["sqlite3", "sqlite", "litecli"]);
 const CHROMES = new Set(["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "google chrome", "google chrome canary", "chrome", "chrome-headless-shell"]);
 const PLAYWRIGHT_ALLOWED = new Set(["", "test", "show-report", "install", "install-deps", "merge-reports", "--version", "-V", "--help", "-h"]);
 const SCRIPT_RUNNERS = new Set(["node", "bun", "deno", "python", "python3"]);
-const GIT_VALUED_GLOBALS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--exec-path"]);
 const TASKS_AXI_READS = new Set(["", "list", "show", "ready", "--help", "-h", "help", "-v", "-V", "--version"]);
 
 /** A call that drives a no-mistakes run and blocks on it: `axi run` (start or reattach) or `axi respond`. */
@@ -386,10 +399,8 @@ function commandVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolki
     const hit = sqliteVerdict(c, call, paths);
     if (hit) return hit;
   }
-  if (c.name === "git") {
-    const sub = gitSubcommand(args);
-    if (sub && sub.name === "worktree" && ["add", "remove", "prune", "move"].includes(sub.rest[0] ?? "")) return deny("worktree", call, `\`git worktree ${sub.rest[0]}\``);
-  }
+  const git = gitCall(c);
+  if (git?.sub === "worktree" && ["add", "remove", "prune", "move"].includes(git.rest[0] ?? "")) return deny("worktree", call, `\`git worktree ${git.rest[0]}\``);
   if (c.name === "jira" || c.name === "jira-cli") return deny("jira", call, `\`${shown}\``);
   const browser = browserHit(c, args);
   if (browser) return deny("browser", call, browser);
@@ -457,16 +468,6 @@ function sqliteVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolkit
   if (!readonly && SQL_WRITE.test(text)) return null;
   if (!readonly && text.trim() === "" && db === null) return null;
   return deny("sqlite", call, `\`${c.argv[0]}\` to read`, "Raw sqlite3 stays allowed for writes: put the SQL in the command, or pass a file with < file.sql (or pipe it in from cat).");
-}
-
-function gitSubcommand(args: string[]): { name: string; rest: string[] } | null {
-  let i = 0;
-  while (i < args.length) {
-    const w = args[i]!;
-    if (!w.startsWith("-")) return { name: w, rest: args.slice(i + 1) };
-    i += GIT_VALUED_GLOBALS.has(w) ? 2 : 1;
-  }
-  return null;
 }
 
 /** Ad-hoc browsing: browser MCP servers run directly, playwright other than a project's tests, puppeteer scripts, a headless Chrome. */
@@ -572,6 +573,7 @@ function editsInPlace(command: string, arg: string): boolean {
 function fileVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what: string): ToolkitVerdict | null {
   const resolved = resolvePath(target, call.cwd, paths.home);
   if (samePath(resolved, paths.flowrynBacklog) || samePath(resolved, paths.flowrynTodos)) return deny("flowryn-tasks", call, what);
+  if (paths.globalLaws && samePath(resolved, paths.globalLaws)) return deny("laws-file", call, what);
   const name = basename(target);
   if (name === "backlog.md" || name === "todos.md") return deny("tasks", call, what);
   return null;

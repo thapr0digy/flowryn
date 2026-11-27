@@ -2,7 +2,10 @@ import type { Reply } from "../../api/envelope.ts";
 import { stringArg, type CliIo, type VerbSpec } from "../../api/verbs.ts";
 import { homedir } from "node:os";
 import { defaultConfig, loadConfig, type FlowrynConfig } from "../../config/config.ts";
-import { flowrynHome, socketPath, stateFiles } from "../../config/paths.ts";
+import { flowrynHome, globalLawsPath, socketPath, stateFiles } from "../../config/paths.ts";
+import { pushedPathsArgv, pushSources, type PushFacts } from "../../policy/global-laws.ts";
+import { shellCommands } from "../../policy/shell.ts";
+import { runBounded } from "../../runtime/bounded.ts";
 import { toolkitVerdict, type ToolkitPaths, type ToolkitVerdict } from "../../policy/toolkit.ts";
 import { accountsConfig } from "../../config/accounts.ts";
 import { readScopeDeny, sharedStores } from "../../policy/scope-paths.ts";
@@ -94,6 +97,7 @@ function toolkitPaths(io: CliIo): ToolkitPaths {
     flowrynBacklog: config.tasks.backlog,
     flowrynTodos: config.tasks.todos,
     flowrynDb: stateFiles(config.state_dir).db,
+    globalLaws: globalLawsPath(home),
     tasksAxiFile: io.env.TASKS_AXI_FILE ?? null,
     scopeDenied: leaderScopeDenied(io, config),
   };
@@ -123,7 +127,7 @@ function leaderScopeDenied(io: CliIo, config: FlowrynConfig): string[] {
  * so it holds with the daemon down or slow (src/policy/toolkit.ts). The role
  * comes from the token's readable prefix: a leader session's token is `fwl_`.
  */
-function localVerdict(io: CliIo, harness: Harness, raw: string): ToolkitVerdict | null {
+async function localVerdict(io: CliIo, harness: Harness, raw: string): Promise<ToolkitVerdict | null> {
   let input: Record<string, unknown>;
   try {
     const value = JSON.parse(raw) as unknown;
@@ -134,16 +138,30 @@ function localVerdict(io: CliIo, harness: Harness, raw: string): ToolkitVerdict 
   }
   if (typeof input.tool_name !== "string" || input.tool_name.length === 0) return null;
   const toolInput = input.tool_input && typeof input.tool_input === "object" && !Array.isArray(input.tool_input) ? (input.tool_input as Record<string, unknown>) : {};
-  return toolkitVerdict(
-    {
-      harness,
-      role: io.env.FLOWRYN_TOKEN?.startsWith("fwl_") ? "leader" : "worker",
-      toolName: input.tool_name,
-      toolInput,
-      cwd: typeof input.cwd === "string" && input.cwd.length > 0 ? input.cwd : process.cwd(),
-    },
-    toolkitPaths(io),
-  );
+  const cwd = typeof input.cwd === "string" && input.cwd.length > 0 ? input.cwd : process.cwd();
+  const paths = toolkitPaths(io);
+  const command = input.tool_name.toLowerCase() === "bash" && typeof toolInput.command === "string" ? toolInput.command : null;
+  const facts = command === null ? null : await pushFacts(command, cwd, paths.home);
+  return toolkitVerdict({ harness, role: io.env.FLOWRYN_TOKEN?.startsWith("fwl_") ? "leader" : "worker", toolName: input.tool_name, toolInput, cwd }, paths, facts);
+}
+
+/** How long the hook reads one push's commits before it lets the push go unchecked. */
+const PUSH_READ_MS = 3_000;
+
+/**
+ * The paths a line's pushes would carry (the remember-push law, src/policy/global-laws.ts):
+ * each push's commits that no remote-tracking branch holds yet, read with git. A read that
+ * fails leaves that push unchecked, as a hook steps aside; null when the line pushes nothing.
+ */
+async function pushFacts(command: string, cwd: string, home: string): Promise<PushFacts | null> {
+  const pushes = pushSources(shellCommands(command), cwd, home);
+  if (pushes.length === 0) return null;
+  const paths: string[] = [];
+  for (const push of pushes) {
+    const out = await runBounded(pushedPathsArgv(push), { label: "git log (push check)", timeoutMs: PUSH_READ_MS, stderr: "ignore" });
+    if (out.code === 0) paths.push(...out.stdout.split("\n").filter((p) => p.length > 0));
+  }
+  return { pushedPaths: paths };
 }
 
 /** Hooks that read GitHub before they answer (the Pi merge confirm) wait longer than a busy-signal hook. */
@@ -160,7 +178,7 @@ function signalHook(name: string, summary: string): VerbSpec {
     async local(args, io) {
       const harness = harnessOf(stringArg(args, "harness"));
       const input = await readInput(io);
-      const verdict = name === "pre-tool" ? localVerdict(io, harness, input) : null;
+      const verdict = name === "pre-tool" ? await localVerdict(io, harness, input) : null;
       const toolkit = verdict ? { toolkit: JSON.stringify({ rule: verdict.rule, tool: verdict.tool }) } : {};
       // A leader's session start reports the login folder this process runs on, for the daemon's check (src/leader/login.ts).
       const login = name === "session-start" ? { login: JSON.stringify({ config_dir: io.env.CLAUDE_CONFIG_DIR ?? null, agent_dir: io.env.PI_CODING_AGENT_DIR ?? null }) } : {};
@@ -208,7 +226,7 @@ const toolCheck: VerbSpec = {
   async local(args, io) {
     const harness = stringArg(args, "harness") === "claude" ? "claude" : "pi";
     const input = await readInput(io);
-    const verdict = localVerdict(io, harness, input);
+    const verdict = await localVerdict(io, harness, input);
     if (!verdict) {
       io.stdout("{}\n");
       return 0;

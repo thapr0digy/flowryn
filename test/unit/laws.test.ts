@@ -8,7 +8,8 @@ import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { grantJobLease } from "../../src/sched/pools.ts";
 import { LAWS_STEP, lightVerifyConfig, REVIEW_STEP, verifyConfig } from "../../src/verify/config.ts";
-import { checkLaws, parseEnforcers, parseLaws, provenCommits, type CommandRunner } from "../../src/verify/laws.ts";
+import { BUILT_IN_LAWS } from "../../src/policy/global-laws.ts";
+import { BUILT_IN, checkLaws, lawsSummary, parseEnforcers, parseLaws, provenCommits, readGlobalLaws, type CommandRunner } from "../../src/verify/laws.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { initialSteps, lawsStepResult, runVerification } from "../../src/verify/runner.ts";
 import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
@@ -74,6 +75,12 @@ describe("the table", () => {
     expect(parseEnforcers("doc: `AGENTS.md` `never rebase`")).toEqual({ enforcers: [{ kind: "path", path: "AGENTS.md", names: ["never rebase"] }] });
     expect(parseEnforcers("a doc line, and/or a reviewer")).toEqual({ enforcers: [] });
     expect(parseEnforcers("`make lint` runs it")).toEqual({ error: expect.stringContaining("`make lint` is not a path") });
+    expect(parseEnforcers("the hook: `hook: force-push`; `verify: make lint`")).toEqual({
+      enforcers: [
+        { kind: "hook", rule: "force-push" },
+        { kind: "verify", step: "make lint" },
+      ],
+    });
   });
 
   test("Proven on: the sha prefixes it names, with ^ or ~N", () => {
@@ -216,9 +223,10 @@ describe("checking the laws", () => {
   });
 });
 
-/** A project whose verify is ["true"], verified at a head of `r` the way the daemon runs it. */
+/** A project whose verify is ["true"], verified at a head of `r` the way the daemon runs it, in a Flowryn home with no global laws file of its own. */
 function verifyFixture(r: Repo) {
   const dir = scratch("fl-laws-v-");
+  const config = parseConfig("", dir);
   const db = openDb(join(dir, "flowryn.db"));
   migrate(db);
   db.exec(`INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://github.com/acme/web.git', '${r.repo}', 'main', 'direct-PR')`);
@@ -230,11 +238,13 @@ function verifyFixture(r: Repo) {
       grantJobLease(db, { kind: "verify", id: row.id, taskId: null }, "validation", { validation: 5 }, Date.now());
       return row;
     });
-    await runVerification({ db, git: gitRunner("git", 30_000), now: Date.now, log: () => {}, root }, v, { prNumber: 1, headRef: "feature", binary: null, timeoutMs: 120_000, path: null, base: "main" }, env);
+    await runVerification({ db, git: gitRunner("git", 30_000), now: Date.now, log: () => {}, root, config: () => config }, v, { prNumber: 1, headRef: "feature", binary: null, timeoutMs: 120_000, path: null, base: "main" }, env);
     return getVerification(db, v.id)!;
   };
-  return { db, cfg, run };
+  return { db, cfg, run, home: dir, config };
 }
+
+const GLOBALS = BUILT_IN_LAWS.length;
 
 describe("the laws step in verify", () => {
   test("every project's verify ends with the laws step; the light check has none", () => {
@@ -264,24 +274,26 @@ describe("the laws step in verify", () => {
     const failed = await f.run(broken);
     expect(failed.state).toBe("failed");
     const step = failed.steps.find((s) => s.name === LAWS_STEP)!;
-    expect(step).toMatchObject({ state: "failed", exit: 1, tests: null, laws: [{ rule: "No dismiss of an open question", state: "failed", detail: "test/unit/dismiss.test.ts does not exist" }] });
-    expect(failed.detail).toContain("1 of 1 laws failed; first: No dismiss of an open question: test/unit/dismiss.test.ts does not exist");
+    expect(step).toMatchObject({ state: "failed", exit: 1, tests: null });
+    expect(step.laws!.filter((l) => l.global)).toHaveLength(GLOBALS);
+    expect(step.laws!.at(-1)).toEqual({ rule: "No dismiss of an open question", state: "failed", detail: "test/unit/dismiss.test.ts does not exist" });
+    expect(failed.detail).toContain(`1 of ${GLOBALS + 1} laws failed; first: No dismiss of an open question: test/unit/dismiss.test.ts does not exist`);
 
     const fixed = r.commit({ "test/unit/dismiss.test.ts": PASSING_TEST });
     const passed = await f.run(fixed);
     expect(passed.state).toBe("passed");
-    expect(passed.steps.find((s) => s.name === LAWS_STEP)).toMatchObject({ state: "passed", detail: "1 law holds", laws: [{ state: "passed", detail: "bun test test/unit/dismiss.test.ts passed" }] });
+    const held = passed.steps.find((s) => s.name === LAWS_STEP)!;
+    expect(held).toMatchObject({ state: "passed", detail: `${GLOBALS + 1} laws hold` });
+    expect(held.laws!.at(-1)).toEqual({ rule: "No dismiss of an open question", state: "passed", detail: "bun test test/unit/dismiss.test.ts passed" });
 
     const spec = VERIFY_VERBS.find((v) => v.name === "laws")!;
     const caller: Caller = { role: "human", runId: null, taskId: null };
     git(r.repo, ["checkout", "-q", "feature"]);
-    const ctx: ReadCtx = { db: f.db, config: parseConfig("", "/h"), now: Date.now(), caller };
-    expect(spec.read!(ctx, { project: "web" }).data).toEqual({
-      project: "web",
-      file: join(r.repo, "AGENTS.md"),
-      laws: [{ rule: "No dismiss of an open question", enforced_by: "test/unit/dismiss.test.ts", proven_on: `fails at ${at}`, last: "passed", detail: "bun test test/unit/dismiss.test.ts passed" }],
-      summary: `1 law, 0 failed; last checked in ${passed.id} at ${fixed.slice(0, 8)}`,
-    });
+    const ctx: ReadCtx = { db: f.db, config: f.config, now: Date.now(), caller };
+    const data = spec.read!(ctx, { project: "web" }).data as { laws: Record<string, string>[] };
+    expect(data).toMatchObject({ project: "web", file: join(r.repo, "AGENTS.md"), global_file: join(f.home, "laws.md"), summary: `${GLOBALS} global and 1 project; 0 failed; last checked in ${passed.id} at ${fixed.slice(0, 8)}` });
+    expect(data.laws[0]).toEqual({ scope: "global", where: BUILT_IN, rule: BUILT_IN_LAWS[0]!.rule, enforced_by: `\`hook: ${BUILT_IN_LAWS[0]!.hook}\``, proven_on: expect.stringContaining("global-laws.test.ts"), last: "passed", detail: `hook rule ${BUILT_IN_LAWS[0]!.hook}` });
+    expect(data.laws.at(-1)).toEqual({ scope: "project", where: "AGENTS.md:7", rule: "No dismiss of an open question", enforced_by: "test/unit/dismiss.test.ts", proven_on: `fails at ${at}`, last: "passed", detail: "bun test test/unit/dismiss.test.ts passed" });
   });
 
   test("a project with no table passes verify, the step saying so", async () => {
@@ -289,6 +301,61 @@ describe("the laws step in verify", () => {
     const head = r.commit({ "src/x.ts": "export {};\n" });
     const v = await verifyFixture(r).run(head);
     expect(v.state).toBe("passed");
-    expect(v.steps.find((s) => s.name === LAWS_STEP)).toMatchObject({ state: "passed", detail: "no laws: AGENTS.md has no ## Rules and their checks table", laws: [] });
+    expect(v.steps.find((s) => s.name === LAWS_STEP)).toMatchObject({ state: "passed", detail: `${GLOBALS} global laws hold; no laws: AGENTS.md has no ## Rules and their checks table` });
+  });
+
+  test("a global law in the home's laws.md is checked on every project: one naming no real hook rule fails verify, and `flowryn laws` shows it", async () => {
+    const r = repoWith({});
+    const head = r.commit({ "src/x.ts": "export {};\n" });
+    const f = verifyFixture(r);
+    writeFileSync(join(f.home, "laws.md"), table(["| Never push to main by hand | `hook: no-main-push` | - |"]));
+    const v = await f.run(head);
+    expect(v.state).toBe("failed");
+    const step = v.steps.find((s) => s.name === LAWS_STEP)!;
+    expect(step.laws!.at(-1)).toEqual({ rule: "Never push to main by hand", state: "failed", detail: expect.stringContaining("hook: no-main-push is not a rule of Flowryn's tool-call hook"), global: true });
+    expect(v.detail).toContain(`1 of ${GLOBALS + 1} laws failed; first: global: Never push to main by hand`);
+
+    // Named by a real rule, the same row holds.
+    writeFileSync(join(f.home, "laws.md"), table(["| Never push to main by hand | `hook: force-push` | - |"]));
+    expect((await f.run(head)).state).toBe("passed");
+
+    const spec = VERIFY_VERBS.find((verb) => verb.name === "laws")!;
+    const data = spec.read!({ db: f.db, config: f.config, now: Date.now(), caller: { role: "human", runId: null, taskId: null } }, { project: "web" }).data as { laws: Record<string, string>[]; summary: string };
+    expect(data.laws.at(-1)).toMatchObject({ scope: "global", where: `${join(f.home, "laws.md")}:7`, rule: "Never push to main by hand", last: "passed" });
+    expect(data.summary).toStartWith(`${GLOBALS + 1} global and no project laws`);
+  });
+});
+
+describe("global laws", () => {
+  test("the built-in rows, then the home file's; a broken home file is one failed law", () => {
+    const home = scratch("fl-laws-home-");
+    const file = join(home, "laws.md");
+    expect(readGlobalLaws(file)).toMatchObject({ file, error: null, laws: BUILT_IN_LAWS.map((l) => ({ rule: l.rule, enforced_by: `\`hook: ${l.hook}\``, file: BUILT_IN })) });
+    writeFileSync(file, "## Rules and their checks\n\n| Rule | Check |\n|---|---|\n");
+    expect(readGlobalLaws(file).error).toContain("Rule | Enforced by | Proven on");
+  });
+
+  test("a global row names hook rules or verify steps only; its Proven on is not checked", async () => {
+    const r = repoWith({});
+    const global = {
+      file: "/h/laws.md",
+      error: null,
+      laws: [
+        { rule: "Hooked", enforced_by: "`hook: tags`", proven_on: "-", line: 7, file: "/h/laws.md" },
+        { rule: "Stepped", enforced_by: "`verify: make lint`", proven_on: "-", line: 8, file: "/h/laws.md" },
+        { rule: "A file", enforced_by: "test/unit/x.test.ts", proven_on: "fails at 0000000", line: 9, file: "/h/laws.md" },
+        { rule: "Prose", enforced_by: "a reviewer", proven_on: "-", line: 10, file: "/h/laws.md" },
+      ],
+    };
+    const out = await checkLaws({ git: gitRunner("git", 30_000), run: realRun, worktree: r.repo, base: "main", steps: ["make lint"], global, env, deadline: Date.now() + 60_000, now: Date.now });
+    expect(out.laws.map((l) => [l.rule, l.state, l.detail])).toEqual([
+      ["Hooked", "passed", "hook rule tags"],
+      ["Stepped", "passed", "verify step make lint"],
+      ["A file", "failed", expect.stringContaining("a file belongs in one project's AGENTS.md table")],
+      ["Prose", "failed", expect.stringContaining("names nothing")],
+    ]);
+    expect(lawsSummary(out)).toBe("2 of 4 laws failed; first: global: A file: test/unit/x.test.ts: a global law names `hook: <rule>` or `verify: <step>`; a file belongs in one project's AGENTS.md table; no laws: AGENTS.md has no ## Rules and their checks table");
+    const broken = await checkLaws({ git: gitRunner("git", 30_000), run: realRun, worktree: r.repo, base: "main", steps: [], global: { file: "/h/laws.md", error: "/h/laws.md: no table", laws: [] }, env, deadline: Date.now() + 60_000, now: Date.now });
+    expect(lawsStepResult(broken).exit).toBe(1);
   });
 });

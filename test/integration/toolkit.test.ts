@@ -6,7 +6,9 @@
  * records toolkit.denied, and with the daemon unreachable the denial holds.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { globalLawsPath } from "../../src/config/paths.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
@@ -137,6 +139,49 @@ describe("a Pi worker: hook tool-check", () => {
       { rule: "tasks", use: "tasks-axi", tool_name: "write", harness: "pi" },
     ]);
     expect(await check("bash", { command: "gh pr list" }, { FLOWRYN_SOCK: join(env.h.home, "run", "missing.sock") })).toMatchObject({ block: true, rule: "github" });
+  }, 60_000);
+});
+
+describe("global laws (src/policy/global-laws.ts): one deny each through a Claude worker's real pre-tool hook", () => {
+  test("rebase, force-push, tags, a push carrying .remember/, port 8081 and the laws file", async () => {
+    const env = await fleet();
+    const { run, token } = await worker(env);
+    // A repository whose unpushed commit carries a .remember/ note: the hook reads it with git before it judges the push.
+    const notes = join(env.h.home, "notes-repo");
+    const git = (...args: string[]) => expect(Bun.spawnSync(["git", "-C", notes, ...args], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).exitCode).toBe(0);
+    mkdirSync(join(notes, ".remember"), { recursive: true });
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(notes, "a.txt"), "a\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "a");
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+    writeFileSync(join(notes, ".remember", "now.md"), "a session note\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "notes");
+    const cases: { rule: string; name: string; input: Record<string, unknown> }[] = [
+      { rule: "rebase", name: "Bash", input: { command: "git rebase origin/main" } },
+      { rule: "force-push", name: "Bash", input: { command: "git push --force-with-lease origin HEAD" } },
+      { rule: "tags", name: "Bash", input: { command: "git tag v1.2" } },
+      { rule: "remember-push", name: "Bash", input: { command: `cd ${notes} && git push origin main` } },
+      { rule: "dev-port", name: "Bash", input: { command: "PORT=8081 make dev" } },
+      { rule: "laws-file", name: "Write", input: { file_path: globalLawsPath(env.h.home), content: "x" } },
+    ];
+    for (const c of cases) {
+      const decision = await preTool(env, token, c.name, c.input);
+      expect(decision, c.rule).toMatchObject({ permissionDecision: "deny" });
+      expect(decision!.permissionDecisionReason, c.rule).toContain(`toolkit rule (${c.rule})`);
+      expect(decision!.permissionDecisionReason, c.rule).toContain("Flowryn's global law");
+    }
+    expect(denials(env, { run }).map((d) => d.rule)).toEqual(cases.map((c) => c.rule));
+    // What the laws allow is untouched: a merge, a plain push of clean commits, a full tag, another port.
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+    git("rm", "-q", "-r", "--cached", ".remember");
+    git("commit", "-q", "-m", "drop notes");
+    writeFileSync(join(notes, ".gitignore"), ".remember/\n");
+    git("add", ".gitignore");
+    git("commit", "-q", "-m", "ignore notes");
+    expect(await preTool(env, token, "Bash", { command: `cd ${notes} && git push origin HEAD` })).toBeNull();
+    for (const command of ["git merge origin/main", "git rebase --abort", "git tag v1.2.0", "PORT=8082 make dev", "curl -s http://127.0.0.1:8081/health"]) expect(await preTool(env, token, "Bash", { command }), command).toBeNull();
   }, 60_000);
 });
 

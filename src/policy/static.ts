@@ -1,6 +1,6 @@
 import { basename, join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
-import { stateFiles } from "../config/paths.ts";
+import { globalLawsPath, stateFiles } from "../config/paths.ts";
 import { KILL_BY_NAME } from "./toolkit.ts";
 
 /**
@@ -42,6 +42,14 @@ export const DENIED_BASH_PREFIXES = [
   "git worktree remove",
   "git worktree move",
   "git worktree prune",
+  // The global laws (src/policy/global-laws.ts). No `git rebase`: the hook allows its --abort and --quit.
+  "git push --force",
+  "git push -f",
+  "git push --force-with-lease",
+  "git tag -f",
+  "git tag --force",
+  "git tag -d",
+  "git tag --delete",
 ] as const;
 
 /**
@@ -61,6 +69,8 @@ export interface StaticPaths {
   todos: string;
   /** Flowryn's database. */
   db: string;
+  /** The global laws file, the user's alone to write. */
+  laws: string;
 }
 
 export interface StaticLayers {
@@ -85,8 +95,9 @@ export function staticLayers(paths: StaticPaths): StaticLayers {
       // Edit rules cover every file-editing tool (Edit, Write, MultiEdit, NotebookEdit).
       absoluteRule("Edit", paths.backlog),
       absoluteRule("Edit", paths.todos),
+      absoluteRule("Edit", paths.laws),
     ],
-    denyWrite: [paths.backlog, paths.todos, `${paths.backlog}.lock`, `${paths.todos}.lock`],
+    denyWrite: [paths.backlog, paths.todos, `${paths.backlog}.lock`, `${paths.todos}.lock`, paths.laws],
   };
 }
 
@@ -114,9 +125,9 @@ export function browserProfileReads(home: string): string[] {
   return BROWSER_PROFILE_DIRS.map((dir) => absoluteRule("Read", `${join(home, dir)}/**`));
 }
 
-/** The static layers for a config's own backlog, to-dos and database. */
-export function configStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir">): StaticLayers {
-  return staticLayers({ backlog: config.tasks.backlog, todos: config.tasks.todos, db: stateFiles(config.state_dir).db });
+/** The static layers for a config's own backlog, to-dos, database and global laws file. */
+export function configStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir" | "home">): StaticLayers {
+  return staticLayers({ backlog: config.tasks.backlog, todos: config.tasks.todos, db: stateFiles(config.state_dir).db, laws: globalLawsPath(config.home) });
 }
 
 /**
@@ -132,7 +143,7 @@ export function configStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_
  * own through the flowryn verbs. The hook's scope-paths rule (src/policy/toolkit.ts) backs this up
  * for the shell and covers the other scope's folders.
  */
-export function leaderStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir">, claudeProjectsDirs: string | readonly string[], options: { multiScope?: boolean } = {}): StaticLayers {
+export function leaderStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir" | "home">, claudeProjectsDirs: string | readonly string[], options: { multiScope?: boolean } = {}): StaticLayers {
   const base = configStaticLayers(config);
   const dirs = [...new Set(typeof claudeProjectsDirs === "string" ? [claudeProjectsDirs] : claudeProjectsDirs)];
   const reads = options.multiScope ? [config.tasks.backlog, config.tasks.todos, stateFiles(config.state_dir).db].map((path) => absoluteRule("Read", path)) : [];

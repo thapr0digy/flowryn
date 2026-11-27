@@ -478,7 +478,7 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
     }
     if (facts.primaryDirty) throw new FlowrynError("primary_checkout_tangle", `${project.path} has uncommitted changes to tracked files; refusing to merge into it`);
     if (!facts.fastForward) {
-      throw new FlowrynError("not_fast_forward", `${run.branch} is not a fast-forward of ${project.default_branch} (it has diverged)`, `steer the worker to rebase onto ${project.default_branch} and deliver again`);
+      throw new FlowrynError("not_fast_forward", `${run.branch} is not a fast-forward of ${project.default_branch} (it has diverged)`, `steer the worker to merge ${project.default_branch} into its branch with a new commit (never rebase) and deliver again`);
     }
   }
   // 2b · no AI co-author line in a commit or the PR body (docs/notes/2026-11-08-never-commit-claude-ks.md).

@@ -20,7 +20,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-const PATHS = { backlog: "/h/data/backlog.md", todos: "/h/data/todos.md", db: "/h/state/flowryn.db" };
+const PATHS = { backlog: "/h/data/backlog.md", todos: "/h/data/todos.md", db: "/h/state/flowryn.db", laws: "/h/laws.md" };
 
 /** Claude's prefix match for a `Bash(<prefix> *)` rule, as verified live: the bare command or the command and a space. */
 function bashRuleMatches(rule: string, command: string): boolean {
@@ -57,10 +57,18 @@ describe("the toolkit's static layers", () => {
     expect(layers.permissionsDeny.filter((rule) => rule.startsWith("Bash(sqlite3"))).toEqual(["Bash(sqlite3 *flowryn.db*)"]);
   });
 
-  test("deny editing Flowryn's backlog and to-dos by absolute path, and writing them and their locks in the sandbox", () => {
+  test("deny editing Flowryn's backlog, to-dos and global laws file by absolute path, and writing them and their locks in the sandbox", () => {
     expect(layers.permissionsDeny).toContain("Edit(//h/data/backlog.md)");
     expect(layers.permissionsDeny).toContain("Edit(//h/data/todos.md)");
-    expect(layers.denyWrite).toEqual(["/h/data/backlog.md", "/h/data/todos.md", "/h/data/backlog.md.lock", "/h/data/todos.md.lock"]);
+    expect(layers.permissionsDeny).toContain("Edit(//h/laws.md)");
+    expect(layers.denyWrite).toEqual(["/h/data/backlog.md", "/h/data/todos.md", "/h/data/backlog.md.lock", "/h/data/todos.md.lock", "/h/laws.md"]);
+  });
+
+  test("back the hook's global laws up for force-pushes and tag moves, never for leaving a rebase", () => {
+    const bash = layers.permissionsDeny.filter((rule) => rule.startsWith("Bash("));
+    const denied = (command: string) => bash.some((rule) => bashRuleMatches(rule, command));
+    for (const command of ["git push --force origin x", "git push -f", "git push --force-with-lease", "git tag -f v1.0.0", "git tag -d v1.0.0", "git tag --delete v1.0.0"]) expect(denied(command)).toBe(true);
+    for (const command of ["git push", "git push origin x", "git rebase --abort", "git tag v1.0.0", "git tag -l"]) expect(denied(command)).toBe(false);
   });
 
   test("come from the config's own [tasks] and state_dir", () => {

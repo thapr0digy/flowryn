@@ -9,9 +9,9 @@ Phase 1 of plan p152. Each project's AGENTS.md `## Rules and their checks` table
 
 Every project's `flowryn verify` has a built-in step, `flowryn:laws` (`LAWS_STEP`). It runs as a group of its own after the configured steps, so install and build have run first, but before a `{ review = true }` step, so a broken table fails before the paid review. A daemon stop in the middle of the step fails it (`laws: stopped after N laws checked`) and keeps no per-law results, so a resumed verify checks every law again and `flowryn laws` never shows a law the stop cut off. You do not configure it, and no project can turn it off. The light check of a batch project does not run it; the batch's full verify does.
 
-The step runs in the daemon, like the review step (`src/verify/laws.ts`, called from `src/verify/runner.ts`). It reads `AGENTS.md` at the head being verified:
+The step runs in the daemon, like the review step (`src/verify/laws.ts`, called from `src/verify/runner.ts`). It checks the global laws first (docs/notes/2026-11-27-phase-global-laws-iq.md), then reads `AGENTS.md` at the head being verified:
 
-- No file, or no `## Rules and their checks` heading: the step passes with the note `no laws: AGENTS.md has no ## Rules and their checks table`.
+- No file, or no `## Rules and their checks` heading: the step passes with the note `no laws: AGENTS.md has no ## Rules and their checks table`, after `N global laws hold`.
 - A heading whose table has no `Rule | Enforced by | Proven on` header or no `|---|` line: the step fails.
 - Otherwise it checks each row in order. One failing row fails the step. The verification fails, and the worker gets the log as for any failed step.
 
@@ -54,7 +54,7 @@ The laws step is not part of the verify policy id (`verifyConfig` returns `laws:
 
 ## `flowryn laws <project>`
 
-This is a read verb for the leader, a reader or your terminal (project-scoped). It reads the laws table in the project's checkout. For each law it shows the rule, Enforced by, Proven on ("not recorded" for a `-` row), its last result (`passed`, `failed`, or `not checked yet`) and that result's detail. The results come from the newest finished verification of the project whose laws step ran. A hint gives the count of laws recorded before laws were checked, which name no commit. Flowryn has 7 of these.
+This is a read verb for the leader, a reader or your terminal (project-scoped). It reads the laws table in the project's checkout, after the global laws. For each law it shows the rule, Enforced by, Proven on ("not recorded" for a `-` row), its last result (`passed`, `failed`, or `not checked yet`) and that result's detail. The results come from the newest finished verification of the project whose laws step ran. A hint gives the count of laws recorded before laws were checked, which name no commit. Flowryn has 7 of these.
 
 ```
 flowryn laws flowryn

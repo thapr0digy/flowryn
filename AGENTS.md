@@ -83,7 +83,7 @@ fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"
 
 ## Rules and their checks
 
-A correction made twice becomes a check (the correct skill; docs/notes/2026-11-22-phase-corrections-become-7t.md). Add its row here. Verify's laws step checks every row (docs/notes/2026-11-27-phase-the-laws-ib.md): Enforced by names a test it runs, a file with the names it must hold, or `verify: <step>`; a new row's Proven on names the commit it fails at.
+A correction made twice becomes a check (the correct skill; docs/notes/2026-11-22-phase-corrections-become-7t.md). Add its row here. Verify's laws step checks every row (docs/notes/2026-11-27-phase-the-laws-ib.md): Enforced by names a test it runs, a file with the names it must hold, `verify: <step>` or `hook: <rule>`; a new row's Proven on names the commit it fails at. Laws for every project are built into the hook or written in `~/.flowryn/laws.md` (docs/notes/2026-11-27-phase-global-laws-iq.md); `flowryn laws <project>` lists both.
 
 | Rule | Enforced by | Proven on |
 |---|---|---|
@@ -97,6 +97,7 @@ A correction made twice becomes a check (the correct skill; docs/notes/2026-11-2
 | Leader skill under 6,000 characters | test/unit/prompts-that-keep.test.ts | - |
 | An open q<N>'s item cannot be dismissed | test/unit/dismiss-open-question.test.ts | fails at 7753f46, passes at HEAD |
 | Every law names an enforcer verify runs or confirms; a new law names its commit | test/unit/laws.test.ts | fails at ce93110, passes at HEAD |
+| Global laws are hook refusals: rebase, force-push, tag moves and non-vX.Y.Z tags, `.remember/` in a push, a worker on port 8081, writing the laws file | test/unit/global-laws.test.ts | fails at 9b2f521, passes at HEAD |
 
 ## Maintaining this file
 

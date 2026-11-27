@@ -14,9 +14,10 @@ import { appendEvent } from "../db/events.ts";
 import { PROJECT_ID } from "../lifecycle/projects.ts";
 import { failedReleases, projectRelease, runRelease } from "../lifecycle/release.ts";
 import type { FlowrynConfig } from "../config/config.ts";
+import { globalLawsPath } from "../config/paths.ts";
 import { anyMatches, baseKey, changedSinceBase, commitTree, type ChangedFiles } from "./changed.ts";
 import { LAWS_STEP, REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
-import { checkLaws, lawsSummary, type LawResult, type LawsOutcome } from "./laws.ts";
+import { checkLaws, lawsSummary, readGlobalLaws, type LawResult, type LawsOutcome } from "./laws.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
@@ -399,6 +400,7 @@ async function lawsStep(deps: VerifyDeps, job: Job, v: Verification, plan: Verif
       worktree: v.worktree_path,
       base: plan.base ?? null,
       steps: v.steps.map((s) => s.name),
+      global: deps.config ? readGlobalLaws(globalLawsPath(deps.config().home)) : undefined,
       env,
       deadline: Math.min(deadline, runDeadline),
       now: Date.now,

@@ -25,6 +25,11 @@ export function configPath(home: string = flowrynHome()): string {
   return join(home, "config.toml");
 }
 
+/** The global laws file: laws for every project, the user's alone to write (src/verify/laws.ts). */
+export function globalLawsPath(home: string = flowrynHome()): string {
+  return join(home, "laws.md");
+}
+
 export function runDir(home: string = flowrynHome()): string {
   return join(home, "run");
 }
