@@ -1,7 +1,7 @@
 # Corrections become laws without a reminder; laws are re-proved weekly
 
 - Status: done
-- Open: not run live through the daemon yet. The first upkeep pass after this lands files each project's learnings sweep and re-proves every project's laws. appsec-signal's laws need Postgres from `make test-changed`, so its re-prove may report them as failing at HEAD until that is solved
+- Open: the setup's live run (appsec-signal's `make test-changed` bringing up its test Postgres) is proven only by the fixture test; the next weekly re-prove is its first live run
 
 Phase 3 of plan p152. Phase 1 (docs/notes/2026-11-27-phase-the-laws-ib.md) made each project's AGENTS.md `## Rules and their checks` table its laws. Phase 2 (docs/notes/2026-11-27-phase-global-laws-iq.md) added the global laws. This phase does three things. A mistake corrected twice gets a law filed without the leader remembering to. Every project's old lessons are sorted once into law, fact or stale. And every law is re-proved each week. It extends the corrections pass (docs/notes/2026-11-22-phase-corrections-become-7t.md) and adds no new registry.
 
@@ -61,12 +61,14 @@ It records them once, as `learnings.swept` (project, plan, law, stale with why, 
 
 ## Re-proving laws weekly
 
-`src/verify/reprove.ts`. Once a week, the upkeep loop runs `reproveProject` for each project that is not removed. It starts after the sync, build and sweep, and not while a restart or cleanup is under way. It runs on past the pass that started it, so later passes (a landed run's kick, the sync and sweep) are not held up by its tests, and no second re-prove starts while one runs. Those passes build nothing while it runs (the build reports skipped, "laws are being re-proved"), since a new build restarts the daemon and the stop would throw the re-prove away; the build waits at most one re-prove. The daemon's stop aborts it and waits for it. Its due time is a week after the last `laws.reproved` event, so the first pass after this lands runs it.
+`src/verify/reprove.ts`. Once a week, the upkeep loop runs `reproveProject` for each project that is not removed. It starts after the sync, build and sweep, and not while a restart or cleanup is under way. It runs on past the pass that started it, so later passes (a landed run's kick, the sync and sweep) are not held up by its tests, and no second re-prove starts while one runs. Those passes still build: each project's result is recorded the moment it finishes, so the restart a build brings loses at most the project under way. The daemon's stop aborts it and waits for it. Each project is due a week after its own last result (`lastReproved`, `reproveDue`). A re-prove takes only the projects due, so the next start after a restart re-proves only the ones not done this week. The loop wakes for the oldest project's due time (`reproveDueAt`), so the first pass after this lands runs every project.
 
 1. It reads the head of `origin/<default branch>` in the project's checkout, then the AGENTS.md table at that head. A project with no origin branch, no AGENTS.md or no table is skipped, with the reason.
-2. It makes a detached checkout of that head at `<state_dir>/reprove/<project>`, under the repository's worktree lock. It links the project's `node_modules` into the checkout, so tests import what verify's do. It removes the checkout when it is done, whatever happened.
-3. For each law, at HEAD: each enforcer must still be there, with its names. `verify:` and `hook:` enforcers must still name a step or rule. A test enforcer must pass and must run at least one test.
-4. For each commit in Proven on, the checkout goes to that commit and HEAD's enforcer files are laid over it: the test file, or a Go package's `*_test.go` files. Then the same commands run. At least one must fail with tests run.
+2. It makes a detached checkout of that head at `<state_dir>/reprove/<project>`, under the repository's worktree lock. It removes the checkout when it is done, whatever happened.
+3. The setup: it runs the project's verify steps at HEAD in the checkout, as verify does before its laws step (`setupSteps`). That is the same `verify` list, with no second one, less the review step and the steps with `when_changed`, which a verify of HEAD against itself skips. Each runs with `/bin/sh -c`, as verify runs it, under the step deadline. This is what starts appsec-signal's test Postgres (`make test-changed` needs `pg-test-up`) and installs Flowryn's packages. What the setup leaves is git-ignored, so it stays when the checkout moves to an old commit (`git clean` without `-x`). When the project's verify runs its whole test suite, so does the setup: Flowryn's unit and integration tests run once a week here. If a step fails or times out, every law that has a command to run is `unrun`, "could not run: verify step … failed (exit N): <last line>". It is never reported as unproven; the project gets a could-not-run item instead (below). A law with nothing to run is still checked.
+4. For each law, at HEAD: each enforcer must still be there, with its names. `verify:` and `hook:` enforcers must still name a step or rule. A test enforcer must pass and must run at least one test.
+5. For each commit in Proven on, the checkout goes to that commit and HEAD's enforcer files are laid over it: the test file, or a Go package's `*_test.go` files. Then the same commands run. At least one must fail with tests run.
+6. The teardown: after the laws, whatever happened, it runs the project's `release` commands in the checkout (`runRelease`, appsec-signal's `make pg-test-down`). A failed one is logged.
 
 The commands are the laws step's own argument lists (`planPath`). They run through `runBounded` with the project's verify PATH and the project's step deadline (`verify_step_timeout_min`, else its whole verify timeout). No text from the table reaches a shell.
 
@@ -77,8 +79,9 @@ Each law ends in one of three states:
 | proven | it fails at each recorded commit and passes at HEAD |
 | holds | it passes at HEAD, but nothing re-proves it at a commit: it runs nothing (a doc, a `verify:` step, a hook rule), or its row says `-` |
 | unproven | its enforcer vanished or fails at HEAD; it ran no tests; it timed out; or it passes at its commit ("no longer fails where the mistake was") |
+| unrun | it has a command to run, but the setup failed: "could not run", with why |
 
-`recordReproofs` appends one `laws.reproved` event with every project's results. For each project with an unproven law, it opens a `laws_unproven` item (P1, the leader's to act on) listing each such law and why. Each project re-proved first resolves its open `laws_unproven` item, so a project has at most one, from its newest re-prove, and a project whose laws are all proven again has none. A skipped project's item is left as it is. A re-prove that the daemon's stop cuts off records nothing, so it runs again at the next start.
+`recordReproof` appends one `laws.reproved` event per project, as it finishes, whose payload is that project's result. An event from before (one per re-prove, its results under `projects`) still counts for each project it lists. For each project with an unproven law, it opens a `laws_unproven` item (P1, the leader's to act on) listing each such law and why. Each project re-proved first resolves its open `laws_unproven` item, so a project has at most one, from its newest re-prove, and a project whose laws are all proven again has none. A skipped project's item is left as it is. When a project's setup failed (any law `unrun`), its runnable laws were not re-proved, so an `unrun` law that was unproven at the project's previous re-prove keeps that: the event records it under the law's `carried`, with its earlier detail and "(last re-proved at <head>; could not run since)", and the new unproven-laws item lists it beside any law found unproven this week. It is carried each week until the law runs again. The project also gets a `laws_unproven` item (P1) worded "Laws could not be re-proved in <project> (N of M, at <head>): <why the setup failed>; flowryn laws <project>". The project's next such re-prove replaces it, and its next re-prove whose setup succeeded resolves it along with the unproven-laws item. A project that the daemon's stop cuts off mid-way records nothing, so it runs again at the next start.
 
 **An emptied test.** `bun test` on a file with no tests exits 0. So both the re-prove and verify's laws step now read the output (`ranNoTests`: bun's "Ran 0 tests", go's "[no tests to run]" or "[no test files]"). A test enforcer that ran no test fails its law: `bun test t/e.test.ts ran no tests: an emptied test proves nothing`. A merge that empties a law's test is refused by verify. The re-prove reports a law whose test went empty some other way.
 
@@ -109,15 +112,22 @@ The checkout was removed afterwards.
 - a weakened test that passes at the mistake's commit too is reported;
 - a vanished enforcer and a gone verify step are reported;
 - a Go package's test files are laid over the old commit, checked with a stand-in for `go`;
-- a missing origin branch, AGENTS.md or table is skipped with why.
+- a missing origin branch, AGENTS.md or table is skipped with why;
+- the laws run after the setup: a test that needs the setup's ignored file is proven, and the teardown runs after;
+- a failed setup makes a runnable law "could not run", never unproven, and the teardown still runs;
+- a failed setup keeps the unproven-laws item open and opens a could-not-run item, replaced by the next one; a later clean re-prove resolves both;
+- a law found unproven in a week whose setup failed is listed in the unproven-laws item next to the could-not-run item, with every law that was unproven before and could not run since, week after week;
+- the setup is the verify steps less the review and `when_changed` steps.
 
 `test/unit/laws.test.ts`: an emptied test fails its law in verify, and a kept test still passes.
 
 `test/unit/upkeep.test.ts`:
 
 - the weekly pass and the class check never run in one pass, and the class check runs at most hourly;
-- the re-prove runs once a week, not while busy, with one event and an item for an unproven law;
-- the re-prove runs on past its pass: a later pass sweeps meanwhile, builds nothing and starts no second one;
+- the re-prove runs once a week, not while busy, with one event per project and an item for an unproven law;
+- the re-prove runs on past its pass: a later pass sweeps and builds meanwhile and starts no second one;
+- a restart after one project finished re-proves only the other, and nothing more that week;
+- each project is due a week after its own last result, and an older whole-run event counts for each project it lists;
 - a project's next re-prove replaces its item, and resolves it once its laws are proven.
 
 `test/integration/corrections.test.ts`: its report's check now carries a `Law:` row.

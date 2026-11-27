@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type { ProjectRow } from "../../src/lifecycle/projects.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import type { CommandRunner } from "../../src/verify/laws.ts";
-import { reproveProject, unprovenLine, type ReproveDeps } from "../../src/verify/reprove.ts";
+import { reproveProject, setupSteps, unprovenLine, type ReproveDeps } from "../../src/verify/reprove.ts";
 
 /**
  * Laws re-proved on a schedule (docs/notes/2026-11-27-phase-corrections-become-jx.md): each law's
@@ -43,6 +43,9 @@ interface Fixture {
 const BAD_SUM = "export const sum = (a: number, b: number) => a - b;\n";
 const GOOD_SUM = "export const sum = (a: number, b: number) => a + b;\n";
 const SUM_TEST = 'import { expect, test } from "bun:test";\nimport { sum } from "../src/sum.ts";\ntest("sum adds", () => expect(sum(1, 2)).toBe(3));\n';
+
+/** The law's test, needing a file the setup makes and git ignores. */
+const READY_TEST = 'import { existsSync } from "node:fs";\nimport { expect, test } from "bun:test";\nimport { sum } from "../src/sum.ts";\ntest("sum adds", () => {\n  expect(existsSync(".ready")).toBe(true);\n  expect(sum(1, 2)).toBe(3);\n});\n';
 
 const agents = (mistake: string) =>
   [
@@ -88,7 +91,7 @@ const realRun: CommandRunner = async (argv, opts) => {
 };
 
 function deps(f: Fixture, run: CommandRunner = realRun): ReproveDeps {
-  return { git: gitRunner("git", 30_000), run, dir: join(dirname(f.repo), "reprove"), env: { PATH: process.env.PATH!, HOME: process.env.HOME! }, steps: ["make lint"], timeoutMs: 60_000 };
+  return { git: gitRunner("git", 30_000), run, dir: join(dirname(f.repo), "reprove"), env: { PATH: process.env.PATH!, HOME: process.env.HOME! }, steps: ["make lint"], setup: [], teardown: [], log: () => {}, timeoutMs: 60_000 };
 }
 
 function worktrees(repo: string): number {
@@ -156,6 +159,39 @@ describe("re-proving a project's laws", () => {
       { argv: ["test", "-count=1", "-run", "^(TestX)$", "./internal/x"], hasTest: true, hasCode: false },
     ]);
     expect(fixed).toBe(out.head!);
+  });
+
+  test("the laws run after the project's verify steps, as verify's laws step does: what the setup leaves (ignored files) is there at HEAD and kept across checkouts; the teardown runs after", async () => {
+    const f = fixture();
+    // The law's test needs what the setup makes, as appsec-signal's need make pg-test-up's server.
+    f.land({ ".gitignore": ".ready\n", "test/sum.test.ts": READY_TEST });
+    const released = join(scratch("fl-reprove-release-"), "released");
+    const lines: string[] = [];
+    const without = await reproveProject(deps(f), f.project);
+    expect(without.laws[0]!.state).toBe("unproven");
+    const out = await reproveProject({ ...deps(f), setup: ["printf ok > .ready", "test -s .ready"], teardown: [["touch", released]], log: (l) => lines.push(l) }, f.project);
+    expect(out.laws[0]).toEqual({ rule: "sum adds", state: "proven", detail: `fails at ${f.mistake.slice(0, 8)}, passes at HEAD` });
+    expect(existsSync(released)).toBe(true);
+    expect(lines).toEqual([`reprove web: release touch ${released} done`]);
+    expect(existsSync(join(deps(f).dir, "web"))).toBe(false);
+  });
+
+  test("when the setup fails, a law with a command to run could not run, with why, and is never reported as no longer proven; the teardown still runs", async () => {
+    const f = fixture();
+    const released = join(scratch("fl-reprove-release-"), "released");
+    const out = await reproveProject({ ...deps(f), setup: ["echo 'test database unreachable (run make pg-test-up)' >&2; exit 2", "touch never"], teardown: [["touch", released]] }, f.project);
+    expect(out.laws).toEqual([
+      { rule: "sum adds", state: "unrun", detail: "could not run: verify step echo 'test database unreachable (run make pg-test-up)' >&2; exit 2 failed (exit 2): test database unreachable (run make pg-test-up)" },
+      { rule: "The readme names the fixture", state: "holds", detail: "README.md is there and names fixture at HEAD; nothing runs to re-prove at a commit" },
+      { rule: "Lint runs", state: "holds", detail: "verify step make lint at HEAD; nothing runs to re-prove at a commit" },
+    ]);
+    expect(unprovenLine(out)).toBeNull();
+    expect(existsSync(released)).toBe(true);
+  });
+
+  test("the setup is the verify steps but the review and the when_changed steps, which a verify of HEAD against itself skips", () => {
+    expect(setupSteps(null)).toEqual([]);
+    expect(setupSteps({ steps: ["bun install", ["bun run typecheck", "npx oxlint"], "./dist/flowryn doctor", "flowryn:review", "bun test"], when_changed: [null, null, null, ["src/**"], null, null] })).toEqual(["bun install", "bun run typecheck", "npx oxlint", "bun test"]);
   });
 
   test("a project whose origin branch or AGENTS.md table is missing is skipped with why", async () => {

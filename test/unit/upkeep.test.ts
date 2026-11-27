@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_UPKEEP, type UpkeepConfig } from "../../src/config/upkeep.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { MAX_CONFLICT_NUDGES, conflictAction } from "../../src/reconcile/delivery.ts";
 import type { BuildPass } from "../../src/upkeep/build.ts";
 import { sweepCandidates } from "../../src/upkeep/sweep.ts";
 import { Upkeep, type UpkeepDeps } from "../../src/upkeep/upkeep.ts";
-import { recordReproofs } from "../../src/verify/reprove.ts";
+import { lastReproved, recordReproof, reproveDue, reproveDueAt, REPROVE_WINDOW_MS } from "../../src/verify/reprove.ts";
 import { insertProject } from "../../src/lifecycle/projects.ts";
 import { projectAt } from "../helpers/scratch-git.ts";
 
@@ -93,10 +94,12 @@ interface Loop {
   reproved: string[];
   busy: string | null;
   config: UpkeepConfig;
+  /** The projects' ids. */
+  projects: string[];
 }
 
 function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "skipped", reason: "the daemon runs this commit" }, reprove?: UpkeepDeps["reprove"]): Loop {
-  const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], reproved: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over } };
+  const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], reproved: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over }, projects: ["web"] };
   l.upkeep = new Upkeep({
     db,
     config: () => l.config,
@@ -107,7 +110,7 @@ function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "s
       l.calls.push(`git ${args[0]}`);
       return { code: 1, stdout: "", stderr: "" };
     },
-    projects: () => [{ id: "web", path: join(dir, "missing"), default_branch: "main" } as never],
+    projects: () => l.projects.map((id) => ({ id, path: join(dir, "missing"), default_branch: "main" }) as never),
     builder: {
       pass: async () => {
         l.calls.push("build");
@@ -145,7 +148,7 @@ describe("the upkeep pass", () => {
     expect((await l.upkeep.pass()).repeats).toBeNull();
   });
 
-  test("laws are re-proved after the sweep, once a week: one event, an item for a law no longer proven; not while busy (src/verify/reprove.ts)", async () => {
+  test("laws are re-proved after the sweep, once a week: one event per project, an item for a law no longer proven; not while busy (src/verify/reprove.ts)", async () => {
     const l = loop();
     l.busy = "a cleanup is running";
     expect((await l.upkeep.pass()).reproving).toBeUndefined();
@@ -161,7 +164,7 @@ describe("the upkeep pass", () => {
     expect(l.reproved).toEqual(["web"]);
   });
 
-  test("a re-prove runs on past its pass: later passes sweep meanwhile, build nothing (its restart would stop the re-prove), and start no second re-prove", async () => {
+  test("a re-prove runs on past its pass: later passes sweep and build meanwhile (a restart keeps the projects done), and start no second re-prove", async () => {
     let finish!: () => void;
     const held = new Promise<void>((resolve) => (finish = resolve));
     let starts = 0;
@@ -176,24 +179,94 @@ describe("the upkeep pass", () => {
     seedRun("a", "cancelled", 0);
     const second = await l.upkeep.pass();
     expect(second.swept.map((s) => s.run)).toEqual(["a"]);
-    expect(second.build).toEqual({ outcome: "skipped", reason: "laws are being re-proved" });
-    expect(l.calls.filter((c) => c === "build")).toHaveLength(1);
+    expect(second.build).toEqual({ outcome: "skipped", reason: "the daemon runs this commit" });
+    expect(l.calls.filter((c) => c === "build")).toHaveLength(2);
     expect(second.reproving).toBeUndefined();
     finish();
     expect(await first.reproving).toEqual([{ project: "web", head: "abc123", skipped: null, laws: [] }]);
     expect(starts).toBe(1);
-    await l.upkeep.pass();
-    expect(l.calls.filter((c) => c === "build")).toHaveLength(2);
+  });
+
+  test("each project's result is recorded as it finishes: a restart after web finished re-proves only api, and nothing more this week", async () => {
+    let started!: () => void;
+    const apiStarted = new Promise<void>((resolve) => (started = resolve));
+    const before = loop({}, undefined, async (project, signal) => {
+      before.reproved.push(project.id);
+      if (project.id === "api") {
+        started();
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+      }
+      return { project: project.id, head: "abc123", skipped: null, laws: [] };
+    });
+    before.projects = ["web", "api"];
+    const report = await before.upkeep.pass();
+    await apiStarted;
+    await before.upkeep.stop();
+    expect(await report.reproving).toBeUndefined();
+    expect(before.reproved).toEqual(["web", "api"]);
+    const recorded = db.query("SELECT json_extract(payload, '$.project') AS project FROM events WHERE kind = 'laws.reproved'").all();
+    expect(recorded).toEqual([{ project: "web" }]);
+
+    const after = loop();
+    after.projects = ["web", "api"];
+    const restarted = await after.upkeep.pass();
+    expect((await restarted.reproving)!.map((r) => r.project)).toEqual(["api"]);
+    expect(after.reproved).toEqual(["api"]);
+    expect((await after.upkeep.pass()).reproving).toBeUndefined();
+    expect(after.reproved).toEqual(["api"]);
+  });
+
+  test("a project is due a week after its own last result; a whole-run event from before per-project results counts for each project it lists", () => {
+    appendEvent(db, { source: "daemon", kind: "laws.reproved", payload: { projects: [{ project: "web", head: null, skipped: "no AGENTS.md", laws: [] }] }, ts: HOUR });
+    recordReproof(db, { project: "api", head: "abc123", skipped: null, laws: [] }, 2 * HOUR);
+    const last = lastReproved(db);
+    expect([...last]).toEqual([["web", HOUR], ["api", 2 * HOUR]]);
+    expect(reproveDue(last, "web", HOUR + REPROVE_WINDOW_MS - 1)).toBe(false);
+    expect(reproveDue(last, "web", HOUR + REPROVE_WINDOW_MS)).toBe(true);
+    expect(reproveDue(last, "new", 3 * HOUR)).toBe(true);
+    expect(reproveDueAt(db, ["web", "api"], 3 * HOUR)).toBe(HOUR + REPROVE_WINDOW_MS);
+    expect(reproveDueAt(db, ["web", "api", "new"], 3 * HOUR)).toBe(3 * HOUR);
+    expect(reproveDueAt(db, [], 3 * HOUR)).toBe(3 * HOUR + REPROVE_WINDOW_MS);
   });
 
   test("a project's next re-prove replaces its unproven-laws item instead of adding one, and resolves it once its laws are proven", () => {
     const unproven = { project: "web", head: "abc123", skipped: null, laws: [{ rule: "Tests stay", state: "unproven" as const, detail: "it no longer fails" }] };
-    const first = recordReproofs(db, [unproven], HOUR);
-    const second = recordReproofs(db, [unproven], 2 * HOUR);
-    expect(db.query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual([{ id: second[0]! }]);
+    const first = recordReproof(db, unproven, HOUR);
+    const second = recordReproof(db, unproven, 2 * HOUR);
+    expect(db.query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual(second.map((id) => ({ id })));
     expect(first).not.toEqual(second);
-    recordReproofs(db, [{ ...unproven, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }], 3 * HOUR);
+    recordReproof(db, { ...unproven, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }, 3 * HOUR);
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").get()).toEqual({ n: 0 });
+  });
+
+  test("a law unproven before and unrun since stays in the unproven-laws item, week after week, beside a law freshly unproven and the could-not-run item; a clean re-prove resolves both", () => {
+    const openLines = () => (db.query("SELECT COALESCE(full_line, line) AS line FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all() as { line: string }[]).map((i) => i.line).toSorted();
+    const setupFailed = { rule: "Tests stay", state: "unrun" as const, detail: "could not run: verify step make pg-test-up failed (exit 2): postgres unreachable" };
+    recordReproof(db, { project: "web", head: "abc12345ff", skipped: null, laws: [{ rule: "Tests stay", state: "unproven", detail: "at HEAD: bun test test/a.test.ts fails" }, { rule: "Lint stays", state: "holds", detail: "verify step lint at HEAD" }] }, HOUR);
+
+    const week2 = recordReproof(db, { project: "web", head: "def67890aa", skipped: null, laws: [setupFailed, { rule: "Lint stays", state: "unproven", detail: "at HEAD: verify step lint is not configured" }] }, 2 * HOUR);
+    expect(week2).toHaveLength(2);
+    expect(openLines()).toEqual([
+      "Laws could not be re-proved in web (1 of 2, at def67890): verify step make pg-test-up failed (exit 2): postgres unreachable; flowryn laws web",
+      "Laws no longer proven in web (2 of 2, re-proved at def67890): Tests stay: at HEAD: bun test test/a.test.ts fails (last re-proved at abc12345; could not run since); Lint stays: at HEAD: verify step lint is not configured; flowryn laws web",
+    ]);
+
+    recordReproof(db, { project: "web", head: "0011223344", skipped: null, laws: [setupFailed, { rule: "Lint stays", state: "holds", detail: "verify step lint at HEAD" }] }, 3 * HOUR);
+    expect(openLines()).toEqual([
+      "Laws could not be re-proved in web (1 of 2, at 00112233): verify step make pg-test-up failed (exit 2): postgres unreachable; flowryn laws web",
+      "Laws no longer proven in web (1 of 2, re-proved at 00112233): Tests stay: at HEAD: bun test test/a.test.ts fails (last re-proved at abc12345; could not run since); flowryn laws web",
+    ]);
+
+    recordReproof(db, { project: "web", head: "5566778899", skipped: null, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }, { rule: "Lint stays", state: "holds", detail: "verify step lint at HEAD" }] }, 4 * HOUR);
+    expect(openLines()).toEqual([]);
+  });
+
+  test("an unrun law that was proven before opens no unproven-laws item", () => {
+    recordReproof(db, { project: "web", head: "abc12345ff", skipped: null, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }, HOUR);
+    recordReproof(db, { project: "web", head: "def67890aa", skipped: null, laws: [{ rule: "Tests stay", state: "unrun", detail: "could not run: verify step make pg-test-up timed out" }] }, 2 * HOUR);
+    expect(db.query("SELECT line FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual([
+      { line: "Laws could not be re-proved in web (1 of 1, at def67890): verify step make pg-test-up timed out; flowryn laws web" },
+    ]);
   });
 
   test("in order: build after the syncs, then the sweep of each candidate", async () => {
