@@ -17,9 +17,13 @@ import { waitBesidesOwnJobs } from "./turn-end-guard.ts";
  * and a fixed string.
  *
  * Bounded, so it never wedges a worker: a job stops holding once its end is
- * recorded, at its own deadline (the call's `timeout`, at most the cap), at
- * the cap, or after `HOLD_MAX_REFUSALS` refusals; each release but an end is a
- * `run.background_hold_released` event with its reason. Anything else that
+ * recorded, at its deadline (the cap, from its start; the call's `timeout` is
+ * not read, as Claude may not enforce it on a background call), or after
+ * `HOLD_MAX_REFUSALS` refusals; each release but an end is a
+ * `run.background_hold_released` event with its reason. Holds are Stop
+ * continuations outside `MAX_CONTINUATIONS`, so the refusal count keeps two
+ * steer continuations, every hold and an asyncRewake wake under Claude's cap
+ * of 8 continuations. Anything else that
  * rightly holds the worker (a question, a gate, a steer saying end the turn,
  * the run past running) wins, and an asynchronous agent never holds: its
  * hand-back wakes the worker.
@@ -30,16 +34,14 @@ export const HOLD_RELEASED_KIND = "run.background_hold_released";
 
 /** The longest a job holds its worker, from the job's start: a job whose end was missed holds no longer. */
 export const HOLD_CAP_MS = 60 * 60_000;
-/** Refusals per job: a worker that keeps ending its turn is let go, and the worker_idle pointer takes over. */
-export const HOLD_MAX_REFUSALS = 5;
+/**
+ * Refusals per job: a worker that keeps ending its turn is let go, and the
+ * worker_idle pointer takes over. 2 steers + 3 holds + a waiter wake stay under
+ * Claude's 8 Stop continuations, so no recorded hold is dropped by Claude.
+ */
+export const HOLD_MAX_REFUSALS = 3;
 
-export type ReleaseReason = "deadline" | "cap" | "refusals";
-
-/** The job's deadline: its call's own timeout when it set one, never past the cap. */
-function deadlineOf(job: BackgroundJob): { at: number; reason: ReleaseReason } {
-  if (job.timeoutMs !== undefined && job.timeoutMs < HOLD_CAP_MS) return { at: job.startedAt + job.timeoutMs, reason: "deadline" };
-  return { at: job.startedAt + HOLD_CAP_MS, reason: "cap" };
-}
+export type ReleaseReason = "cap" | "refusals";
 
 /** Per job of this worker process: how often it held a Stop, and whether it was released. */
 function holdHistory(db: Db, run: RunRow): { refusals: Map<string, number>; released: Set<string> } {
@@ -59,8 +61,7 @@ function holdHistory(db: Db, run: RunRow): { refusals: Map<string, number>; rele
 
 /** Why the job no longer holds, or null while it does. */
 function releaseReason(job: BackgroundJob, refusals: number, now: number): ReleaseReason | null {
-  const deadline = deadlineOf(job);
-  if (now >= deadline.at) return deadline.reason;
+  if (now >= job.startedAt + HOLD_CAP_MS) return "cap";
   if (refusals >= HOLD_MAX_REFUSALS) return "refusals";
   return null;
 }

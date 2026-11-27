@@ -1,7 +1,7 @@
 # A worker cannot end its turn while its own background shell job runs
 
 - Status: done
-- Open: not run live through a real Claude worker yet; whether Claude enforces a background Bash call's `timeout` is unverified (the hold only uses it as the job's deadline)
+- Open: not run live through a real Claude worker yet
 
 The laws plan's first Flowryn law from a corrections scout (appsec-signal, `corrections-become-check-hs`, evidence.md §2). Five corrections (m1242, m1246, m1541, m1557, m1565) were one class: a worker ran `make ui-check-changed` or `make ui-golden` with `run_in_background` (both run past Claude's 600 s foreground limit), ended its turn with "I'll act when it lands", the job's end notice did not wake it, and it sat idle until the leader steered it. The worker contract already said "never end a turn to wait on a job"; prose was not enough.
 
@@ -30,11 +30,14 @@ A job stops holding when:
 | reason | when | recorded |
 |---|---|---|
 | ended | its `<task-notification>` is in the transcript | `run.background_ended`, as before |
-| `deadline` | the call's own `timeout` (ms) has passed since the job started, when it set one under the cap | `run.background_hold_released` |
-| `cap` | `HOLD_CAP_MS` (60 min) since the job started: a job whose end was missed holds no longer | `run.background_hold_released` |
-| `refusals` | it has held `HOLD_MAX_REFUSALS` (5) Stops: a worker that keeps ending its turn is let go rather than looped | `run.background_hold_released` |
+| `cap` | `HOLD_CAP_MS` (60 min) since the job started, the job's deadline: a job whose end was missed holds no longer | `run.background_hold_released` |
+| `refusals` | it has held `HOLD_MAX_REFUSALS` (3) Stops: a worker that keeps ending its turn is let go rather than looped | `run.background_hold_released` |
 
-`run.background_hold_released` {tool_use_id, job, reason, refusals, started_at} is written once per job. A released job is still a rightful wait for the turn-end guard, so no reminder follows, and the `worker_idle` pointer ("has been idle Nm waiting on its own background job (Bash …)") is the backstop, as it was for every case before this change. The background start event now also records `timeout_ms` when the call set one.
+The call's own `timeout` is not a release: whether Claude enforces it on a `run_in_background` call is unverified, and a job that outlives it would otherwise be let go while still running, the failure this rule exists to stop.
+
+Holds are Stop continuations but stay outside `MAX_CONTINUATIONS` (two steer continuations, design section on Stop continuations). The refusal count is 3 so that two steer continuations, three holds and an asyncRewake waiter wake (which Claude counts as a Stop-hook continuation, M0 c14) stay under Claude's cap of 8 consecutive continuations, and no recorded hold is dropped by Claude.
+
+`run.background_hold_released` {tool_use_id, job, reason, refusals, started_at} is written once per job. A released job is still a rightful wait for the turn-end guard, so no reminder follows, and the `worker_idle` pointer ("has been idle Nm waiting on its own background job (Bash …)") is the backstop, as it was for every case before this change.
 
 ```sql
 SELECT json_extract(payload, '$.reason') AS reason, COUNT(*) FROM events
@@ -43,10 +46,10 @@ SELECT json_extract(payload, '$.reason') AS reason, COUNT(*) FROM events
 
 ## The law
 
-AGENTS.md's Rules and their checks: "A worker cannot end its turn while its own background Bash job runs", enforced by `test/unit/background-hold.test.ts`, which fails at a01bd23 (no hold) and passes at HEAD. The unit cases replay the transcripts' shape (`make ui-check-changed BASE=main` started with `run_in_background`, then a Stop): held and named, two jobs, none, ended, deadline, cap, a timeout past the cap, refusals, an agent, a relaunch, and the rightful waits that win.
+AGENTS.md's Rules and their checks: "A worker cannot end its turn while its own background Bash job runs", enforced by `test/unit/background-hold.test.ts`, which fails at a01bd23 (no hold) and passes at HEAD. The unit cases replay the transcripts' shape (`make ui-check-changed BASE=main` started with `run_in_background`, then a Stop): held and named, two jobs, none, ended, cap, a call timeout that does not release before the cap, refusals, an agent, a relaunch, and the rightful waits that win.
 
 ## Tests
 
 - `test/unit/background-hold.test.ts`: one case per path, above.
-- `test/integration/turn-end-guard.test.ts`: through the real CLI hook and daemon, a fake Claude worker is held naming its job and ends its turn once the job's notice lands; one that keeps ending its turn is released after 5 refusals with the reason recorded and gets the pointer naming the job; once the job ended, an outcome-less turn end gets the ordinary reminder; a Claude leader's background Bash and Stop are never held.
+- `test/integration/turn-end-guard.test.ts`: through the real CLI hook and daemon, a fake Claude worker is held naming its job and ends its turn once the job's notice lands; one that keeps ending its turn is released after 3 refusals with the reason recorded and gets the pointer naming the job; once the job ended, an outcome-less turn end gets the ordinary reminder; a Claude leader's background Bash and Stop are never held.
 - The fake worker (`test/helpers/fake-harness.ts`) treats a hold like a reminder: it is appended to `fake-holds.txt` and continues the turn.

@@ -13,7 +13,7 @@ import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 /**
  * The background hold (docs/notes/2026-11-27-a-worker-cannot-w5.md): a Claude
  * worker's Stop is refused while its own background Bash job runs, and the
- * refusal is bounded by the job's end, its deadline, the cap and a refusal
+ * refusal is bounded by the job's end, its deadline (the cap) and a refusal
  * count. The shape replays the appsec-signal transcripts (m1242, m1541,
  * m1557): `make ui-check-changed` started with run_in_background, then the
  * turn ended "I'll act when it lands".
@@ -112,13 +112,6 @@ describe("the background hold", () => {
     expect(payloads(HOLD_RELEASED_KIND)).toEqual([]);
   });
 
-  test("the job's own deadline (its call's timeout) releases it, with the reason", () => {
-    started(UI_CHECK("toolu_1", "bui1", 600_000));
-    expect(stop(599_000)).not.toBeNull();
-    expect(stop(2_000)).toBeNull();
-    expect(payloads(HOLD_RELEASED_KIND)).toMatchObject([{ tool_use_id: "toolu_1", job: "bui1", reason: "deadline", refusals: 1 }]);
-  });
-
   test("a job whose end was missed holds no longer than the cap, with the reason recorded once", () => {
     started(UI_CHECK("toolu_1", "bui1"));
     expect(stop(HOLD_CAP_MS - 1_000)).not.toBeNull();
@@ -127,10 +120,12 @@ describe("the background hold", () => {
     expect(payloads(HOLD_RELEASED_KIND)).toMatchObject([{ tool_use_id: "toolu_1", reason: "cap" }]);
   });
 
-  test("a timeout longer than the cap does not stretch it", () => {
-    started(UI_CHECK("toolu_1", "bui1", 3 * HOLD_CAP_MS));
-    expect(stop(HOLD_CAP_MS + 1)).toBeNull();
-    expect(payloads(HOLD_RELEASED_KIND)).toMatchObject([{ reason: "cap" }]);
+  test("the call's own timeout does not release the job before the cap", () => {
+    started(UI_CHECK("toolu_1", "bui1", 600_000));
+    expect(stop(601_000)).toContain("Bash bui1");
+    expect(payloads(HOLD_RELEASED_KIND)).toEqual([]);
+    expect(stop(HOLD_CAP_MS)).toBeNull();
+    expect(payloads(HOLD_RELEASED_KIND)).toMatchObject([{ tool_use_id: "toolu_1", job: "bui1", reason: "cap", refusals: 1 }]);
   });
 
   test("a worker that keeps ending its turn is let go after the refusal cap, with the reason", () => {
