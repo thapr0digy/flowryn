@@ -12,6 +12,9 @@ export const CORRECT_SKILL_NAME = "correct";
 /** The report section whose entries Flowryn files as ships (src/leader/corrections.ts parses it). */
 export const CHECKS_HEADING = "Checks to ship";
 
+/** The learnings sweep's section of lessons proposed for `flowryn unlearn` (src/leader/corrections.ts parses it). */
+export const STALE_HEADING = "Stale lessons";
+
 /** The enforcers, highest first: the order a class's fix is chosen in. */
 export const ENFORCERS = ["architecture", "type", "lint", "test", "doc"] as const;
 
@@ -59,9 +62,13 @@ You change no code. Report with \`$FLOWRYN_BIN deliver --report\`: \`## Short an
     Evidence: <two or more ids from your task's corrections list>
     Enforcer: <${ENFORCERS.join(" | ")}>
     Past mistake: <commit or task where it happened>
+    Law: | <rule> | <enforced by, as step 4> | fails at <commit> |
     <what the check is, where it goes, its message, how to prove it>
 
-Then \`## Classes not filed\`: one-offs and classes already enforced, with the check that should have caught them. Flowryn files each entry as a ship of the project; an entry citing fewer than two ids from your list is refused.
+Then \`## Classes not filed\`: one-offs and classes already enforced, with the check that should have caught them. Flowryn files each entry as a ship of the project; an entry citing fewer than two ids from your list, or whose Law: row verify could not check, is refused.
+
+## As the learnings sweep
+Sort every lesson in your list: a law (a rule a check could enforce), a fact (true, but no rule), or stale (the code no longer bears it out; check before you say so). Report \`## Short answer\`, then \`## ${CHECKS_HEADING}\` as above, citing the lessons each law enforces (one is enough), then \`## ${STALE_HEADING}\`, one line each: \`- l<N>: why\`. The rest stay as facts. Flowryn files the laws as ships and lists the stale ones for the leader to unlearn.
 
 ## As a ship that builds a check
 Build the check your brief names, prove it (step 3) and add the AGENTS.md row (step 4) in the same change. The proof goes in your handoff: the commit, the command, the failing and the passing output tail.

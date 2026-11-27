@@ -1,7 +1,7 @@
 # Laws: each project's rules table is checked by verify
 
 - Status: done
-- Open: not run live through the daemon yet; the first verify after this lands checks Flowryn's 10 laws and appsec-signal's 1. Later phases of plan p152: global laws, filing laws from repeated corrections, re-proving laws on a schedule
+- Open: not run live through the daemon yet; the first verify after this lands checks Flowryn's 10 laws and appsec-signal's 1. Later phases of plan p152: global laws (2026-11-27-phase-global-laws-iq.md); filing laws from repeated corrections and re-proving laws weekly (2026-11-27-phase-corrections-become-jx.md)
 
 Phase 1 of plan p152. Each project's AGENTS.md `## Rules and their checks` table (added by the correct skill, docs/notes/2026-11-22-phase-corrections-become-7t.md) is now the project's laws. Verify reads it as data. Before this, nothing read it: a row could name an enforcer that did not exist and nothing would notice.
 
@@ -46,7 +46,7 @@ A row names the commit its enforcer fails at, such as `fails at 2f31e53, passes 
 
 `-` (or an empty cell) is allowed only on a row that the base's table already had: rows recorded before this change. The step reads `AGENTS.md` at the merge base with origin's copy of the PR's base branch, or with the local branch when origin has none (`mergeBaseOf`, `src/verify/changed.ts`). It matches rows by their Rule text, with whitespace collapsed. A new row with `-` fails: "a new law needs Proven on: the commit its enforcer fails at". A reworded old row counts as new. When the base cannot be read, a `-` row fails, because it cannot be told apart from a new one.
 
-The step checks that the commit exists, not that the enforcer fails there. Phase 4 of the plan re-proves laws.
+The step checks that the commit exists, not that the enforcer fails there. The weekly re-prove does that (docs/notes/2026-11-27-phase-corrections-become-jx.md). A test enforcer that ran no test (an emptied test file) fails its law here.
 
 ### Policy and reuse
 

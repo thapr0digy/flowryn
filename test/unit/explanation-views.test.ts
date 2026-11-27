@@ -162,6 +162,7 @@ describe("retention", () => {
       builder: { pass: async () => ({ outcome: "skipped", reason: "off" }) as never },
       busy: () => "a restart is asked for or under way",
       sweep: async () => ({ outcome: "kept", reason: "-", task: "-" }),
+      reprove: async (project) => ({ project: project.id, head: null, skipped: "not under test", laws: [] }),
     });
     const report = await upkeep.pass();
     expect(report.waited).toBe("a restart is asked for or under way");

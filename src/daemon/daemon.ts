@@ -93,6 +93,7 @@ import { evidencePass } from "../attention/evidence-pass.ts";
 import { awayMergePass } from "../attention/away-merge.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
 import { verifyConfig } from "../verify/config.ts";
+import { projectReprover } from "../verify/reprove.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 import { adoptLegacyScope } from "../leader/scope.ts";
@@ -728,6 +729,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         const report = await delivery.cleanup(runId, { discardApproval: null, auto: false, sweep: true });
         return { outcome: report.outcome, reason: report.reason, task: report.task };
       },
+      reprove: projectReprover({ config, db: database, git: deliveryGit }),
     });
     // Policy follow-through: a policy change on a default branch steers that project's in-flight ships to merge it.
     policyFollow = new PolicyFollower({

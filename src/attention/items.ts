@@ -61,7 +61,8 @@ export type ItemClass = "actionable" | "info";
  * build after a Flowryn merge failed; checkout_unsynced, a primary checkout
  * the sync left alone (informational); conflict_nudged, a delivered PR that
  * conflicts sent its ship back to merge its base (informational); and
- * pr_conflict, one that still conflicts after its nudges.
+ * pr_conflict, one that still conflicts after its nudges; laws_unproven, the
+ * weekly re-prove found laws no longer proven (src/verify/reprove.ts).
  * Review feedback (src/reconcile/reviews.ts): review_steered, a delivered PR's
  * new reviews or comments sent its ship back to address them (informational);
  * review_unanswered, a review thread still unanswered after its sends, or more
@@ -147,6 +148,7 @@ export const LANE_TABLE = {
   build_refused: { lane: "P1", class: "actionable" },
   worker_report: { lane: "P1", class: "actionable" },
   build_failed: { lane: "P1", class: "actionable" },
+  laws_unproven: { lane: "P1", class: "actionable" },
   user_acted: { lane: "P1", class: "actionable" },
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
@@ -260,6 +262,7 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   build_refused: "act",
   worker_report: "act",
   build_failed: "act",
+  laws_unproven: "act",
   user_acted: "act",
   landed: "act",
   pr_conflict: "act",

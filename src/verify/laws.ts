@@ -206,6 +206,14 @@ function resolveIn(worktree: string, path: string): { full: string } | { error: 
   return { full };
 }
 
+/** bun's and go's words for a run that found no test: such a run passes, so it must not count as the law holding. */
+const NO_TESTS = /\bRan 0 tests\b|\[no tests to run\]|\[no test files\]/;
+
+/** Whether a test command's output says it ran no test at all. */
+export function ranNoTests(output: string): boolean {
+  return NO_TESTS.test(output);
+}
+
 const BUN_TEST = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
 /** The Go test files of a directory. */
@@ -218,7 +226,7 @@ function goTests(dir: string): string[] {
 }
 
 /** How one path enforcer is checked: a command to run, or confirmed by reading; why not, when it fails before running. */
-function planPath(worktree: string, e: Extract<Enforcer, { kind: "path" }>): { argv: string[]; what: string } | { confirmed: string } | { error: string } {
+export function planPath(worktree: string, e: Extract<Enforcer, { kind: "path" }>): { argv: string[]; what: string } | { confirmed: string } | { error: string } {
   const at = resolveIn(worktree, e.path);
   if ("error" in at) return at;
   const isDir = statSync(at.full).isDirectory();
@@ -238,12 +246,12 @@ function planPath(worktree: string, e: Extract<Enforcer, { kind: "path" }>): { a
   return { confirmed: `${e.path} is there${e.names.length > 0 ? ` and names ${e.names.join(", ")}` : ""}` };
 }
 
-function tail(text: string, lines = 30): string {
+export function tail(text: string, lines = 30): string {
   return text.trimEnd().split("\n").slice(-lines).join("\n");
 }
 
 /** A `hook:` or `verify:` enforcer: confirmed when the rule or step exists; why not, when it does not. */
-function confirmNamed(e: Exclude<Enforcer, { kind: "path" }>, steps: readonly string[]): { done: string } | { error: string } {
+export function confirmNamed(e: Exclude<Enforcer, { kind: "path" }>, steps: readonly string[]): { done: string } | { error: string } {
   if (e.kind === "hook") return (TOOLKIT_RULES as readonly string[]).includes(e.rule) ? { done: `hook rule ${e.rule}` } : { error: `hook: ${e.rule} is not a rule of Flowryn's tool-call hook (${TOOLKIT_RULES.join(", ")})` };
   return new Set(steps.map(normalizeStep)).has(normalizeStep(e.step)) ? { done: `verify step ${e.step}` } : { error: `verify: ${e.step} is not one of the project's verify steps` };
 }
@@ -288,6 +296,7 @@ async function checkLaw(deps: LawsDeps, law: Law, known: Set<string> | null, log
       log.push(`--- ${plan.what} exited ${out.code}`, tail(`${out.stdout}\n${out.stderr}`));
       return fail(out.code === 124 ? `${plan.what} timed out` : `${plan.what} exited ${out.code}`);
     }
+    if (ranNoTests(`${out.stdout}\n${out.stderr}`)) return fail(`${plan.what} ran no tests: an emptied test proves nothing`);
     done.push(`${plan.what} passed`);
   }
   return { rule: law.rule, state: "passed", detail: done.join("; ") };

@@ -189,6 +189,16 @@ describe("checking the laws", () => {
     expect(out.log).toContain("--- bun test t/b.test.ts exited 1");
   });
 
+  test("a test enforcer that runs no test fails its law: an emptied test passes but proves nothing", async () => {
+    const r = repoWith({});
+    r.commit({ "AGENTS.md": table([`| Emptied | t/e.test.ts | fails at ${r.base.slice(0, 8)} |`, `| Kept | t/k.test.ts | fails at ${r.base.slice(0, 8)} |`]), "t/e.test.ts": "", "t/k.test.ts": PASSING_TEST });
+    const out = await lawsOf(r.repo);
+    expect(out.laws.map((l) => [l.state, l.detail])).toEqual([
+      ["failed", "bun test t/e.test.ts ran no tests: an emptied test proves nothing"],
+      ["passed", "bun test t/k.test.ts passed"],
+    ]);
+  });
+
   test("files that hold the rule are confirmed by the names in them; verify: names a configured step", async () => {
     const r = repoWith({});
     const at = r.base.slice(0, 8);
