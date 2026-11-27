@@ -153,3 +153,20 @@ export async function changedSinceBase(git: GitRunner, cwd: string, base: string
   if (diff.code !== 0) return { error: `git diff against ${shown} failed: ${diff.stderr.trim() || `exit ${diff.code}`}` };
   return { files: diff.stdout.split("\0").filter((f) => f.length > 0), base: shown };
 }
+
+/**
+ * Where HEAD left its base: the merge base with origin's copy of the base branch, else with the
+ * local branch (a local-only project may have no origin). Why not, when neither has one.
+ */
+export async function mergeBaseOf(git: GitRunner, cwd: string, base: string | null): Promise<{ sha: string; base: string } | { error: string }> {
+  const ref = await baseRef(git, cwd, base);
+  const tried: string[] = [];
+  for (const candidate of [ref, `refs/heads/${ref.slice(ORIGIN.length)}`]) {
+    const shown = candidate.replace(/^refs\/(remotes|heads)\//, "");
+    const found = await git(["merge-base", candidate, "HEAD"], cwd);
+    if (found.code === 0) return { sha: found.stdout.trim(), base: shown };
+    tried.push(`${shown}: ${found.stderr.trim() || `exit ${found.code}`}`);
+  }
+  return { error: `no merge base (${tried.join("; ")})` };
+}
+

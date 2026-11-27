@@ -1,6 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
+import type { LawResult } from "./laws.ts";
 import type { TestCounts } from "./summary.ts";
 
 /**
@@ -46,6 +47,8 @@ export interface VerifyStep {
    * command (`command`, the failing packages or files filled in). It passes only when every run did.
    */
   rerun?: { of: string; command: string; passes: number; tests: string[] };
+  /** The laws step's result for each law of the table (src/verify/laws.ts). Absent on any other step. */
+  laws?: LawResult[];
 }
 
 /** What a verification cut off by a daemon stop records (src/verify/runner.ts): never judged. */
@@ -89,6 +92,20 @@ export interface Verification extends Omit<VerificationRow, "steps" | "tests"> {
 
 export function parseVerification(row: VerificationRow): Verification {
   return { ...row, steps: JSON.parse(row.steps) as VerifyStep[], tests: row.tests ? (JSON.parse(row.tests) as TestCounts) : null };
+}
+
+/** How many of a project's newest finished verifications `lastLawsCheck` reads for a laws step that ran. */
+const LAWS_LOOKBACK = 50;
+
+/** The newest finished verification of the project whose laws step ran, with its per-law results; null when none did. */
+export function lastLawsCheck(db: Db, projectId: string): { verification: Verification; laws: LawResult[] } | null {
+  const rows = db.query("SELECT * FROM verifications WHERE project_id = ?1 AND state <> 'running' ORDER BY started_at DESC, rowid DESC LIMIT ?2").all(projectId, LAWS_LOOKBACK) as VerificationRow[];
+  for (const row of rows) {
+    const v = parseVerification(row);
+    const laws = v.steps.find((s) => s.laws !== undefined)?.laws;
+    if (laws) return { verification: v, laws };
+  }
+  return null;
 }
 
 export function getVerification(db: Db, id: string): Verification | null {

@@ -47,7 +47,10 @@ Add one row to the project's AGENTS.md rule↔enforcer table (create it, under "
 |---|---|---|
 | Labels are single words | test/ui/labels.test.ts | fails at 1a2b3c4, passes at HEAD |
 
-A rule that only lives in prose has "doc" in the second column. Remove the prose rule the check replaces.
+Verify reads the table (\`flowryn laws <project>\`) and refuses a head whose row it cannot check:
+- Enforced by: a test file it runs (\`*.test.ts\`, a Go package \`internal/x\` with its \`TestName\`), a file that must hold a name (\`.oxlintrc.json\` \`no-shadow\`), or \`verify: <step>\`. Separate several with ";".
+- Proven on: the commit it fails at. A new row without one is refused.
+A doc rule names its file and words: \`AGENTS.md\` \`never rebase\`. Remove the prose rule the check replaces.
 
 ## As the weekly corrections scout
 You change no code. Report with \`$FLOWRYN_BIN deliver --report\`: \`## Short answer\` (at most 15 lines), then \`## ${CHECKS_HEADING}\`, one entry per class, at most five:

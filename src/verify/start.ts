@@ -91,7 +91,7 @@ export function resumeSteps(from: Verification, steps: readonly VerifyStep[]): V
 /** Take the request's slot and insert its running verification. Call inside a transaction; throws OverCapacity when the pool is full. */
 export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfig, caps: Record<string, number>, root: string, projectPath: string, now: number): Verification {
   const policy = verifyPolicyId(config);
-  const steps = initialSteps(config.steps, config.when_changed);
+  const steps = initialSteps(config.steps, config.when_changed, config.laws === true);
   // A landing batch's flake rerun (src/verify/flake.ts): the failed step runs only its failing tests.
   const flake = request.policy_id === policy ? pendingFlakeAt(db, request.pr_url, request.head_sha) : null;
   const fresh = flake ? withRerun(steps, flake) : steps;
