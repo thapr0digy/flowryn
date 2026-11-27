@@ -5,7 +5,7 @@ import { tx, type Db } from "../db/db.ts";
 import { classPass, correctionsDueAt, correctionsPass, CORRECTIONS_WINDOW_MS, type ClassPass, type CorrectionsPass } from "../leader/corrections.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { recordReproofs, reproveDueAt, REPROVE_WINDOW_MS, type ProjectReproof } from "../verify/reprove.ts";
+import { lastReproved, recordReproof, reproveDue, reproveDueAt, type ProjectReproof } from "../verify/reprove.ts";
 import type { BuildPass, MergeBuilder } from "./build.ts";
 import { sweepCandidates } from "./sweep.ts";
 import { recordSync, syncPrimary } from "./sync.ts";
@@ -23,8 +23,9 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * between weeks a scout for a repeated class (src/leader/corrections.ts): each
  * one SQLite transaction, no checkout. Last, once a week and not while busy, it
  * starts the re-prove of every project's laws in a throwaway checkout
- * (src/verify/reprove.ts), which runs on past the pass so later passes are not held up;
- * they build nothing until it ends, since a build's restart would throw it away.
+ * (src/verify/reprove.ts), which runs on past the pass so later passes are not held up.
+ * Each project's result is recorded as it finishes, so a build's restart loses at most the
+ * project under way, and the next start re-proves only the projects not yet done this week.
  * The fourth hook, the conflict nudge, rides the delivery watcher's PR reads
  * (src/reconcile/delivery.ts).
  *
@@ -36,8 +37,6 @@ import { recordSync, syncPrimary } from "./sync.ts";
 
 /** A kick's pass starts after this pause, so a landing's own cleanup settles first. */
 export const KICK_DELAY_MS = 1_000;
-/** Why a build waits: the restart it brings would stop the weekly re-prove under way. */
-export const REPROVING = "laws are being re-proved";
 /** Between weekly corrections passes, a repeated class is looked for at most this often. */
 export const CLASS_CHECK_MS = 60 * 60_000;
 
@@ -84,7 +83,7 @@ export class Upkeep {
   private correctionsDue = 0;
   /** When a repeated class is next looked for. */
   private classDue = 0;
-  /** When the weekly re-prove is next due, as last read (0: read it on the next pass). */
+  /** When a project's weekly re-prove is next due, as last read (0: read it on the next pass). */
   private reproveDue = 0;
   /** Ends a re-prove under way when the loop stops. */
   private reproving: AbortController | null = null;
@@ -198,10 +197,15 @@ export class Upkeep {
     }
   }
 
-  /** Start the weekly re-prove when it is due and none is under way; it runs on past the pass. */
+  /** The projects whose laws are re-proved: those not removed. */
+  private reprovable(): ProjectRow[] {
+    return this.deps.projects().filter((p) => p.removed_at == null);
+  }
+
+  /** Start the weekly re-prove when a project's is due and none is under way; it runs on past the pass. */
   private startReprove(): Promise<ProjectReproof[] | undefined> | undefined {
     if (this.reproveRun) return undefined;
-    if (this.reproveDue === 0) this.reproveDue = reproveDueAt(this.deps.db);
+    if (this.reproveDue === 0) this.reproveDue = reproveDueAt(this.deps.db, this.reprovable().map((p) => p.id), this.deps.now());
     if (this.deps.now() < this.reproveDue) return undefined;
     const run = this.reprove().finally(() => {
       this.reproveRun = null;
@@ -210,26 +214,36 @@ export class Upkeep {
     return run;
   }
 
-  /** The weekly re-prove of every project's laws; recorded only when it ran to its end, so a stopped one runs again. */
+  /**
+   * Re-prove the laws of each project not re-proved this week, recording each as it finishes, so a
+   * stop loses only the project under way; the next start re-proves the rest.
+   */
   private async reprove(): Promise<ProjectReproof[] | undefined> {
-    const now = this.deps.now();
     const controller = new AbortController();
     this.reproving = controller;
     try {
+      const projects = this.reprovable();
+      const last = lastReproved(this.deps.db);
       const results: ProjectReproof[] = [];
-      for (const project of this.deps.projects()) {
-        if (project.removed_at != null) continue;
+      for (const project of projects) {
+        if (!reproveDue(last, project.id, this.deps.now())) continue;
         if (this.stopped || controller.signal.aborted) return undefined;
-        results.push(await this.deps.reprove(project, controller.signal));
+        const result = await this.deps.reprove(project, controller.signal);
+        // Cut off by the stop: its laws were not all re-proved, so it runs again at the next start.
+        if (controller.signal.aborted) return undefined;
+        const items = recordReproof(this.deps.db, result, this.deps.now());
+        results.push(result);
+        if (result.skipped !== null) this.deps.log(`upkeep: re-proving laws in ${project.id} skipped (${result.skipped})`);
+        else {
+          const unproven = result.laws.filter((l) => l.state === "unproven").length;
+          const unrun = result.laws.filter((l) => l.state === "unrun").length;
+          this.deps.log(`upkeep: re-proved ${result.laws.length} laws in ${project.id}; ${unproven} no longer proven${unrun > 0 ? `; ${unrun} could not run` : ""}${items.length > 0 ? ` (${items.join(", ")})` : ""}`);
+        }
       }
-      if (controller.signal.aborted) return undefined;
-      const items = recordReproofs(this.deps.db, results, this.deps.now());
-      this.reproveDue = now + REPROVE_WINDOW_MS;
-      const unproven = results.flatMap((r) => r.laws.filter((l) => l.state === "unproven"));
-      this.deps.log(`upkeep: re-proved laws in ${results.filter((r) => r.skipped === null).length} projects; ${unproven.length} no longer proven${items.length > 0 ? ` (${items.join(", ")})` : ""}`);
+      this.reproveDue = reproveDueAt(this.deps.db, projects.map((p) => p.id), this.deps.now());
       return results;
     } catch (error) {
-      // Tried again at the next pass; the sync, build and sweep already ran.
+      // Tried again at the next pass, for the projects not yet recorded; the sync, build and sweep already ran.
       this.deps.log(`upkeep: re-proving laws failed: ${(error as Error).message}`);
       return undefined;
     } finally {
@@ -255,7 +269,7 @@ export class Upkeep {
       }
     }
     if (config.build_after_merge && !this.deps.busy()) {
-      report.build = this.reproveRun ? { outcome: "skipped", reason: REPROVING } : await this.deps.builder.pass();
+      report.build = await this.deps.builder.pass();
       // A skip is logged when its reason changes, not every pass.
       const skip = report.build.outcome === "skipped" ? report.build.reason : null;
       if (skip && skip !== this.lastSkip) this.deps.log(`upkeep build: skipped (${skip})`);
