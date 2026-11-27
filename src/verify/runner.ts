@@ -16,7 +16,7 @@ import { failedReleases, projectRelease, runRelease } from "../lifecycle/release
 import type { FlowrynConfig } from "../config/config.ts";
 import { anyMatches, baseKey, changedSinceBase, commitTree, type ChangedFiles } from "./changed.ts";
 import { LAWS_STEP, REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
-import { checkLaws, lawsSummary, type LawResult } from "./laws.ts";
+import { checkLaws, lawsSummary, type LawResult, type LawsOutcome } from "./laws.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
@@ -389,7 +389,7 @@ async function reviewStep(deps: VerifyDeps, job: Job, v: Verification, plan: Ver
  * enforcer run through runBounded (argv, never a shell) by the step's deadline. Exit 0 when every
  * law holds or there is no table, 1 when one fails; the run's deadline is a run timeout as for any step.
  */
-async function lawsStep(deps: VerifyDeps, job: Job, v: Verification, plan: VerifyPlan, logPath: string, env: Record<string, string>, deadline: number, runDeadline: number): Promise<StepResult & { laws: LawResult[]; summary: string | null }> {
+async function lawsStep(deps: VerifyDeps, job: Job, v: Verification, plan: VerifyPlan, logPath: string, env: Record<string, string>, deadline: number, runDeadline: number): Promise<StepResult & { laws: LawResult[] | undefined; summary: string | null }> {
   const controller = new AbortController();
   job.calls.add(controller);
   try {
@@ -410,12 +410,18 @@ async function lawsStep(deps: VerifyDeps, job: Job, v: Verification, plan: Verif
     } finally {
       closeSync(fd);
     }
-    const failed = outcome.aborted || outcome.error !== null || outcome.laws.some((l) => l.state === "failed");
-    const timedOut = failed && !outcome.aborted && Date.now() >= runDeadline ? "run" : null;
-    return { exit: failed ? 1 : 0, timedOut, stopped: false, laws: outcome.laws, summary: lawsSummary(outcome) };
+    const step = lawsStepResult(outcome);
+    const timedOut = step.exit !== 0 && !outcome.aborted && Date.now() >= runDeadline ? "run" : null;
+    return { ...step, timedOut, stopped: false };
   } finally {
     job.calls.delete(controller);
   }
+}
+
+/** What the laws step records from a check: exit 1 when a law failed or the check was stopped, and no per-law results from a stopped check. */
+export function lawsStepResult(outcome: LawsOutcome): { exit: number; laws: LawResult[] | undefined; summary: string | null } {
+  const failed = outcome.aborted || outcome.error !== null || outcome.laws.some((l) => l.state === "failed");
+  return { exit: failed ? 1 : 0, laws: outcome.aborted ? undefined : outcome.laws, summary: lawsSummary(outcome) };
 }
 
 /** A review step that ended with no verdict: not the worker's to fix (src/verify/auto-merge.ts holds it). */

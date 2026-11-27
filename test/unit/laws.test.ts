@@ -8,9 +8,9 @@ import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { grantJobLease } from "../../src/sched/pools.ts";
 import { LAWS_STEP, lightVerifyConfig, REVIEW_STEP, verifyConfig } from "../../src/verify/config.ts";
-import { checkLaws, lawsSummary, parseEnforcers, parseLaws, provenCommits, type CommandRunner } from "../../src/verify/laws.ts";
+import { checkLaws, parseEnforcers, parseLaws, provenCommits, type CommandRunner } from "../../src/verify/laws.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
-import { initialSteps, runVerification } from "../../src/verify/runner.ts";
+import { initialSteps, lawsStepResult, runVerification } from "../../src/verify/runner.ts";
 import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
 import { VERIFY_VERBS } from "../../src/verify/verbs.ts";
 
@@ -164,7 +164,14 @@ describe("checking the laws", () => {
     stop.abort();
     const out = await checkLaws({ git: gitRunner("git", 30_000), run: realRun, worktree: r.repo, base: "main", steps: [], env, deadline: Date.now() + 120_000, now: Date.now, signal: stop.signal });
     expect(out).toMatchObject({ aborted: true, laws: [], error: null });
-    expect(lawsSummary(out)).toBe("laws: stopped after 0 laws checked");
+    expect(lawsStepResult(out)).toEqual({ exit: 1, laws: undefined, summary: "laws: stopped after 0 laws checked" });
+  });
+
+  test("a check stopped mid-law records no per-law results, so `flowryn laws` never shows the cut-off law as failed", () => {
+    const cut = { rule: "One", state: "failed" as const, detail: "bun test t/a.test.ts exited 125" };
+    expect(lawsStepResult({ note: null, laws: [cut], error: null, log: "", aborted: true })).toEqual({ exit: 1, laws: undefined, summary: "laws: stopped after 1 law checked" });
+    const held = { rule: "One", state: "passed" as const, detail: "bun test t/a.test.ts passed" };
+    expect(lawsStepResult({ note: null, laws: [held], error: null, log: "", aborted: false })).toEqual({ exit: 0, laws: [held], summary: "1 law holds" });
   });
 
   test("a failing test enforcer fails its law, with the test's output in the log", async () => {

@@ -7,7 +7,7 @@ Phase 1 of plan p152. Each project's AGENTS.md `## Rules and their checks` table
 
 ## The laws step
 
-Every project's `flowryn verify` has a built-in step, `flowryn:laws` (`LAWS_STEP`). It runs as a group of its own after the configured steps, so install and build have run first, but before a `{ review = true }` step, so a broken table fails before the paid review. A daemon stop in the middle of the step fails it (`laws: stopped after N laws checked`), so a resumed verify checks every law again. You do not configure it, and no project can turn it off. The light check of a batch project does not run it; the batch's full verify does.
+Every project's `flowryn verify` has a built-in step, `flowryn:laws` (`LAWS_STEP`). It runs as a group of its own after the configured steps, so install and build have run first, but before a `{ review = true }` step, so a broken table fails before the paid review. A daemon stop in the middle of the step fails it (`laws: stopped after N laws checked`) and keeps no per-law results, so a resumed verify checks every law again and `flowryn laws` never shows a law the stop cut off. You do not configure it, and no project can turn it off. The light check of a batch project does not run it; the batch's full verify does.
 
 The step runs in the daemon, like the review step (`src/verify/laws.ts`, called from `src/verify/runner.ts`). It reads `AGENTS.md` at the head being verified:
 
