@@ -37,6 +37,7 @@ describe("the weekly corrections scout", () => {
       "### Labels are single words",
       "Evidence: l1, l2",
       "Enforcer: test",
+      "Law: | Labels are single words | test/ui/labels.test.ts | fails at 1a2b3c4 |",
       "A test over every label.",
       "### A one-off",
       "Evidence: l1",

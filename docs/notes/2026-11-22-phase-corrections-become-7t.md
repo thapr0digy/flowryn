@@ -24,6 +24,8 @@ Flowryn's own table is in AGENTS.md.
 
 ## The weekly pass
 
+Since docs/notes/2026-11-27-phase-corrections-become-jx.md: a repeated class files its scout between weekly passes, each scout's list starts where the project's last one ended, each check carries its `Law:` row, and the weekly pass also files a one-time learnings sweep and re-proves every law.
+
 `correctionsPass` (`src/leader/corrections.ts`) runs in the upkeep loop beside the prune. It is due when no `corrections.pass` event is younger than 7 days, so the event is its only state. No index serves events by kind, so the loop keeps the due time in memory (`correctionsDueAt`) and reads events again only once it is due, or after a daemon start. For each project that is not removed, it reads the last 7 days' corrections (`correctionsOf`):
 
 | source | id | what counts |
