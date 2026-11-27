@@ -205,6 +205,7 @@ describe("a removed project is skipped", () => {
       builder: { pass: async () => ({ outcome: "skipped", reason: "off" }) },
       busy: () => null,
       sweep: async () => ({ outcome: "kept", reason: "-", task: "-" }),
+      reprove: async (project) => ({ project: project.id, head: null, skipped: "not under test", laws: [] }),
     });
     for (const p of ["web", "api"]) mkdirSync(join(dir, p));
     await upkeep.pass();

@@ -88,12 +88,14 @@ describe("conflictAction", () => {
 interface Loop {
   upkeep: Upkeep;
   calls: string[];
+  /** Projects re-proved, in order. */
+  reproved: string[];
   busy: string | null;
   config: UpkeepConfig;
 }
 
 function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "skipped", reason: "the daemon runs this commit" }): Loop {
-  const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over } };
+  const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], reproved: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over } };
   l.upkeep = new Upkeep({
     db,
     config: () => l.config,
@@ -116,6 +118,10 @@ function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "s
       l.calls.push(`sweep ${runId}`);
       return { outcome: "removed", reason: "landed", task: `t-${runId}` };
     },
+    reprove: async (project) => {
+      l.reproved.push(project.id);
+      return { project: project.id, head: "abc123", skipped: null, laws: [{ rule: "Tests stay", state: "unproven", detail: "bun test ./a.test.ts passes at 1a2b3c4: it no longer fails where the mistake was" }] };
+    },
   });
   return l;
 }
@@ -124,9 +130,33 @@ describe("the upkeep pass", () => {
   test("the weekly corrections pass runs on the first pass, then waits a week without reading events again (src/leader/corrections.ts)", async () => {
     const l = loop();
     const first = await l.upkeep.pass();
-    expect(first.corrections).toEqual({ since: 100 * HOUR - 7 * 24 * HOUR, until: 100 * HOUR, filed: [], skipped: [] });
+    expect(first.corrections).toEqual({ since: 100 * HOUR - 7 * 24 * HOUR, until: 100 * HOUR, filed: [], skipped: [], swept: [] });
     expect((await l.upkeep.pass()).corrections).toBeNull();
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'corrections.pass'").get()).toEqual({ n: 1 });
+  });
+
+  test("the weekly pass and the class check never run in one pass; the class check then runs at most hourly", async () => {
+    const l = loop();
+    const first = await l.upkeep.pass();
+    expect(first.repeats).toBeNull();
+    expect((await l.upkeep.pass()).repeats).toEqual({ filed: [] });
+    expect((await l.upkeep.pass()).repeats).toBeNull();
+  });
+
+  test("laws are re-proved after the sweep, once a week: one event, an item for a law no longer proven; not while busy (src/verify/reprove.ts)", async () => {
+    const l = loop();
+    l.busy = "a cleanup is running";
+    expect((await l.upkeep.pass()).reproved).toBeUndefined();
+    expect(l.reproved).toEqual([]);
+    l.busy = null;
+    const report = await l.upkeep.pass();
+    expect(l.reproved).toEqual(["web"]);
+    expect(report.reproved!.map((r) => r.project)).toEqual(["web"]);
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'laws.reproved'").get()).toEqual({ n: 1 });
+    const item = db.query("SELECT kind, line FROM items WHERE kind = 'laws_unproven'").get() as { kind: string; line: string };
+    expect(item.line).toStartWith("Laws no longer proven in web (1 of 1, re-proved at abc123): Tests stay: bun test ./a.test.ts passes at 1a2b3c4");
+    expect((await l.upkeep.pass()).reproved).toBeUndefined();
+    expect(l.reproved).toEqual(["web"]);
   });
 
   test("in order: build after the syncs, then the sweep of each candidate", async () => {

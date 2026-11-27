@@ -2,9 +2,10 @@ import type { UpkeepConfig } from "../config/upkeep.ts";
 import { pruneExplanations, type PruneReport } from "../attention/explanations.ts";
 import { closeSeenInfoItems, INFO_KEEP_MS } from "../attention/items.ts";
 import { tx, type Db } from "../db/db.ts";
-import { correctionsDueAt, correctionsPass, CORRECTIONS_WINDOW_MS, type CorrectionsPass } from "../leader/corrections.ts";
+import { classPass, correctionsDueAt, correctionsPass, CORRECTIONS_WINDOW_MS, type ClassPass, type CorrectionsPass } from "../leader/corrections.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
+import { recordReproofs, reproveDueAt, REPROVE_WINDOW_MS, type ProjectReproof } from "../verify/reprove.ts";
 import type { BuildPass, MergeBuilder } from "./build.ts";
 import { sweepCandidates } from "./sweep.ts";
 import { recordSync, syncPrimary } from "./sync.ts";
@@ -17,10 +18,13 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * (`clean_ended_hours`). Before all three, and even when the pass otherwise
  * waits, it prunes closed wait explanations past their retention
  * (`explanations_keep_days`, `explanations_keep_per_run`) and closes
- * informational items presented over a day ago (closeSeenInfoItems), and once a
- * week files the corrections scouts (src/leader/corrections.ts): each one
- * SQLite transaction, no checkout. The fourth hook, the conflict nudge, rides the
- * delivery watcher's PR reads (src/reconcile/delivery.ts).
+ * informational items presented over a day ago (closeSeenInfoItems), once a
+ * week files the corrections scouts and learnings sweeps, and at most hourly
+ * between weeks a scout for a repeated class (src/leader/corrections.ts): each
+ * one SQLite transaction, no checkout. Last, once a week and not while busy, it
+ * re-proves every project's laws in a throwaway checkout (src/verify/reprove.ts).
+ * The fourth hook, the conflict nudge, rides the delivery watcher's PR reads
+ * (src/reconcile/delivery.ts).
  *
  * A pass runs every `interval_ms` and soon after a run lands (`kick`), never
  * two at once, and not while a restart is asked for or under way, or while a
@@ -30,6 +34,8 @@ import { recordSync, syncPrimary } from "./sync.ts";
 
 /** A kick's pass starts after this pause, so a landing's own cleanup settles first. */
 export const KICK_DELAY_MS = 1_000;
+/** Between weekly corrections passes, a repeated class is looked for at most this often. */
+export const CLASS_CHECK_MS = 60 * 60_000;
 
 export interface UpkeepDeps {
   db: Db;
@@ -43,6 +49,8 @@ export interface UpkeepDeps {
   busy(): string | null;
   /** The cleanup guard's path (`flowryn cleanup` with no discard), recorded as the sweep's. */
   sweep(runId: string): Promise<{ outcome: string; reason: string; task: string }>;
+  /** Re-prove one project's laws (src/verify/reprove.ts); the signal ends it when the loop stops. */
+  reprove(project: ProjectRow, signal: AbortSignal): Promise<ProjectReproof>;
 }
 
 export interface PassReport {
@@ -52,9 +60,13 @@ export interface PassReport {
   infoClosed: string[];
   /** The weekly corrections pass (src/leader/corrections.ts), or null when it was not due. */
   corrections: CorrectionsPass | null;
+  /** Scouts filed between weeks for a repeated class, or null when not looked for this pass. */
+  repeats?: ClassPass | null;
   synced: string[];
   build: BuildPass | null;
   swept: { run: string; outcome: string; reason: string }[];
+  /** The weekly re-prove of every project's laws, when it ran this pass. */
+  reproved?: ProjectReproof[];
 }
 
 export class Upkeep {
@@ -66,6 +78,12 @@ export class Upkeep {
   private lastSkip: string | null = null;
   /** When the weekly corrections pass is next due, as last read (0: read it on the next pass). */
   private correctionsDue = 0;
+  /** When a repeated class is next looked for. */
+  private classDue = 0;
+  /** When the weekly re-prove is next due, as last read (0: read it on the next pass). */
+  private reproveDue = 0;
+  /** Ends a re-prove under way when the loop stops. */
+  private reproving: AbortController | null = null;
 
   constructor(deps: UpkeepDeps) {
     this.deps = deps;
@@ -83,6 +101,7 @@ export class Upkeep {
     if (this.kickTimer) clearTimeout(this.kickTimer);
     this.timer = null;
     this.kickTimer = null;
+    this.reproving?.abort();
     await this.running;
   }
 
@@ -148,6 +167,7 @@ export class Upkeep {
       const pass = correctionsPass(this.deps.db, this.deps.projects(), now);
       this.correctionsDue = pass ? now + CORRECTIONS_WINDOW_MS : correctionsDueAt(this.deps.db);
       if (pass && pass.filed.length > 0) this.deps.log(`upkeep: filed ${pass.filed.length} corrections scouts (${pass.filed.map((f) => `${f.project} ${f.task}`).join(", ")})`);
+      if (pass && pass.swept.length > 0) this.deps.log(`upkeep: filed ${pass.swept.length} learnings sweeps (${pass.swept.map((f) => `${f.project} ${f.task}`).join(", ")})`);
       return pass;
     } catch (error) {
       // Like a failed prune, it must not stop the sync, build and sweep behind it; the next pass tries again.
@@ -156,9 +176,54 @@ export class Upkeep {
     }
   }
 
+  /** Between weekly passes, at most hourly: a scout for a project whose corrections repeat. */
+  private repeats(weekly: CorrectionsPass | null): ClassPass | null {
+    const now = this.deps.now();
+    if (weekly || now < this.classDue) return null;
+    this.classDue = now + CLASS_CHECK_MS;
+    try {
+      const pass = classPass(this.deps.db, this.deps.projects(), now);
+      if (pass.filed.length > 0) this.deps.log(`upkeep: filed ${pass.filed.length} corrections scouts for a repeat (${pass.filed.map((f) => `${f.project} ${f.task}: ${f.repeat.join(", ")}`).join("; ")})`);
+      return pass;
+    } catch (error) {
+      this.deps.log(`upkeep: looking for repeated corrections failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /** The weekly re-prove of every project's laws; recorded only when it ran to its end, so a stopped one runs again. */
+  private async reprove(): Promise<ProjectReproof[] | undefined> {
+    const now = this.deps.now();
+    if (this.reproveDue === 0) this.reproveDue = reproveDueAt(this.deps.db);
+    if (now < this.reproveDue) return undefined;
+    const controller = new AbortController();
+    this.reproving = controller;
+    try {
+      const results: ProjectReproof[] = [];
+      for (const project of this.deps.projects()) {
+        if (project.removed_at != null) continue;
+        if (this.stopped || controller.signal.aborted) return undefined;
+        results.push(await this.deps.reprove(project, controller.signal));
+      }
+      if (controller.signal.aborted) return undefined;
+      const items = recordReproofs(this.deps.db, results, this.deps.now());
+      this.reproveDue = now + REPROVE_WINDOW_MS;
+      const unproven = results.flatMap((r) => r.laws.filter((l) => l.state === "unproven"));
+      this.deps.log(`upkeep: re-proved laws in ${results.filter((r) => r.skipped === null).length} projects; ${unproven.length} no longer proven${items.length > 0 ? ` (${items.join(", ")})` : ""}`);
+      return results;
+    } catch (error) {
+      // Tried again at the next pass; the sync, build and sweep already ran.
+      this.deps.log(`upkeep: re-proving laws failed: ${(error as Error).message}`);
+      return undefined;
+    } finally {
+      this.reproving = null;
+    }
+  }
+
   private async passOnce(): Promise<PassReport> {
     const config = this.deps.config();
-    const report: PassReport = { pruned: this.prune(config), infoClosed: this.closeInfo(), corrections: this.corrections(), synced: [], build: null, swept: [] };
+    const corrections = this.corrections();
+    const report: PassReport = { pruned: this.prune(config), infoClosed: this.closeInfo(), corrections, repeats: this.repeats(corrections), synced: [], build: null, swept: [] };
     const waiting = this.deps.busy();
     if (waiting) {
       report.waited = waiting;
@@ -184,6 +249,10 @@ export class Upkeep {
       const result = await this.deps.sweep(runId);
       report.swept.push({ run: runId, outcome: result.outcome, reason: result.reason });
       this.deps.log(`upkeep: swept ${result.task}: ${result.outcome} (${result.reason})`);
+    }
+    if (!this.stopped && !this.deps.busy()) {
+      const reproved = await this.reprove();
+      if (reproved) report.reproved = reproved;
     }
     return report;
   }
