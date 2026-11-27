@@ -208,10 +208,33 @@ export function projectReprover(input: { config: FlowrynConfig; db: Db; git: Git
   };
 }
 
-/** When the next re-prove is due: a week after the last one's event (its only state), or 0 when none ran. */
-export function reproveDueAt(db: Db): number {
-  const last = db.query("SELECT ts FROM events WHERE kind = ?1 ORDER BY seq DESC LIMIT 1").get(REPROVE_KIND) as { ts: number } | null;
-  return last ? last.ts + REPROVE_WINDOW_MS : 0;
+/**
+ * When each project's laws were last re-proved: its newest `laws.reproved` event. An event holds one
+ * project's result; one from before results were recorded per project lists them all under `projects`.
+ */
+export function lastReproved(db: Db): Map<string, number> {
+  const rows = db.query("SELECT ts, payload FROM events WHERE kind = ?1 ORDER BY seq").all(REPROVE_KIND) as { ts: number; payload: string }[];
+  const last = new Map<string, number>();
+  for (const row of rows) {
+    const payload = JSON.parse(row.payload) as { project?: unknown; projects?: { project?: unknown }[] };
+    const named = typeof payload.project === "string" ? [payload.project] : (payload.projects ?? []).map((r) => r.project);
+    for (const project of named) if (typeof project === "string") last.set(project, row.ts);
+  }
+  return last;
+}
+
+/** Whether a project's last re-prove is a week old or it has none. */
+export function reproveDue(last: ReadonlyMap<string, number>, project: string, now: number): boolean {
+  const at = last.get(project);
+  return at === undefined || at + REPROVE_WINDOW_MS <= now;
+}
+
+/** When the next re-prove is due: a week after the oldest of these projects' last re-proves, now when one has none, or a week from now with no projects. */
+export function reproveDueAt(db: Db, projects: readonly string[], now: number): number {
+  const last = lastReproved(db);
+  let due = now + REPROVE_WINDOW_MS;
+  for (const project of projects) due = Math.min(due, (last.get(project) ?? now - REPROVE_WINDOW_MS) + REPROVE_WINDOW_MS);
+  return due;
 }
 
 /** How a project's unproven-laws item starts, so its next re-prove can find it. */
@@ -235,17 +258,13 @@ function resolveUnproven(db: Db, project: string, now: number): void {
   for (const { id } of open) resolveItem(db, id, "laws re-proved again", now);
 }
 
-/** Record one re-prove: one event, and for each project re-proved, its last item replaced by one when a law is no longer proven. Returns the items opened. */
-export function recordReproofs(db: Db, results: readonly ProjectReproof[], now: number): string[] {
+/** Record one project's re-prove as it finishes: its event, and when it was re-proved, its last item replaced by one when a law is no longer proven. Returns the item opened, or null. */
+export function recordReproof(db: Db, result: ProjectReproof, now: number): string | null {
   return tx(db, () => {
-    const event = appendEvent(db, { source: "daemon", kind: REPROVE_KIND, payload: { projects: results }, ts: now });
-    const items: string[] = [];
-    for (const r of results) {
-      if (r.skipped !== null) continue;
-      resolveUnproven(db, r.project, now);
-      const line = unprovenLine(r);
-      if (line) items.push(openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line, now }));
-    }
-    return items;
+    const event = appendEvent(db, { source: "daemon", kind: REPROVE_KIND, payload: result, ts: now });
+    if (result.skipped !== null) return null;
+    resolveUnproven(db, result.project, now);
+    const line = unprovenLine(result);
+    return line ? openItem(db, { kind: "laws_unproven", eventSeq: event.seq, line, now }) : null;
   });
 }

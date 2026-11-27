@@ -8,7 +8,7 @@ import { MAX_CONFLICT_NUDGES, conflictAction } from "../../src/reconcile/deliver
 import type { BuildPass } from "../../src/upkeep/build.ts";
 import { sweepCandidates } from "../../src/upkeep/sweep.ts";
 import { Upkeep, type UpkeepDeps } from "../../src/upkeep/upkeep.ts";
-import { recordReproofs } from "../../src/verify/reprove.ts";
+import { recordReproof } from "../../src/verify/reprove.ts";
 import { insertProject } from "../../src/lifecycle/projects.ts";
 import { projectAt } from "../helpers/scratch-git.ts";
 
@@ -93,10 +93,12 @@ interface Loop {
   reproved: string[];
   busy: string | null;
   config: UpkeepConfig;
+  /** The projects' ids. */
+  projects: string[];
 }
 
 function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "skipped", reason: "the daemon runs this commit" }, reprove?: UpkeepDeps["reprove"]): Loop {
-  const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], reproved: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over } };
+  const l: Loop = { upkeep: null as unknown as Upkeep, calls: [], reproved: [], busy: null, config: { ...DEFAULT_UPKEEP, ...over }, projects: ["web"] };
   l.upkeep = new Upkeep({
     db,
     config: () => l.config,
@@ -107,7 +109,7 @@ function loop(over: Partial<UpkeepConfig> = {}, build: BuildPass = { outcome: "s
       l.calls.push(`git ${args[0]}`);
       return { code: 1, stdout: "", stderr: "" };
     },
-    projects: () => [{ id: "web", path: join(dir, "missing"), default_branch: "main" } as never],
+    projects: () => l.projects.map((id) => ({ id, path: join(dir, "missing"), default_branch: "main" }) as never),
     builder: {
       pass: async () => {
         l.calls.push("build");
@@ -145,7 +147,7 @@ describe("the upkeep pass", () => {
     expect((await l.upkeep.pass()).repeats).toBeNull();
   });
 
-  test("laws are re-proved after the sweep, once a week: one event, an item for a law no longer proven; not while busy (src/verify/reprove.ts)", async () => {
+  test("laws are re-proved after the sweep, once a week: one event per project, an item for a law no longer proven; not while busy (src/verify/reprove.ts)", async () => {
     const l = loop();
     l.busy = "a cleanup is running";
     expect((await l.upkeep.pass()).reproving).toBeUndefined();
@@ -161,7 +163,7 @@ describe("the upkeep pass", () => {
     expect(l.reproved).toEqual(["web"]);
   });
 
-  test("a re-prove runs on past its pass: later passes sweep meanwhile, build nothing (its restart would stop the re-prove), and start no second re-prove", async () => {
+  test("a re-prove runs on past its pass: later passes sweep and build meanwhile (a restart keeps the projects done), and start no second re-prove", async () => {
     let finish!: () => void;
     const held = new Promise<void>((resolve) => (finish = resolve));
     let starts = 0;
@@ -176,23 +178,50 @@ describe("the upkeep pass", () => {
     seedRun("a", "cancelled", 0);
     const second = await l.upkeep.pass();
     expect(second.swept.map((s) => s.run)).toEqual(["a"]);
-    expect(second.build).toEqual({ outcome: "skipped", reason: "laws are being re-proved" });
-    expect(l.calls.filter((c) => c === "build")).toHaveLength(1);
+    expect(second.build).toEqual({ outcome: "skipped", reason: "the daemon runs this commit" });
+    expect(l.calls.filter((c) => c === "build")).toHaveLength(2);
     expect(second.reproving).toBeUndefined();
     finish();
     expect(await first.reproving).toEqual([{ project: "web", head: "abc123", skipped: null, laws: [] }]);
     expect(starts).toBe(1);
-    await l.upkeep.pass();
-    expect(l.calls.filter((c) => c === "build")).toHaveLength(2);
+  });
+
+  test("each project's result is recorded as it finishes: a restart after web finished re-proves only api, and nothing again until a week has passed", async () => {
+    let started!: () => void;
+    const apiStarted = new Promise<void>((resolve) => (started = resolve));
+    const before = loop({}, undefined, async (project, signal) => {
+      before.reproved.push(project.id);
+      if (project.id === "api") {
+        started();
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+      }
+      return { project: project.id, head: "abc123", skipped: null, laws: [] };
+    });
+    before.projects = ["web", "api"];
+    const report = await before.upkeep.pass();
+    await apiStarted;
+    await before.upkeep.stop();
+    expect(await report.reproving).toBeUndefined();
+    expect(before.reproved).toEqual(["web", "api"]);
+    const recorded = db.query("SELECT json_extract(payload, '$.project') AS project FROM events WHERE kind = 'laws.reproved'").all();
+    expect(recorded).toEqual([{ project: "web" }]);
+
+    const after = loop();
+    after.projects = ["web", "api"];
+    const restarted = await after.upkeep.pass();
+    expect((await restarted.reproving)!.map((r) => r.project)).toEqual(["api"]);
+    expect(after.reproved).toEqual(["api"]);
+    expect((await after.upkeep.pass()).reproving).toBeUndefined();
+    expect(after.reproved).toEqual(["api"]);
   });
 
   test("a project's next re-prove replaces its unproven-laws item instead of adding one, and resolves it once its laws are proven", () => {
     const unproven = { project: "web", head: "abc123", skipped: null, laws: [{ rule: "Tests stay", state: "unproven" as const, detail: "it no longer fails" }] };
-    const first = recordReproofs(db, [unproven], HOUR);
-    const second = recordReproofs(db, [unproven], 2 * HOUR);
-    expect(db.query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual([{ id: second[0]! }]);
+    const first = recordReproof(db, unproven, HOUR);
+    const second = recordReproof(db, unproven, 2 * HOUR);
+    expect(db.query("SELECT id FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").all()).toEqual([{ id: second! }]);
     expect(first).not.toEqual(second);
-    recordReproofs(db, [{ ...unproven, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }], 3 * HOUR);
+    recordReproof(db, { ...unproven, laws: [{ rule: "Tests stay", state: "proven", detail: "fails at 1a2b3c4, passes at HEAD" }] }, 3 * HOUR);
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'laws_unproven' AND state IN ('open','presented')").get()).toEqual({ n: 0 });
   });
 
