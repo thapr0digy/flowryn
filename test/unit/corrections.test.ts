@@ -305,6 +305,29 @@ describe("a repeated class files its scout at once (docs/notes/2026-11-27-phase-
     expect([...listedIds(correctionsPlanOf(db, second[0]!.task)!.preamble).keys()]).toEqual(["m1", "m4"]);
   });
 
+  test("an older correction a new one repeats joins the list even when a lesson learned again files the scout", () => {
+    quietWeek();
+    const [a, b, c, d] = ["web-a-1", "web-b-2", "web-c-3", "web-d-4"].map((t) => seedTask(t));
+    tx(db, () => {
+      createSteer(db, a!, "Merge origin main before you deliver the branch.", NOW + DAY, null, false, false, "leader");
+      createSteer(db, b!, "Drop the section titles on the briefing page.", NOW + 2 * DAY, null, false, false, "leader");
+      createSteer(db, c!, "The briefing page has section titles again: drop them.", NOW + 2 * DAY, null, false, false, "leader");
+    });
+    const first = classPass(db, listProjects(db), NOW + 2 * DAY + 1).filed[0]!;
+    const id = lesson("web", "User: labels are one word.", NOW - 20 * DAY);
+    tx(db, () => {
+      db.query(
+        `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+         VALUES ('r-scout', ?1, 'claude', '2.1.281', 'landed', 'gone', 'corrections', 'investigate', '/tmp/s', 'fm/s', 'abc', 'h', ?2, ?2)`,
+      ).run(first.task, NOW + 2 * DAY + 1);
+      createSteer(db, d!, "Again you did not merge origin main before you delivered the branch.", NOW + 3 * DAY, null, false, false, "human");
+    });
+    lesson("web", "User: labels are one word.", NOW + 3 * DAY);
+    const second = classPass(db, listProjects(db), NOW + 3 * DAY + 1).filed;
+    expect(second.map((f) => f.repeat)).toEqual([[`l${id}`]]);
+    expect([...listedIds(correctionsPlanOf(db, second[0]!.task)!.preamble).keys()].toSorted()).toEqual(["m1", "m4", `l${id}`].toSorted());
+  });
+
   test("a scout's list starts where the project's last scout's ended: corrections it already had are not sent again", () => {
     quietWeek();
     const a = seedTask("web-a-1");

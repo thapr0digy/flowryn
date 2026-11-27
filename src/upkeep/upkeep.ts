@@ -23,7 +23,8 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * between weeks a scout for a repeated class (src/leader/corrections.ts): each
  * one SQLite transaction, no checkout. Last, once a week and not while busy, it
  * starts the re-prove of every project's laws in a throwaway checkout
- * (src/verify/reprove.ts), which runs on past the pass so later passes are not held up.
+ * (src/verify/reprove.ts), which runs on past the pass so later passes are not held up;
+ * they build nothing until it ends, since a build's restart would throw it away.
  * The fourth hook, the conflict nudge, rides the delivery watcher's PR reads
  * (src/reconcile/delivery.ts).
  *
@@ -35,6 +36,8 @@ import { recordSync, syncPrimary } from "./sync.ts";
 
 /** A kick's pass starts after this pause, so a landing's own cleanup settles first. */
 export const KICK_DELAY_MS = 1_000;
+/** Why a build waits: the restart it brings would stop the weekly re-prove under way. */
+export const REPROVING = "laws are being re-proved";
 /** Between weekly corrections passes, a repeated class is looked for at most this often. */
 export const CLASS_CHECK_MS = 60 * 60_000;
 
@@ -252,7 +255,7 @@ export class Upkeep {
       }
     }
     if (config.build_after_merge && !this.deps.busy()) {
-      report.build = await this.deps.builder.pass();
+      report.build = this.reproveRun ? { outcome: "skipped", reason: REPROVING } : await this.deps.builder.pass();
       // A skip is logged when its reason changes, not every pass.
       const skip = report.build.outcome === "skipped" ? report.build.reason : null;
       if (skip && skip !== this.lastSkip) this.deps.log(`upkeep build: skipped (${skip})`);

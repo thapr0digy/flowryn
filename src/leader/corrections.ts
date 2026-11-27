@@ -171,16 +171,18 @@ function coveredUntil(db: Db, project: string): number {
 }
 
 /**
- * A project's next scout list: its corrections since its last scout (at most a week back), plus an
- * older correction of the week that a new one repeats, so a class split by a scout's filing is
- * still seen; and the repeat, or null.
+ * A project's next scout list: its corrections since its last scout (at most a week back), plus
+ * every older correction of the week that a new one repeats (sameClass), so a class split by a
+ * scout's filing is still seen; and the repeat that files a scout early, or null.
  */
 function nextList(db: Db, project: string, now: number): { since: number; all: Correction[]; repeat: string[] | null } {
   const lookback = now - CORRECTIONS_WINDOW_MS;
   const since = Math.max(lookback, coveredUntil(db, project));
   const week = correctionsOf(db, project, lookback, now);
-  const repeat = repeatedClass(week, since);
-  return { since, all: week.filter((c) => c.at >= since || repeat?.includes(c.id)), repeat };
+  const words = new Map(week.map((c) => [c.id, contentWords(c.text)]));
+  const fresh = week.filter((c) => c.at >= since);
+  const repeated = (old: Correction) => fresh.some((c) => sameClass(old, c, words));
+  return { since, all: week.filter((c) => c.at >= since || repeated(c)), repeat: repeatedClass(week, since) };
 }
 
 /** File one corrections scout: a one-phase approved plan whose shared brief is the list. */
@@ -224,17 +226,22 @@ export function contentWords(text: string): Set<string> {
 export function repeatedClass(all: readonly Correction[], since: number): string[] | null {
   const again = all.find((c) => c.again && c.at >= since);
   if (again) return [again.id];
-  const words = all.map((c) => contentWords(c.text));
+  const words = new Map(all.map((c) => [c.id, contentWords(c.text)]));
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       if (all[i]!.at < since && all[j]!.at < since) continue;
-      if (all[i]!.task !== null && all[i]!.task === all[j]!.task) continue;
-      const [a, b] = [words[i]!, words[j]!];
-      const shared = [...a].filter((w) => b.has(w)).length;
-      if (shared >= CLASS_SHARED_MIN && shared >= CLASS_SHARE_MIN * Math.min(a.size, b.size)) return [all[i]!.id, all[j]!.id];
+      if (sameClass(all[i]!, all[j]!, words)) return [all[i]!.id, all[j]!.id];
     }
   }
   return null;
+}
+
+/** Two corrections from different tasks whose content words overlap (CLASS_SHARED_MIN shared, CLASS_SHARE_MIN of the shorter). */
+function sameClass(x: Correction, y: Correction, words: ReadonlyMap<string, Set<string>>): boolean {
+  if (x.id === y.id || (x.task !== null && x.task === y.task)) return false;
+  const [a, b] = [words.get(x.id)!, words.get(y.id)!];
+  const shared = [...a].filter((w) => b.has(w)).length;
+  return shared >= CLASS_SHARED_MIN && shared >= CLASS_SHARE_MIN * Math.min(a.size, b.size);
 }
 
 /** A scout's run has ended once it has delivered its report (landed) or stopped. */

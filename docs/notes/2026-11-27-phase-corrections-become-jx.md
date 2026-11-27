@@ -17,7 +17,7 @@ Deciding the class for real is judgement, so the scout's model groups the list. 
 
 A false match costs one scout run, which may report that the class is already enforced. A missed match waits for the weekly pass. A filing appends one `corrections.class` event (`filed`: project, plan, task, corrections, repeat). A check that files nothing records nothing, so it can run hourly. It never moves the weekly pass, whose state stays the last `corrections.pass` event.
 
-**Each list starts where the last one ended.** A project's weekly or early scout now lists only the corrections made since its last corrections scout was filed (the newest plan by `CORRECTIONS_FILER`), at most a week back. Before this, the weekly list always covered the last 7 days, so a scout could get corrections a previous scout had already grouped. The class check still compares across the whole week: a new correction that repeats an older one from before the last scout files a scout, and that older correction joins the list so the entry can cite both. A pair both from before the last scout never triggers again.
+**Each list starts where the last one ended.** A project's weekly or early scout now lists only the corrections made since its last corrections scout was filed (the newest plan by `CORRECTIONS_FILER`), at most a week back. Before this, the weekly list always covered the last 7 days, so a scout could get corrections a previous scout had already grouped. The class check still compares across the whole week: a new correction that repeats an older one from before the last scout files a scout, and every older correction of the week that a new one repeats (by the same word overlap, from a different task) joins the list so an entry can cite both, whatever filed the scout early (a lesson learned again, or another pair) and in the weekly pass too. A pair both from before the last scout never triggers again.
 
 Dry run, 2026-11-27, on a copy of the live database:
 
@@ -61,7 +61,7 @@ It records them once, as `learnings.swept` (project, plan, law, stale with why, 
 
 ## Re-proving laws weekly
 
-`src/verify/reprove.ts`. Once a week, the upkeep loop runs `reproveProject` for each project that is not removed. It starts after the sync, build and sweep, and not while a restart or cleanup is under way. It runs on past the pass that started it, so later passes (a landed run's kick, the sync, build and sweep) are not held up by its tests, and no second re-prove starts while one runs. The daemon's stop aborts it and waits for it. Its due time is a week after the last `laws.reproved` event, so the first pass after this lands runs it.
+`src/verify/reprove.ts`. Once a week, the upkeep loop runs `reproveProject` for each project that is not removed. It starts after the sync, build and sweep, and not while a restart or cleanup is under way. It runs on past the pass that started it, so later passes (a landed run's kick, the sync and sweep) are not held up by its tests, and no second re-prove starts while one runs. Those passes build nothing while it runs (the build reports skipped, "laws are being re-proved"), since a new build restarts the daemon and the stop would throw the re-prove away; the build waits at most one re-prove. The daemon's stop aborts it and waits for it. Its due time is a week after the last `laws.reproved` event, so the first pass after this lands runs it.
 
 1. It reads the head of `origin/<default branch>` in the project's checkout, then the AGENTS.md table at that head. A project with no origin branch, no AGENTS.md or no table is skipped, with the reason.
 2. It makes a detached checkout of that head at `<state_dir>/reprove/<project>`, under the repository's worktree lock. It links the project's `node_modules` into the checkout, so tests import what verify's do. It removes the checkout when it is done, whatever happened.
@@ -97,7 +97,7 @@ The checkout was removed afterwards.
 - not a class: one task's answer and its relay, and unrelated words, file nothing and record nothing;
 - a lesson learned again is a class by itself, its scout's entry citing it alone is filed, and the weekly pass counts it as two;
 - a scout's list starts where the last one ended;
-- a class split by a scout's filing is still seen, the older correction joining the next list;
+- a class split by a scout's filing is still seen, the older correction joining the next list, also when a lesson learned again files the scout;
 - content words;
 - the `Law:` row: its parsing, the three refusals (no line, no commit, no enforcer), and the row carried in the ship's body;
 - the sweep: filed once per project, of its lessons in use, approved and a scout, never a second time; each lesson in one bucket, with the event recorded once and the item's note; a report with no law still sorts every lesson; the stale section's parsing.
@@ -117,7 +117,7 @@ The checkout was removed afterwards.
 
 - the weekly pass and the class check never run in one pass, and the class check runs at most hourly;
 - the re-prove runs once a week, not while busy, with one event and an item for an unproven law;
-- the re-prove runs on past its pass: a later pass sweeps meanwhile and starts no second one;
+- the re-prove runs on past its pass: a later pass sweeps meanwhile, builds nothing and starts no second one;
 - a project's next re-prove replaces its item, and resolves it once its laws are proven.
 
 `test/integration/corrections.test.ts`: its report's check now carries a `Law:` row.

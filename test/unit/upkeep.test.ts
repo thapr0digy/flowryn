@@ -161,7 +161,7 @@ describe("the upkeep pass", () => {
     expect(l.reproved).toEqual(["web"]);
   });
 
-  test("a re-prove runs on past its pass: later passes sync, build and sweep meanwhile, and start no second re-prove", async () => {
+  test("a re-prove runs on past its pass: later passes sweep meanwhile, build nothing (its restart would stop the re-prove), and start no second re-prove", async () => {
     let finish!: () => void;
     const held = new Promise<void>((resolve) => (finish = resolve));
     let starts = 0;
@@ -172,13 +172,18 @@ describe("the upkeep pass", () => {
     });
     const first = await l.upkeep.pass();
     expect(first.reproving).toBeDefined();
+    expect(l.calls.filter((c) => c === "build")).toHaveLength(1);
     seedRun("a", "cancelled", 0);
     const second = await l.upkeep.pass();
     expect(second.swept.map((s) => s.run)).toEqual(["a"]);
+    expect(second.build).toEqual({ outcome: "skipped", reason: "laws are being re-proved" });
+    expect(l.calls.filter((c) => c === "build")).toHaveLength(1);
     expect(second.reproving).toBeUndefined();
     finish();
     expect(await first.reproving).toEqual([{ project: "web", head: "abc123", skipped: null, laws: [] }]);
     expect(starts).toBe(1);
+    await l.upkeep.pass();
+    expect(l.calls.filter((c) => c === "build")).toHaveLength(2);
   });
 
   test("a project's next re-prove replaces its unproven-laws item instead of adding one, and resolves it once its laws are proven", () => {
