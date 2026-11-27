@@ -59,11 +59,13 @@ describe("tags: never moved or reused, always vMAJOR.MINOR.PATCH", () => {
     "git push --delete origin v1.2.0",
     "git push origin :refs/tags/v1.2.0",
     "git push origin :v1.2.0",
+    "git push origin :1.2",
+    "git push -d origin v1.5.0-rc.1",
     "gh-axi release create v0.5",
   ])("denied: %s", (command) => {
     expect(ruleOf(command, { role: "leader" })).toBe("tags");
   });
-  test.each(["git tag v1.2.0", "git tag -a v1.2.0 -m 'v1.2 release'", "git tag -m 'x' v2.0.0-rc.1", "git tag", "git tag -l", "git tag --list 'v1.*'", "git tag -n5", "git tag --sort=-v:refname", "git tag --contains abc", "git push --delete origin flowryn/old-branch", "gh-axi release create v0.5.1 --notes x", "git push origin v1.2.0"])("allowed: %s", (command) => {
+  test.each(["git tag v1.2.0", "git tag -a v1.2.0 -m 'v1.2 release'", "git tag -m 'x' v2.0.0-rc.1", "git tag", "git tag -l", "git tag --list 'v1.*'", "git tag -n5", "git tag --sort=-v:refname", "git tag --contains abc", "git push --delete origin flowryn/old-branch", "git push --delete origin 123-fix-login", "git push origin :2024-cleanup", "git push -d origin v2-redesign", "git tag -am 'Release' v1.2.0", "git tag -sm Release v1.2.0", "git tag --sort -refname", "git tag --format '%(refname)' -l", "gh-axi release create v0.5.1 --notes x", "git push origin v1.2.0"])("allowed: %s", (command) => {
     expect(ruleOf(command, { role: "leader" })).toBeNull();
   });
   test("isReleaseTag", () => {
@@ -91,7 +93,7 @@ describe("remember-push: a push never carries .remember/", () => {
     expect(at("git push --dry-run origin x; git push -d origin x; git push origin :x")).toEqual([{ dir: "/work/repo", revs: ["HEAD"] }]);
     // A revision that would read as an option never reaches git.
     expect(at("git push origin -- --output=/tmp/x")).toEqual([{ dir: "/work/repo", revs: ["HEAD"] }]);
-    expect(pushedPathsArgv({ dir: "/r", revs: ["HEAD"] })).toEqual(["git", "-C", "/r", "log", "--format=", "--name-only", "--no-renames", "HEAD", "--not", "--remotes", "--"]);
+    expect(pushedPathsArgv({ dir: "/r", revs: ["HEAD"] })).toEqual(["git", "-C", "/r", "log", "--format=", "--name-only", "--no-renames", "--diff-filter=d", "HEAD", "--not", "--remotes", "--"]);
   });
 });
 

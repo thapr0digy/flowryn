@@ -73,15 +73,50 @@ function operands(args: readonly string[]): string[] {
 }
 
 const SEMVER = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-const TAG_LIKE = /^(?:refs\/tags\/|v?\d+[.\d]*)/;
 /** `git tag` flags that list, verify or filter: such a call makes no tag. */
 const TAG_READS = ["-l", "--list", "-n", "--contains", "--no-contains", "--points-at", "--merged", "--no-merged", "-v", "--verify", "--column", "--sort", "--format"];
-/** `git tag` flags that take the next word as their value. */
-const TAG_VALUED = new Set(["-m", "--message", "-F", "--file", "-u", "--local-user", "--cleanup", "--trailer"]);
+/** `git tag` short flags whose value is the rest of their cluster or the next word. */
+const TAG_VALUED_SHORT = "mFu";
+/** `git tag` long flags that take the next word as their value when no `=` gives it. */
+const TAG_VALUED_LONG = new Set(["--message", "--file", "--local-user", "--cleanup", "--trailer", "--sort", "--format"]);
 
 /** A tag's name is vMAJOR.MINOR.PATCH, with an optional pre-release or build. */
 export function isReleaseTag(name: string): boolean {
   return SEMVER.test(name);
+}
+
+/** A ref a push names that is a tag: `refs/tags/…`, a release tag, or a bare version such as `1.2`. */
+function isTagRef(ref: string): boolean {
+  return /^refs\/tags\/./.test(ref) || /^v?\d+(?:\.\d+)*$/.test(ref) || isReleaseTag(ref);
+}
+
+/** `git tag`'s words as git reads them: the flags it sees (short as `-x`, long without `=…`) and its first operand. */
+function readTagArgs(rest: readonly string[]): { flags: Set<string>; name: string | null } {
+  const flags = new Set<string>();
+  let name: string | null = null;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === "--") {
+      name ??= rest[i + 1] ?? null;
+      break;
+    }
+    if (a.startsWith("--")) {
+      const long = a.split("=")[0]!;
+      flags.add(long);
+      if (!a.includes("=") && TAG_VALUED_LONG.has(long)) i++;
+    } else if (a.startsWith("-") && a.length > 1) {
+      for (let j = 1; j < a.length; j++) {
+        const letter = a[j]!;
+        flags.add(`-${letter}`);
+        if (letter === "n") break;
+        if (TAG_VALUED_SHORT.includes(letter)) {
+          if (j === a.length - 1) i++;
+          break;
+        }
+      }
+    } else name ??= a;
+  }
+  return { flags, name };
 }
 
 function rebaseHit(git: { sub: string; rest: string[] }): string | null {
@@ -108,22 +143,16 @@ function tagHit(c: Command, git: { sub: string; rest: string[] } | null): string
   if (!git) return null;
   if (git.sub === "push") {
     const refs = operands(git.rest).slice(1);
-    const deleting = hasFlag(git.rest, "d", "--delete") ? refs.find((r) => TAG_LIKE.test(r)) : undefined;
-    const emptied = refs.find((r) => r.startsWith(":") && TAG_LIKE.test(r.slice(1)));
+    const deleting = hasFlag(git.rest, "d", "--delete") ? refs.find(isTagRef) : undefined;
+    const emptied = refs.find((r) => r.startsWith(":") && isTagRef(r.slice(1)));
     const gone = deleting ?? emptied;
     return gone ? `deleting the tag ${gone.replace(/^:/, "")} on the remote` : null;
   }
   if (git.sub !== "tag") return null;
-  if (hasFlag(git.rest, "f", "--force")) return "`git tag --force` (moving a tag)";
-  if (hasFlag(git.rest, "d", "--delete")) return "`git tag --delete`";
-  if (git.rest.some((a) => TAG_READS.some((r) => a === r || a.startsWith(`${r}=`) || (r === "-n" && /^-n\d*$/.test(a))))) return null;
-  let name: string | null = null;
-  for (let i = 0; i < git.rest.length && name === null; i++) {
-    const a = git.rest[i]!;
-    if (TAG_VALUED.has(a)) i++;
-    else if (a === "--") name = git.rest[i + 1] ?? null;
-    else if (!a.startsWith("-")) name = a;
-  }
+  const { flags, name } = readTagArgs(git.rest);
+  if (flags.has("-f") || flags.has("--force")) return "`git tag --force` (moving a tag)";
+  if (flags.has("-d") || flags.has("--delete")) return "`git tag --delete`";
+  if (TAG_READS.some((r) => flags.has(r))) return null;
   return name !== null && !isReleaseTag(name) ? `the tag ${name}` : null;
 }
 
@@ -224,5 +253,5 @@ export function pushSources(commands: readonly Command[], cwd: string | null, ho
 
 /** The git argv that lists the paths a push's unpushed commits touch (merges add none of their own). */
 export function pushedPathsArgv(push: { dir: string; revs: string[] }): string[] {
-  return ["git", "-C", push.dir, "log", "--format=", "--name-only", "--no-renames", ...push.revs, "--not", "--remotes", "--"];
+  return ["git", "-C", push.dir, "log", "--format=", "--name-only", "--no-renames", "--diff-filter=d", ...push.revs, "--not", "--remotes", "--"];
 }

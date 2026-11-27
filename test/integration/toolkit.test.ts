@@ -174,9 +174,13 @@ describe("global laws (src/policy/global-laws.ts): one deny each through a Claud
     }
     expect(denials(env, { run }).map((d) => d.rule)).toEqual(cases.map((c) => c.rule));
     // What the laws allow is untouched: a merge, a plain push of clean commits, a full tag, another port.
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
     git("rm", "-q", "-r", "--cached", ".remember");
     git("commit", "-q", "-m", "drop notes");
-    expect(await preTool(env, token, "Bash", { command: `cd ${notes} && git push origin HEAD~2:main` })).toBeNull();
+    writeFileSync(join(notes, ".gitignore"), ".remember/\n");
+    git("add", ".gitignore");
+    git("commit", "-q", "-m", "ignore notes");
+    expect(await preTool(env, token, "Bash", { command: `cd ${notes} && git push origin HEAD` })).toBeNull();
     for (const command of ["git merge origin/main", "git rebase --abort", "git tag v1.2.0", "PORT=8082 make dev", "curl -s http://127.0.0.1:8081/health"]) expect(await preTool(env, token, "Bash", { command }), command).toBeNull();
   }, 60_000);
 });
