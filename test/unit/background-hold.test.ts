@@ -6,7 +6,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { BACKGROUND_HOLD_PREFIX } from "../../src/harness/contract-text.ts";
 import { backgroundStartOf, recordBackgroundStart, type ToolHookInput } from "../../src/lifecycle/background-jobs.ts";
 import { HOLD_CAP_MS, HOLD_KIND, HOLD_MAX_REFUSALS, HOLD_RELEASED_KIND, holdTurnEnd } from "../../src/lifecycle/background-hold.ts";
-import { getRun } from "../../src/lifecycle/runs.ts";
+import { getRun, setLiveness } from "../../src/lifecycle/runs.ts";
 import { createSteer, markRung } from "../../src/lifecycle/steers.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 
@@ -49,6 +49,13 @@ function ended(toolUseId: string, job: string): void {
 function stop(after = 10): string | null {
   clock += after;
   return tx(db, () => holdTurnEnd(db, run(), clock));
+}
+
+/** The Stop that let the turn end: the hook sets the worker idle. */
+function turnEnded(): void {
+  clock += 10;
+  tx(db, () => setLiveness(db, run(), "idle", "hook", { signal: "stop" }, clock));
+  tx(db, () => setLiveness(db, run(), "busy", "hook", { signal: "prompt" }, clock));
 }
 
 function payloads(kind: string): Record<string, unknown>[] {
@@ -133,9 +140,28 @@ describe("the background hold", () => {
     for (let i = 0; i < HOLD_MAX_REFUSALS; i++) expect(stop()).not.toBeNull();
     expect(stop()).toBeNull();
     expect(payloads(HOLD_RELEASED_KIND)).toMatchObject([{ tool_use_id: "toolu_1", reason: "refusals", refusals: HOLD_MAX_REFUSALS }]);
-    // A job started after the release holds again, on its own count.
+    // After that turn end, a new job holds again on a fresh count; the released one stays released.
+    turnEnded();
     started(UI_CHECK("toolu_2", "bui2"));
-    expect(stop()).toContain("Bash bui2");
+    const line = stop();
+    expect(line).toContain("Bash bui2");
+    expect(line).not.toContain("Bash bui1");
+  });
+
+  test("staggered jobs are let go after the refusal cap of holds in a row, not one cap per job", () => {
+    started(UI_CHECK("toolu_a", "buiA"));
+    expect(stop()).toContain("Bash buiA");
+    started(UI_CHECK("toolu_b", "buiB"));
+    expect(stop()).toContain("Bash buiB");
+    started(UI_CHECK("toolu_c", "buiC"));
+    expect(stop()).toContain("Bash buiC");
+    expect(stop()).toBeNull();
+    expect(payloads(HOLD_KIND)).toHaveLength(3);
+    expect(payloads(HOLD_RELEASED_KIND)).toMatchObject([
+      { tool_use_id: "toolu_a", reason: "refusals", refusals: 3 },
+      { tool_use_id: "toolu_b", reason: "refusals", refusals: 3 },
+      { tool_use_id: "toolu_c", reason: "refusals", refusals: 3 },
+    ]);
   });
 
   test("an asynchronous agent never holds: its hand-back wakes the worker", () => {

@@ -31,11 +31,11 @@ A job stops holding when:
 |---|---|---|
 | ended | its `<task-notification>` is in the transcript | `run.background_ended`, as before |
 | `cap` | `HOLD_CAP_MS` (60 min) since the job started, the job's deadline: a job whose end was missed holds no longer | `run.background_hold_released` |
-| `refusals` | it has held `HOLD_MAX_REFUSALS` (3) Stops: a worker that keeps ending its turn is let go rather than looped | `run.background_hold_released` |
+| `refusals` | `HOLD_MAX_REFUSALS` (3) holds ran in a row since the worker's last real turn end (its latest `run.liveness` to `idle`, or the worker start), whichever jobs they named: a worker that keeps ending its turn is let go rather than looped, and every job still holding is released | `run.background_hold_released` |
 
 The call's own `timeout` is not a release: whether Claude enforces it on a `run_in_background` call is unverified, and a job that outlives it would otherwise be let go while still running, the failure this rule exists to stop.
 
-Holds are Stop continuations but stay outside `MAX_CONTINUATIONS` (two steer continuations, design section on Stop continuations). The refusal count is 3 so that two steer continuations, three holds and an asyncRewake waiter wake (which Claude counts as a Stop-hook continuation, M0 c14) stay under Claude's cap of 8 consecutive continuations, and no recorded hold is dropped by Claude.
+Holds are Stop continuations but stay outside `MAX_CONTINUATIONS` (two steer continuations, design section on Stop continuations). The refusal count is 3 per chain of Stops, not per job, so that two steer continuations, three holds and an asyncRewake waiter wake (which Claude counts as a Stop-hook continuation, M0 c14) stay under Claude's cap of 8 consecutive continuations even when the worker backgrounds a new job in each held continuation, and no recorded hold is dropped by Claude. The count is read from events, so it holds across a daemon restart.
 
 `run.background_hold_released` {tool_use_id, job, reason, refusals, started_at} is written once per job. A released job is still a rightful wait for the turn-end guard, so no reminder follows, and the `worker_idle` pointer ("has been idle Nm waiting on its own background job (Bash …)") is the backstop, as it was for every case before this change.
 
@@ -46,7 +46,7 @@ SELECT json_extract(payload, '$.reason') AS reason, COUNT(*) FROM events
 
 ## The law
 
-AGENTS.md's Rules and their checks: "A worker cannot end its turn while its own background Bash job runs", enforced by `test/unit/background-hold.test.ts`, which fails at a01bd23 (no hold) and passes at HEAD. The unit cases replay the transcripts' shape (`make ui-check-changed BASE=main` started with `run_in_background`, then a Stop): held and named, two jobs, none, ended, cap, a call timeout that does not release before the cap, refusals, an agent, a relaunch, and the rightful waits that win.
+AGENTS.md's Rules and their checks: "A worker cannot end its turn while its own background Bash job runs", enforced by `test/unit/background-hold.test.ts`, which fails at a01bd23 (no hold) and passes at HEAD. The unit cases replay the transcripts' shape (`make ui-check-changed BASE=main` started with `run_in_background`, then a Stop): held and named, two jobs, none, ended, cap, a call timeout that does not release before the cap, refusals, staggered jobs let go after three holds in a row, an agent, a relaunch, and the rightful waits that win.
 
 ## Tests
 

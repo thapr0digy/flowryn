@@ -18,12 +18,13 @@ import { waitBesidesOwnJobs } from "./turn-end-guard.ts";
  *
  * Bounded, so it never wedges a worker: a job stops holding once its end is
  * recorded, at its deadline (the cap, from its start; the call's `timeout` is
- * not read, as Claude may not enforce it on a background call), or after
- * `HOLD_MAX_REFUSALS` refusals; each release but an end is a
+ * not read, as Claude may not enforce it on a background call), or once
+ * `HOLD_MAX_REFUSALS` holds ran in a row since the worker's last real turn
+ * end, whichever jobs they named; each release but an end is a
  * `run.background_hold_released` event with its reason. Holds are Stop
- * continuations outside `MAX_CONTINUATIONS`, so the refusal count keeps two
- * steer continuations, every hold and an asyncRewake wake under Claude's cap
- * of 8 continuations. Anything else that
+ * continuations outside `MAX_CONTINUATIONS`, so counting them per chain of
+ * Stops keeps two steer continuations, every hold and an asyncRewake wake
+ * under Claude's cap of 8 continuations. Anything else that
  * rightly holds the worker (a question, a gate, a steer saying end the turn,
  * the run past running) wins, and an asynchronous agent never holds: its
  * hand-back wakes the worker.
@@ -35,34 +36,42 @@ export const HOLD_RELEASED_KIND = "run.background_hold_released";
 /** The longest a job holds its worker, from the job's start: a job whose end was missed holds no longer. */
 export const HOLD_CAP_MS = 60 * 60_000;
 /**
- * Refusals per job: a worker that keeps ending its turn is let go, and the
- * worker_idle pointer takes over. 2 steers + 3 holds + a waiter wake stay under
- * Claude's 8 Stop continuations, so no recorded hold is dropped by Claude.
+ * Holds in a row since the worker's last real turn end, across all its jobs: a
+ * worker that keeps ending its turn is let go, and the worker_idle pointer
+ * takes over. 2 steers + 3 holds + a waiter wake stay under Claude's 8 Stop
+ * continuations, so no recorded hold is dropped by Claude.
  */
 export const HOLD_MAX_REFUSALS = 3;
 
 export type ReleaseReason = "cap" | "refusals";
 
-/** Per job of this worker process: how often it held a Stop, and whether it was released. */
-function holdHistory(db: Db, run: RunRow): { refusals: Map<string, number>; released: Set<string> } {
+/**
+ * This worker process's hold history: the jobs already released, and the holds
+ * in a row since its last real turn end (liveness to idle), kept in the
+ * database so the count survives a daemon restart.
+ */
+function holdHistory(db: Db, run: RunRow): { chain: number; released: Set<string> } {
   const since = run.worker_started_at ?? run.started_at;
-  const refusals = new Map<string, number>();
   const released = new Set<string>();
+  let chain = 0;
   const rows = db
-    .query("SELECT kind, payload FROM events WHERE run_id = ?1 AND kind IN (?2, ?3) AND ts >= ?4 ORDER BY seq")
-    .all(run.id, HOLD_KIND, HOLD_RELEASED_KIND, since) as { kind: string; payload: string }[];
+    .query(
+      `SELECT kind, payload FROM events WHERE run_id = ?1 AND ts >= ?2
+        AND (kind IN (?3, ?4) OR (kind = 'run.liveness' AND json_extract(payload, '$.to') = 'idle')) ORDER BY seq`,
+    )
+    .all(run.id, since, HOLD_KIND, HOLD_RELEASED_KIND) as { kind: string; payload: string }[];
   for (const row of rows) {
-    const payload = JSON.parse(row.payload) as { tool_use_ids?: string[]; tool_use_id?: string };
-    if (row.kind === HOLD_RELEASED_KIND && payload.tool_use_id) released.add(payload.tool_use_id);
-    for (const id of payload.tool_use_ids ?? []) refusals.set(id, (refusals.get(id) ?? 0) + 1);
+    if (row.kind === HOLD_KIND) chain += 1;
+    else if (row.kind === HOLD_RELEASED_KIND) released.add((JSON.parse(row.payload) as { tool_use_id: string }).tool_use_id);
+    else chain = 0;
   }
-  return { refusals, released };
+  return { chain, released };
 }
 
 /** Why the job no longer holds, or null while it does. */
-function releaseReason(job: BackgroundJob, refusals: number, now: number): ReleaseReason | null {
+function releaseReason(job: BackgroundJob, chain: number, now: number): ReleaseReason | null {
   if (now >= job.startedAt + HOLD_CAP_MS) return "cap";
-  if (refusals >= HOLD_MAX_REFUSALS) return "refusals";
+  if (chain >= HOLD_MAX_REFUSALS) return "refusals";
   return null;
 }
 
@@ -76,12 +85,11 @@ export function holdTurnEnd(db: Db, run: RunRow, now: number): string | null {
   if (waitBesidesOwnJobs(db, run) !== null) return null;
   const shells = runningBackgroundJobs(db, run, now, "hook").filter((j) => j.tool === "Bash");
   if (shells.length === 0) return null;
-  const { refusals, released } = holdHistory(db, run);
+  const { chain, released } = holdHistory(db, run);
   const holding: BackgroundJob[] = [];
   for (const job of shells) {
     if (released.has(job.toolUseId)) continue;
-    const count = refusals.get(job.toolUseId) ?? 0;
-    const reason = releaseReason(job, count, now);
+    const reason = releaseReason(job, chain, now);
     if (reason === null) {
       holding.push(job);
       continue;
@@ -91,7 +99,7 @@ export function holdTurnEnd(db: Db, run: RunRow, now: number): string | null {
       kind: HOLD_RELEASED_KIND,
       runId: run.id,
       taskId: run.task_id,
-      payload: { tool_use_id: job.toolUseId, job: job.job, reason, refusals: count, started_at: job.startedAt },
+      payload: { tool_use_id: job.toolUseId, job: job.job, reason, refusals: chain, started_at: job.startedAt },
       ts: now,
     });
   }

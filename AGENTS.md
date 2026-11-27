@@ -97,7 +97,7 @@ A correction made twice becomes a check (the correct skill; docs/notes/2026-11-2
 | Leader skill under 6,000 characters | test/unit/prompts-that-keep.test.ts | - |
 | An open q<N>'s item cannot be dismissed | test/unit/dismiss-open-question.test.ts | fails at 7753f46, passes at HEAD |
 | Every law names an enforcer verify runs or confirms; a new law names its commit | test/unit/laws.test.ts | fails at ce93110, passes at HEAD |
-| A worker cannot end its turn while its own background Bash job runs (bounded: end, deadline, cap, refusals) | test/unit/background-hold.test.ts | fails at a01bd23, passes at HEAD |
+| A worker cannot end its turn while its own background Bash job runs (bounded: its end, the 60 min cap, refusals per turn end) | test/unit/background-hold.test.ts | fails at a01bd23, passes at HEAD |
 | Global laws are hook refusals: rebase, force-push, tag moves and non-vX.Y.Z tags, `.remember/` in a push, a worker on port 8081, writing the laws file | test/unit/global-laws.test.ts | fails at 9b2f521, passes at HEAD |
 
 ## Maintaining this file
