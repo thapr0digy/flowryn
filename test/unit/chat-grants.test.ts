@@ -445,8 +445,8 @@ describe("configuration and static layers", () => {
   });
 
   test("the leader may not write Claude's transcripts; its memory notes stay writable", () => {
-    const paths = { backlog: "/b/backlog.md", todos: "/b/todos.md", db: "/s/flowryn.db" };
-    const config = { tasks: { backlog: paths.backlog, todos: paths.todos }, state_dir: "/s" } as never;
+    const paths = { backlog: "/b/backlog.md", todos: "/b/todos.md", db: "/s/flowryn.db", laws: "/h/laws.md" };
+    const config = { tasks: { backlog: paths.backlog, todos: paths.todos }, state_dir: "/s", home: "/h" } as never;
     const leader = leaderStaticLayers(config, "/u/.claude/projects");
     expect(leader.permissionsDeny).toContain("Edit(//u/.claude/projects/**/*.jsonl)");
     expect(staticLayers(paths).permissionsDeny).not.toContain("Edit(//u/.claude/projects/**/*.jsonl)");

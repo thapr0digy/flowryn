@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
+import { globalLawsPath } from "../config/paths.ts";
 import type { Db } from "../db/db.ts";
 import { canonicalPrUrl, parsePrUrl, repoOf } from "../forge/github.ts";
 import { ForgeError, type PrRef, type PullRequest } from "../forge/types.ts";
@@ -19,7 +20,7 @@ import { verifyPolicyId } from "./policy.ts";
 import { findQueued, getRequest, insertRequest, positionOf, queuedRequests, rememberVerifyPath, requeuedFrom, type VerifyRequest } from "./queue.ts";
 import { isVerifying, readTail, type VerifyDeps } from "./runner.ts";
 import { admitRequest, launchVerification, planOf, queueHold, verifyRoot as rootOf, VERIFY_POOL, waitingOn } from "./start.ts";
-import { LAWS_FILE, LAWS_HEADING, notRecorded, parseLaws, ruleKey } from "./laws.ts";
+import { BUILT_IN, LAWS_FILE, LAWS_HEADING, notRecorded, parseLaws, readGlobalLaws, ruleKey, type Law } from "./laws.ts";
 import { getVerification, lastLawsCheck, runningVerifications, type Verification } from "./store.ts";
 import { countsLine } from "./summary.ts";
 
@@ -327,12 +328,13 @@ const batchRetry: VerbSpec = {
 };
 
 /**
- * `flowryn laws <project>` (docs/notes/2026-11-27-phase-the-laws-ib.md): the laws table of the
- * project's checkout, each law with its result in the newest verify whose laws step ran.
+ * `flowryn laws <project>` (docs/notes/2026-11-27-phase-the-laws-ib.md, 2026-11-27-phase-global-laws-iq.md):
+ * the global laws, then the laws table of the project's checkout, each law with its result in the
+ * newest verify whose laws step ran.
  */
 const lawsVerb: VerbSpec = {
   name: "laws",
-  summary: `List a project's laws (the ${LAWS_HEADING.slice(3)} table of its ${LAWS_FILE}) and each one's last result in verify`,
+  summary: `List the global laws and a project's laws (the ${LAWS_HEADING.slice(3)} table of its ${LAWS_FILE}), each with its last result in verify`,
   positionals: [{ name: "project", required: true, help: "project id", complete: "project" }],
   flags: {},
   kind: "read",
@@ -343,20 +345,28 @@ const lawsVerb: VerbSpec = {
     if (!project) throw new FlowrynError("not_found", `no project ${stringArg(args, "project")}`, "flowryn project list");
     const file = join(project.path, LAWS_FILE);
     const table = existsSync(file) ? parseLaws(readFileSync(file, "utf8")) : null;
-    if (table === null) return { data: { project: project.id, file, laws: [], summary: `no laws: ${LAWS_FILE} has no ${LAWS_HEADING} table` }, hints: ["the correct skill adds the table's first row"] };
-    if ("error" in table) throw new FlowrynError("config_invalid", `${file}: ${table.error}`);
+    if (table !== null && "error" in table) throw new FlowrynError("config_invalid", `${file}: ${table.error}`);
+    const global = readGlobalLaws(globalLawsPath(ctx.config.home));
     const last = lastLawsCheck(ctx.db, project.id);
-    const results = new Map(last?.laws.map((l) => [ruleKey(l.rule), l]) ?? []);
-    const laws = table.laws.map((law) => {
-      const result = results.get(ruleKey(law.rule));
-      return { rule: law.rule, enforced_by: law.enforced_by, proven_on: notRecorded(law) ? "not recorded" : law.proven_on, last: result ? result.state : "not checked yet", detail: result?.detail ?? "-" };
-    });
-    const unproven = laws.filter((l) => l.proven_on === "not recorded").length;
+    const key = (rule: string, isGlobal: boolean) => `${isGlobal ? "global" : "project"}:${ruleKey(rule)}`;
+    const results = new Map(last?.laws.map((l) => [key(l.rule, l.global === true), l]) ?? []);
+    const row = (law: Law, scope: "global" | "project", where: string) => {
+      const result = results.get(key(law.rule, scope === "global"));
+      return { scope, where, rule: law.rule, enforced_by: law.enforced_by, proven_on: notRecorded(law) ? "not recorded" : law.proven_on, last: result ? result.state : "not checked yet", detail: result?.detail ?? "-" };
+    };
+    const laws = [...global.laws.map((l) => row(l, "global", l.file === BUILT_IN ? BUILT_IN : `${l.file}:${l.line}`)), ...(table?.laws ?? []).map((l) => row(l, "project", `${LAWS_FILE}:${l.line}`))];
+    const unproven = laws.filter((l) => l.scope === "project" && l.proven_on === "not recorded").length;
     const failed = laws.filter((l) => l.last === "failed").length;
     const checked = last ? `last checked in ${last.verification.id} at ${last.verification.head_sha.slice(0, 8)}` : "not checked by a verify yet";
+    const projectCount = table === null ? `no project laws (${LAWS_FILE} has no ${LAWS_HEADING} table)` : `${table.laws.length} project`;
     return {
-      data: { project: project.id, file, laws, summary: `${laws.length} law${laws.length === 1 ? "" : "s"}, ${failed} failed; ${checked}` },
-      hints: [...(unproven > 0 ? [`${unproven} law${unproven === 1 ? " was" : "s were"} recorded before laws were checked and name${unproven === 1 ? "s" : ""} no commit it fails at`] : []), ...(last ? [`flowryn verify show ${last.verification.id}`] : [])],
+      data: { project: project.id, file, global_file: global.file, laws, summary: `${global.laws.length} global and ${projectCount}; ${failed} failed; ${checked}` },
+      hints: [
+        ...(global.error ? [`${global.error}: every project's verify fails until it is fixed`] : []),
+        ...(table === null ? ["the correct skill adds the table's first row"] : []),
+        ...(unproven > 0 ? [`${unproven} law${unproven === 1 ? " was" : "s were"} recorded before laws were checked and name${unproven === 1 ? "s" : ""} no commit it fails at`] : []),
+        ...(last ? [`flowryn verify show ${last.verification.id}`] : []),
+      ],
     };
   },
 };
