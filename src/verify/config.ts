@@ -30,7 +30,7 @@ export const FAILED_PLACEHOLDER = "{failed}";
 export const REVIEW_STEP = "flowryn:review";
 /**
  * The laws step (src/verify/laws.ts, docs/notes/2026-11-27-phase-the-laws-ib.md): every project's
- * verify ends with it, after the steps that install and build (initialSteps). It checks the AGENTS.md laws table.
+ * verify runs it after the steps that install and build, before a review step (initialSteps). It checks the AGENTS.md laws table.
  */
 export const LAWS_STEP = "flowryn:laws";
 /** The review step's spend cap and deadline when its entry sets none. */

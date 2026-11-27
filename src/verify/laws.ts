@@ -172,6 +172,8 @@ export interface LawsOutcome {
   error: string | null;
   /** The step's log. */
   log: string;
+  /** Whether the signal stopped the check before every law was checked: never a pass. */
+  aborted: boolean;
 }
 
 /** A repository-relative path, resolved inside the worktree (no symlink out); why not, when it is not there. */
@@ -289,9 +291,9 @@ export async function checkLaws(deps: LawsDeps): Promise<LawsOutcome> {
   const table = existsSync(path) ? parseLaws(readFileSync(path, "utf8")) : null;
   if (table === null) {
     const note = `no laws: ${LAWS_FILE} has no ${LAWS_HEADING} table`;
-    return { note, laws: [], error: null, log: `${note}\n` };
+    return { note, laws: [], error: null, log: `${note}\n`, aborted: false };
   }
-  if ("error" in table) return { note: null, laws: [], error: table.error, log: `FAIL ${table.error}\n` };
+  if ("error" in table) return { note: null, laws: [], error: table.error, log: `FAIL ${table.error}\n`, aborted: false };
   const base = table.laws.some(notRecorded) ? await baseRules(deps) : new Set<string>();
   const log: string[] = [];
   const laws: LawResult[] = [];
@@ -302,14 +304,16 @@ export async function checkLaws(deps: LawsDeps): Promise<LawsOutcome> {
     log.push(`${result.state === "passed" ? "ok  " : "FAIL"} ${LAWS_FILE}:${law.line} ${law.rule}`, `     ${result.detail}`);
   }
   const failed = laws.filter((l) => l.state === "failed").length;
-  log.push(`${laws.length - failed} of ${table.laws.length} laws hold${failed > 0 ? `; ${failed} failed` : ""}`);
-  return { note: null, laws, error: null, log: `${log.join("\n")}\n` };
+  const aborted = deps.signal?.aborted === true;
+  log.push(`${laws.length - failed} of ${table.laws.length} laws hold${failed > 0 ? `; ${failed} failed` : ""}${aborted ? "; the check was stopped" : ""}`);
+  return { note: null, laws, error: null, log: `${log.join("\n")}\n`, aborted };
 }
 
 /** One line for the step's detail. */
 export function lawsSummary(outcome: LawsOutcome): string | null {
   if (outcome.note) return outcome.note;
   if (outcome.error) return `laws: ${outcome.error}`;
+  if (outcome.aborted) return `laws: stopped after ${outcome.laws.length} law${outcome.laws.length === 1 ? "" : "s"} checked`;
   const failed = outcome.laws.filter((l) => l.state === "failed");
   if (failed.length === 0) return `${outcome.laws.length} law${outcome.laws.length === 1 ? " holds" : "s hold"}`;
   const first = failed[0]!;

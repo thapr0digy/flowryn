@@ -7,8 +7,8 @@ import { parseConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { grantJobLease } from "../../src/sched/pools.ts";
-import { LAWS_STEP, lightVerifyConfig, verifyConfig } from "../../src/verify/config.ts";
-import { checkLaws, parseEnforcers, parseLaws, provenCommits, type CommandRunner } from "../../src/verify/laws.ts";
+import { LAWS_STEP, lightVerifyConfig, REVIEW_STEP, verifyConfig } from "../../src/verify/config.ts";
+import { checkLaws, lawsSummary, parseEnforcers, parseLaws, provenCommits, type CommandRunner } from "../../src/verify/laws.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { initialSteps, runVerification } from "../../src/verify/runner.ts";
 import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
@@ -157,6 +157,16 @@ describe("checking the laws", () => {
     expect((await lawsOf(r.repo)).laws[0]!.state).toBe("passed");
   });
 
+  test("a check stopped before every law is checked says so and is no pass", async () => {
+    const r = repoWith({ "t/a.test.ts": PASSING_TEST });
+    r.commit({ "AGENTS.md": table([`| One | t/a.test.ts | fails at ${r.base.slice(0, 8)} |`, `| Two | t/a.test.ts | fails at ${r.base.slice(0, 8)} |`]) });
+    const stop = new AbortController();
+    stop.abort();
+    const out = await checkLaws({ git: gitRunner("git", 30_000), run: realRun, worktree: r.repo, base: "main", steps: [], env, deadline: Date.now() + 120_000, now: Date.now, signal: stop.signal });
+    expect(out).toMatchObject({ aborted: true, laws: [], error: null });
+    expect(lawsSummary(out)).toBe("laws: stopped after 0 laws checked");
+  });
+
   test("a failing test enforcer fails its law, with the test's output in the log", async () => {
     const r = repoWith({});
     r.commit({ "AGENTS.md": table([`| Breaks | t/b.test.ts | fails at ${r.base.slice(0, 8)} |`]), "t/b.test.ts": FAILING_TEST });
@@ -227,6 +237,16 @@ describe("the laws step in verify", () => {
       [LAWS_STEP, 1],
     ]);
     expect(lightVerifyConfig(cfg)?.laws).toBeUndefined();
+  });
+
+  test("the laws step runs before a review step, so a broken table fails before the paid review", () => {
+    const cfg = verifyConfig(parseConfig('[projects.web]\nverify = ["make build", { review = true }, { run = "make test", when_changed = ["src/**"] }]\n', "/h"), "web")!;
+    expect(initialSteps(cfg.steps, cfg.when_changed, cfg.laws).map((s) => [s.name, s.group, s.when_changed ?? null])).toEqual([
+      ["make build", 0, null],
+      [LAWS_STEP, 1, null],
+      [REVIEW_STEP, 2, null],
+      ["make test", 3, ["src/**"]],
+    ]);
   });
 
   test("a row pointing at a missing test fails verify; the fixed row passes, and `flowryn laws` shows each law's last result", async () => {

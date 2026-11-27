@@ -138,14 +138,17 @@ export function logName(index: number, step: string): string {
 
 /**
  * One waiting row per step, groups flattened in order; `group` is the entry of `verify` it came from, `when_changed` its globs by flattened place.
- * With `laws`, the laws step (LAWS_STEP) follows as a group of its own.
+ * With `laws`, the laws step (LAWS_STEP) is a group of its own, just before the review step (REVIEW_STEP) or last.
  */
 export function initialSteps(items: readonly VerifyItem[], whenChanged: readonly (readonly string[] | null)[] = [], laws = false): VerifyStep[] {
   const steps: VerifyStep[] = [];
-  const all = laws ? [...items, LAWS_STEP] : items;
+  const review = items.indexOf(REVIEW_STEP);
+  const at = review === -1 ? items.length : review;
+  const all = laws ? [...items.slice(0, at), LAWS_STEP, ...items.slice(at)] : items;
+  let configured = 0;
   all.forEach((item, group) => {
     for (const name of typeof item === "string" ? [item] : item) {
-      const when = whenChanged[steps.length] ?? null;
+      const when = item === LAWS_STEP ? null : (whenChanged[configured++] ?? null);
       steps.push({ name, state: "waiting", exit: null, ms: null, log: logName(steps.length, name), tests: null, detail: null, group, ...(when ? { when_changed: [...when] } : {}) });
     }
   });
@@ -407,8 +410,8 @@ async function lawsStep(deps: VerifyDeps, job: Job, v: Verification, plan: Verif
     } finally {
       closeSync(fd);
     }
-    const failed = outcome.error !== null || outcome.laws.some((l) => l.state === "failed");
-    const timedOut = failed && Date.now() >= runDeadline ? "run" : null;
+    const failed = outcome.aborted || outcome.error !== null || outcome.laws.some((l) => l.state === "failed");
+    const timedOut = failed && !outcome.aborted && Date.now() >= runDeadline ? "run" : null;
     return { exit: failed ? 1 : 0, timedOut, stopped: false, laws: outcome.laws, summary: lawsSummary(outcome) };
   } finally {
     job.calls.delete(controller);
