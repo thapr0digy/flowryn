@@ -291,14 +291,19 @@ export interface ClassPass {
  * when it filed any; nothing recorded otherwise, so it can run often. Never moves the weekly pass.
  */
 export function classPass(db: Db, projects: readonly ProjectRow[], now: number): ClassPass {
+  const pass: ClassPass = { filed: [] };
+  // The reads run outside a write transaction: most hours nothing repeats and nothing is written.
+  const found = projects.flatMap((project) => {
+    if (project.removed_at != null || openScout(db, project.id)) return [];
+    const since = Math.max(now - CORRECTIONS_WINDOW_MS, coveredUntil(db, project.id));
+    const all = correctionsOf(db, project.id, since, now);
+    const repeat = repeatedClass(all);
+    return repeat ? [{ project, since, all, repeat }] : [];
+  });
+  if (found.length === 0) return pass;
   return tx(db, () => {
-    const pass: ClassPass = { filed: [] };
-    for (const project of projects) {
-      if (project.removed_at != null || openScout(db, project.id)) continue;
-      const since = Math.max(now - CORRECTIONS_WINDOW_MS, coveredUntil(db, project.id));
-      const all = correctionsOf(db, project.id, since, now);
-      const repeat = repeatedClass(all);
-      if (!repeat) continue;
+    for (const { project, since, all, repeat } of found) {
+      if (openScout(db, project.id) || coveredUntil(db, project.id) > since) continue;
       pass.filed.push({ project: project.id, ...fileScout(db, project, since, now, all, repeat), corrections: all.length, repeat });
     }
     if (pass.filed.length > 0) appendEvent(db, { source: "daemon", kind: CORRECTIONS_CLASS_KIND, payload: { ...pass }, ts: now });
